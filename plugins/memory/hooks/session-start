@@ -25,7 +25,15 @@ for candidate in "$BIN" "$LEGACY_BIN"; do
 done
 
 # Tier 2: download prebuilt (macos-arm64 only)
-if [ "$(uname -s)/$(uname -m)" = "Darwin/arm64" ] && [ -n "$PLUGIN_VERSION" ]; then
+# Detect hardware arch, not the (possibly Rosetta-translated) process arch:
+# under Rosetta on Apple Silicon, `uname -m` reports x86_64, so consult
+# hw.optional.arm64 to recognize genuine arm64 hardware.
+HW_ARCH="$(uname -m)"
+if [ "$(uname -s)" = "Darwin" ] && [ "$HW_ARCH" = "x86_64" ] \
+        && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
+    HW_ARCH="arm64"
+fi
+if [ "$(uname -s)/${HW_ARCH}" = "Darwin/arm64" ] && [ -n "$PLUGIN_VERSION" ]; then
     url_base="${RELEASE_BASE}/v${PLUGIN_VERSION}"
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
