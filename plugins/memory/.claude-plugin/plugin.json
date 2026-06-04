@@ -1,7 +1,7 @@
 {
   "name": "memory",
   "description": "Operational memory system for Claude Code — auto-injects verified facts as L1 index at session start, with skills for card lifecycle management",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": {
     "name": "Dandi007"
   },
