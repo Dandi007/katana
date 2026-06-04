@@ -16,8 +16,11 @@ if [[ ! "$WIKI_ROOT" =~ ^[a-zA-Z0-9/_.一-鿿~\ \-]+$ ]] || [[ "$WIKI_ROOT" == *
     exit 1
 fi
 
-# 相对路径相对 CLAUDE_PROJECT_DIR 解析；~ 展开
-WIKI_ROOT="${WIKI_ROOT/#\~/$HOME}"
+# 相对路径相对 CLAUDE_PROJECT_DIR 解析；~ 展开（仅 ~ 或 ~/ 前缀，~user 不处理）
+case "$WIKI_ROOT" in
+    "~") WIKI_ROOT="$HOME" ;;
+    "~/"*) WIKI_ROOT="${HOME}${WIKI_ROOT#\~}" ;;
+esac
 case "$WIKI_ROOT" in
     /*) : ;;
     *) WIKI_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}/${WIKI_ROOT}" ;;
