@@ -15,3 +15,7 @@
 5. **主题目录名可能被起成英文**：pre-phase 由模型起名，弱模型可能使用英文目录名（如"Claude Code Multi Agent Orchestration"）。介意时在调用前显式给定中文主题名。
 
 6. **headless `claude -p` 单轮会等 Workflow 完成**（不孤儿化），可作 CI/验收载体。headless 验收时建议加 `--dangerously-skip-permissions`（无人值守场景权限询问会卡住流程）。
+
+7. **Skill 层撞名**：宿主环境可能装有其他同名 `deep-research` skill（如 web 对抗验证 harness）。裸 `/deep-research` 可能路由到别家——**调用必须用全限定名 `/deep-research:deep-research`**。判别走错：报告只到 stdout、无 `DeepThought/<主题>/` 落盘、出现"候选→验证→击杀"话术（2026-06-04 实测）。
+
+8. **Workflow 层撞名**：即使 Skill 路由正确，阶段 B 若用 `Workflow({name: "deep-research"})` 仍会被环境里同名 named workflow 劫持——阶段 A 正常建目录、报告也会生成，但 clue_board / findings L2 / sources / topics 全缺，平台源证据丢失（2026-06-04 实测）。必须 `scriptPath` 指向本 skill base directory 的 workflow.js（SKILL.md 已加 MUST 硬约束）。
