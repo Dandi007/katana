@@ -53,7 +53,7 @@ Work folder 路径可通过以下方式覆盖（优先级从高到低）：
 | context.md | **必须更新**——覆盖写入环境快照（快照，不是日志）|
 | CLAUDE.md / AGENTS.md | **必须生成**——Resume Guide，供新 session 快速恢复上下文 |
 
-每个 artifact 的具体格式和字段定义，遵循 work-folder 约定（SessionStart hook 注入的 rules）。checkpoint 不重复定义这些格式。
+每个 artifact 的具体格式和字段定义，遵循 work-folder 约定（SessionStart hook 注入的 rules）。checkpoint 不重复定义这些格式。文件不存在时主动创建，不要因为"当前还没有"就跳过。
 
 ### Step 3: 输出 Checkpoint 摘要
 
