@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+source "${SCRIPT_DIR}/katana-config.sh"
+
+# wiki_root：显式声明才激活（默认空 → 静默退出，零打扰）
+WIKI_ROOT="$(katana_config_get "wiki_root" "" "KATANA_WIKI_ROOT")"
+[ -z "$WIKI_ROOT" ] && exit 0
+
+# 安全校验：拒绝路径穿越与非法字符
+if [[ ! "$WIKI_ROOT" =~ ^[a-zA-Z0-9/_.一-鿿~\ \-]+$ ]] || [[ "$WIKI_ROOT" == *".."* ]]; then
+    echo "Error: wiki_root contains invalid characters or path traversal: $WIKI_ROOT" >&2
+    exit 1
+fi
+
+# 相对路径相对 CLAUDE_PROJECT_DIR 解析；~ 展开
+WIKI_ROOT="${WIKI_ROOT/#\~/$HOME}"
+case "$WIKI_ROOT" in
+    /*) : ;;
+    *) WIKI_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}/${WIKI_ROOT}" ;;
+esac
+
+# 未初始化（无 WIKI.md）→ 静默退出，init 会创建
+[ -f "${WIKI_ROOT}/WIKI.md" ] || exit 0
+
+content=$(cat "${PLUGIN_ROOT}/skills/using-wiki/SKILL.md" 2>/dev/null || true)
+[ -z "$content" ] && exit 0
+
+# 占位替换：SKILL.md 中的 {{WIKI_ROOT}} → 实际路径
+content="${content//\{\{WIKI_ROOT\}\}/${WIKI_ROOT}}"
+
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"; s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
+    "$(escape_for_json "$content")"
