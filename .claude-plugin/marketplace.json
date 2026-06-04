@@ -32,6 +32,13 @@
       "category": "productivity",
       "source": "./plugins/memory",
       "homepage": "https://github.com/Dandi007/katana"
+    },
+    {
+      "name": "obsidian-md",
+      "description": "Obsidian Markdown writing rules grounded in official docs — wikilinks, headings, frontmatter, embeds, callouts; never invent syntax",
+      "category": "productivity",
+      "source": "./plugins/obsidian-md",
+      "homepage": "https://github.com/Dandi007/katana"
     }
   ]
 }
