@@ -28,7 +28,7 @@
     },
     {
       "name": "memory",
-      "description": "Operational memory system — auto-injects verified facts as L1 index at session start, with skills for card lifecycle management",
+      "description": "Operational memory system for Claude Code — auto-injects verified facts as L1 index at session start, with skills for card lifecycle management",
       "category": "productivity",
       "source": "./plugins/memory",
       "homepage": "https://github.com/Dandi007/katana"

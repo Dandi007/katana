@@ -1,5 +1,5 @@
 ---
-name: memory:remember
+name: remember
 description: 创建或更新 memory card（本地可验证事实），写入文件。
 ---
 

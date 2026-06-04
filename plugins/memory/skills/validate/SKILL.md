@@ -1,5 +1,5 @@
 ---
-name: memory:validate
+name: validate
 description: 核验 memory cards 是否仍与事实(SSoT)一致——结构体检 + 命令核验 + 深度 SSoT 重核，报告矛盾并给修正建议。
 ---
 
