@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Three-tier binary resolution: cached → download prebuilt → cargo build → graceful skip.
+set -euo pipefail
+
+PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BIN_DIR="${PLUGIN_DIR}/bin"
+BIN="${BIN_DIR}/claude-memory-scan"
+LEGACY_BIN="${PLUGIN_DIR}/target/release/claude-memory-scan"
+
+PLUGIN_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "${PLUGIN_DIR}/.claude-plugin/plugin.json" 2>/dev/null | head -1 || true)"
+RELEASE_BASE="${KATANA_MEMORY_RELEASE_BASE:-https://github.com/Dandi007/katana/releases/download}"
+
+run_scan() {
+    SYSTEM_MEMORY="${CLAUDE_MEMORY_SYSTEM_DIR:-${HOME}/.claude/memory}"
+    PROJECT_MEMORY="${CLAUDE_MEMORY_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}/memory}"
+    exec "$1" --system "$SYSTEM_MEMORY" --project "$PROJECT_MEMORY"
+}
+
+# Tier 1: cached binary with matching version
+for candidate in "$BIN" "$LEGACY_BIN"; do
+    if [ -x "$candidate" ] && [ "$("$candidate" --version 2>/dev/null)" = "$PLUGIN_VERSION" ]; then
+        run_scan "$candidate"
+    fi
+done
+
+# Tier 2: download prebuilt (macos-arm64 only)
+if [ "$(uname -s)/$(uname -m)" = "Darwin/arm64" ] && [ -n "$PLUGIN_VERSION" ]; then
+    url_base="${RELEASE_BASE}/v${PLUGIN_VERSION}"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    if curl -fsSL --connect-timeout 5 --max-time 30 \
+            -o "${tmp}/claude-memory-scan" "${url_base}/claude-memory-scan-macos-arm64" \
+       && curl -fsSL --connect-timeout 5 --max-time 10 \
+            -o "${tmp}/checksums.txt" "${url_base}/checksums.txt"; then
+        expected="$(awk '/claude-memory-scan-macos-arm64/{print $1}' "${tmp}/checksums.txt")"
+        actual="$(shasum -a 256 "${tmp}/claude-memory-scan" | awk '{print $1}')"
+        if [ -n "$expected" ] && [ "$expected" = "$actual" ]; then
+            mkdir -p "$BIN_DIR"
+            install -m 0755 "${tmp}/claude-memory-scan" "$BIN"
+            rm -rf "$tmp"
+            run_scan "$BIN"
+        fi
+    fi
+    rm -rf "$tmp"
+fi
+
+# Tier 3: local cargo build (max parallelism)
+if command -v cargo >/dev/null 2>&1; then
+    JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+    if cargo build --release --jobs "$JOBS" \
+            --manifest-path "${PLUGIN_DIR}/Cargo.toml" >&2; then
+        run_scan "$LEGACY_BIN"
+    fi
+fi
+
+# Tier 4: graceful skip — never block the session
+exit 0

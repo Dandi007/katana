@@ -1,0 +1,3 @@
+plugins/memory/target/
+plugins/memory/bin/
+.DS_Store

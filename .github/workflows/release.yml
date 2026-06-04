@@ -1,0 +1,25 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --release --manifest-path plugins/memory/Cargo.toml
+      - name: Test
+        run: cargo test --release --manifest-path plugins/memory/Cargo.toml
+      - name: Package
+        run: |
+          cp plugins/memory/target/release/claude-memory-scan claude-memory-scan-macos-arm64
+          shasum -a 256 claude-memory-scan-macos-arm64 > checksums.txt
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            claude-memory-scan-macos-arm64
+            checksums.txt

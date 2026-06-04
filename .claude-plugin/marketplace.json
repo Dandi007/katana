@@ -1,0 +1,37 @@
+{
+  "name": "katana",
+  "owner": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "metadata": {
+    "description": "A sharp little toolkit of agent plugins — guided workflow, work folders + checkpoints, deep research, persistent memory."
+  },
+  "plugins": [
+    {
+      "name": "guide",
+      "description": "Toolkit map and composition guide (using-katana), injected at session start",
+      "category": "productivity",
+      "source": "./plugins/guide",
+      "homepage": "https://github.com/Dandi007/katana"
+    },
+    {
+      "name": "work-folder",
+      "description": "Work-folder convention (injected at session start) + checkpoint skill for cross-session save/resume",
+      "category": "productivity",
+      "source": "./plugins/work-folder",
+      "homepage": "https://github.com/Dandi007/katana"
+    },
+    {
+      "name": "deep-research",
+      "description": "Deep research over your local knowledge base (DEEP_RESEARCH_KB_DIR) and the web — multi-round Workflow orchestration, judgment-driven stop, cited report",
+      "category": "productivity",
+      "source": "./plugins/deep-research",
+      "homepage": "https://github.com/Dandi007/katana"
+    },
+    {
+      "name": "memory",
+      "description": "Operational memory system — auto-injects verified facts as L1 index at session start, with skills for card lifecycle management",
+      "category": "productivity",
+      "source": "./plugins/memory",
+      "homepage": "https://github.com/Dandi007/katana"
+    }
+  ]
+}
