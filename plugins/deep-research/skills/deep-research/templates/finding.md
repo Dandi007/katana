@@ -16,7 +16,7 @@ timestamp: <ISO8601>
 
 | # | Title | Anchor | Type | Summary | Credibility |
 |---|-------|--------|------|---------|-------------|
-| 1 | <标题> | <URL/路径/file:line> | article/paper/doc/news/blog/forum/code/local | <一句摘要> | high/medium/low/conflicted |
+| 1 | <标题> | <URL/路径/file:line> | article/paper/doc/news/blog/forum/code/local/platform:<源名> | <一句摘要> | high/medium/low/conflicted |
 
 ## L2 · 原文摘录（按需深读层）
 
@@ -32,7 +32,7 @@ timestamp: <ISO8601>
 
 | clue | why | suggested_sources | depth |
 |------|-----|-------------------|-------|
-| <新线索> | <为什么值得追> | web, local_text | <当前 round> |
+| <新线索> | <为什么值得追> | web, local_text, <命名源名> | <当前 round> |
 
 ## Blocked
 
