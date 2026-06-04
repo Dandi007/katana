@@ -8,6 +8,8 @@
 
 ## Mechanical findings
 
+If none: write `— none —` instead of the table.
+
 | type | page | detail |
 |------|------|--------|
 | orphan | `<page>` | no inlink anywhere |
@@ -17,6 +19,8 @@
 | naming | `<page>` | violates zone §2 rule |
 
 ## Semantic findings
+
+Each subsection below — if none, write `— none —`.
 
 ### Contradiction pairs (antagonist rule — name, never smooth)
 
@@ -40,9 +44,19 @@
 
 ## Fix proposals
 
-1. `<finding>` — zone `<z>`, policy `<propose|autonomous>`; fixer: **lint直接修 / 转 ingest / 人工**.
+If none: write `— none —`.
+
+The **fixer** column is bound to the SKILL §4 whitelist. `lint直接修` is allowed
+**only** for the three whitelisted classes: conflict/stale annotations,
+broken-link fixes, and index entry back-fills. Everything else (building a page,
+merging, rewriting content) must be `转 ingest` or `人工` — never `lint直接修`.
+
+1. `<finding>` — zone `<z>`, policy `<propose|autonomous>`; fixer: **lint直接修 (whitelist only) / 转 ingest / 人工**.
 2. ...
 
 ## Skipped & exemptions
 
+If none: write `— none —`.
+
 - `<page/path>` — skipped via §7 exemption `<rule>`.
+- `<zone>` — naming check skipped: §2 declares no machine-checkable naming rule (CJK/free-form).
