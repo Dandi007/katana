@@ -65,6 +65,8 @@ Workflow({
 ```
 （本 skill 指令即 Workflow 的合法 opt-in。）Workflow 会一轮轮 fan-out worker、triage 判断收敛、最后 synthesis 写产物。期间可 `/workflows` 看进度、随时 kill。
 
+**MUST：只能用 `scriptPath` 形式调用本 skill 的 workflow.js。绝不能用 `Workflow({name: "deep-research"})`**——环境中可能存在同名的通用 named workflow（web 对抗验证语义，与本 skill 的 BFS clue 流程完全不同），按 name 调用会被它劫持，产物（clue_board / findings L2 / sources / topics）全部缺失。判别正确执行：`DeepThought/<主题>/findings/r*-c*.md` 必须随轮次产生。
+
 ### C. 对话收尾阶段（主 agent）
 Workflow 返回后：展示 Executive Summary + Key Takeaways；提议
 ①扩充某条线索（重新发起一次 Workflow）②把 topics.md 中的种子提炼为知识库笔记（遵循 KB 自身的笔记约定，如有）。
