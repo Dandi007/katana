@@ -8,7 +8,7 @@ total: <N>
 
 | # | Title | URL | Type | Credibility | Used In |
 |---|-------|-----|------|-------------|---------|
-| 1 | <标题> | <url> | <article/paper/doc/news/blog/forum/code/local> | <high/medium/low/conflicted> | T1, T3 |
+| 1 | <标题> | <url> | <article/paper/doc/news/blog/forum/code/local/platform:<源名>> | <high/medium/low/conflicted> | T1, T3 |
 | 2 | ... | ... | ... | ... | ... |
 
 ## Source Notes
