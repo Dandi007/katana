@@ -9,6 +9,7 @@ installable — take only what you need.
 | `work-folder` | Work-folder convention (injected each session) + `checkpoint` skill for cross-session save/resume |
 | `deep-research` | Workflow-orchestrated research over your knowledge base + web + named platform sources (declared in config); judgment-driven stop; cited report |
 | `memory` | Verified facts as memory cards, auto-injected as an L1 index each session |
+| `obsidian-md` | Obsidian Markdown writing rules grounded in official docs (`obsidian-writing`) — wikilinks, headings, frontmatter, embeds, callouts; every rule cites obsidian.md/help |
 
 ## Install (Claude Code)
 
@@ -18,6 +19,7 @@ installable — take only what you need.
 /plugin install work-folder@katana
 /plugin install deep-research@katana
 /plugin install memory@katana
+/plugin install obsidian-md@katana
 ```
 
 Enable/disable any plugin independently with `/plugin`.
@@ -45,6 +47,7 @@ cp -r /tmp/katana/plugins/work-folder/skills/checkpoint     .agents/skills/
 cp -r /tmp/katana/plugins/deep-research/skills/deep-research .agents/skills/
 cp -r /tmp/katana/plugins/memory/skills/remember            .agents/skills/
 cp -r /tmp/katana/plugins/memory/skills/validate            .agents/skills/
+cp -r /tmp/katana/plugins/obsidian-md/skills/obsidian-writing .agents/skills/
 ```
 
 **User-level install** (skills available across all repos):
@@ -58,6 +61,7 @@ cp -r /tmp/katana/plugins/work-folder/skills/checkpoint     "$HOME/.agents/skill
 cp -r /tmp/katana/plugins/deep-research/skills/deep-research "$HOME/.agents/skills/"
 cp -r /tmp/katana/plugins/memory/skills/remember            "$HOME/.agents/skills/"
 cp -r /tmp/katana/plugins/memory/skills/validate            "$HOME/.agents/skills/"
+cp -r /tmp/katana/plugins/obsidian-md/skills/obsidian-writing "$HOME/.agents/skills/"
 ```
 
 Claude Code-specific features degrade gracefully elsewhere:

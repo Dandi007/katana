@@ -1,0 +1,7 @@
+{
+  "name": "obsidian-md",
+  "description": "Obsidian Markdown writing rules grounded in official docs — wikilinks, headings, frontmatter, embeds, callouts; never invent syntax, always cite obsidian.md/help",
+  "version": "0.1.0",
+  "author": { "name": "Dandi007" },
+  "license": "MIT"
+}
