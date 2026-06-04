@@ -31,6 +31,9 @@ Then run the eight steps in order.
 Read `<wiki_root>/WIKI.md` — it is the contract, not optional.
 - Determine the target **zone** from **§2** (path, purpose, naming).
 - Pull that zone's **write policy**, **page template**, and **naming rule** (§2).
+- A source may span zones: zone is decided per knowledge unit (in §4), not per
+  source. When a unit fits two zones, prefer the more restrictive write policy
+  (propose over autonomous).
 - Internalize **§3 Page Conventions**: required frontmatter, the provenance rule
   (every claim traces to a listed source), and the link rules — including that
   **referenced pages get back-updated with a reciprocal link**.
@@ -46,6 +49,9 @@ Do not assume defaults; the schema overrides this skill where they differ.
   raw immutable and provenance linkable — never ingest straight from a live URL.
 - **Conversation capture:** the relevant turns are the source; note them for §8 provenance.
 
+If the source cannot be read (missing file, failed fetch, empty content), stop and
+report — never propose from partial or imagined content.
+
 ## 3. Orient
 
 Find the candidate set of existing pages this content touches:
@@ -53,6 +59,9 @@ Find the candidate set of existing pages this content touches:
 - `grep` the wiki for the content's key terms **and their synonyms**.
 List each candidate with its relation to the new content: **will update** /
 **will link** / **unrelated**. This is the comparison pass that prevents duplicate pages.
+
+An empty candidate set is valid (brand-new topic): the minimum outlink is the
+index/MOC itself; never fabricate links.
 
 ## 4. Judge units
 
@@ -68,8 +77,24 @@ Assemble the full package before touching disk:
   frontmatter (§3), `sources:` populated per `references/provenance.md`.
 - **Existing-page diffs** — including the **reciprocal back-links** on every page a
   new page references (schema §3 rule — do this, don't skip it).
-- **Link plan** — every new page carries **≥1 outlink** (no islands).
+- **Link plan** — every new page carries **≥1 outlink** (no islands). If the
+  candidate set was empty, the minimum outlink is the index/MOC (or a parent MOC
+  stub built per schema); never fabricate links.
 - **Index / MOC diff** — new pages registered so query can reach them.
+
+### Proposal item format (one block per item)
+
+```
+[CREATE|UPDATE] <page path> (zone: <zone>)
+  why: <one line — which criterion fired>
+  sources: <provenance refs>
+  outlinks: <pages this links to>
+  back-updates: <existing pages getting reciprocal links>
+  diff/draft: <content or diff>
+```
+
+Plus one final item: `[INDEX] <index/MOC diff>`. In non-interactive mode (§7),
+"output the full proposal text" means emit exactly this set of blocks.
 
 ## 6. Resist-table self-check
 
