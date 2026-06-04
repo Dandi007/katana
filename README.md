@@ -7,7 +7,7 @@ installable — take only what you need.
 |--------|--------------|
 | `guide` | Toolkit map + composition guide (`using-katana`), injected at session start |
 | `work-folder` | Work-folder convention (injected each session) + `checkpoint` skill for cross-session save/resume |
-| `deep-research` | Workflow-orchestrated research over your knowledge base + web; judgment-driven stop; cited report |
+| `deep-research` | Workflow-orchestrated research over your knowledge base + web + named platform sources (declared in config); judgment-driven stop; cited report |
 | `memory` | Verified facts as memory cards, auto-injected as an L1 index each session |
 
 ## Install (Claude Code)
@@ -92,6 +92,10 @@ memory_project_dir=memory
 
 # deep-research: override the knowledge base root directory
 deep_research_kb_dir=.
+
+# deep-research: named platform sources (name:entry pairs) and fan-out width
+deep_research_sources=feishu:.agents/skills/lark-cli/SKILL.md,gitlab:.agents/skills/gitlab/SKILL.md,github:gh
+deep_research_max_width=10
 ```
 
 The file uses simple `key=value` format. Lines starting with `#` are comments.
@@ -104,6 +108,8 @@ The file uses simple `key=value` format. Lines starting with `#` are comments.
 | memory | `memory_project_dir` | `CLAUDE_MEMORY_PROJECT_DIR` | `memory` | Project memory directory |
 | memory | — | `CLAUDE_MEMORY_SYSTEM_DIR` | `~/.claude/memory` | System memory directory |
 | deep-research | `deep_research_kb_dir` | `DEEP_RESEARCH_KB_DIR` | current directory | Knowledge base root |
+| deep-research | `deep_research_sources` | `DEEP_RESEARCH_SOURCES` | (none) | Named sources, comma-separated `name:entry` |
+| deep-research | `deep_research_max_width` | `DEEP_RESEARCH_MAX_WIDTH` | 10 | Max clues explored per round (fan-out width) |
 
 **Note:** System-level memory directory only supports environment variables (machine dimension, not project-specific).
 
@@ -118,9 +124,11 @@ For a Chinese knowledge base project:
 work_folder_path=智元工作/工作记录
 memory_project_dir=memory
 deep_research_kb_dir=.
+deep_research_sources=feishu:.agents/skills/lark-cli/SKILL.md,gitlab:.agents/skills/gitlab/SKILL.md,github:gh
+deep_research_max_width=10
 ```
 
-This tells katana to use `智元工作/工作记录/YYYY/MM/DD/<topic>/` for work folders instead of the default `docs/work-records/...`.
+This tells katana to use `智元工作/工作记录/YYYY/MM/DD/<topic>/` for work folders instead of the default `docs/work-records/...`. The `deep_research_sources` / `deep_research_max_width` entries declare named platform sources for deep-research workers and the per-round fan-out width.
 
 ## memory binary resolution
 
