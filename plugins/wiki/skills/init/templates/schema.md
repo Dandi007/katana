@@ -43,7 +43,7 @@ Prefer **update** over **create**. Only spin a new page when all hold:
 ## 6. Query Conventions
 
 - **Citation format:** a wikilink to the page, or a `source` anchor for raw-backed claims.
-- **Back-fill rule:** when answering synthesizes **≥2 pages** into new structure (a comparison table, a connection, a conclusion), propose writing that synthesis back via `/wiki:ingest`.
+- **Back-fill rule:** when answering synthesizes **≥2 pages** into a structure not present in any single page (a comparison table or a conclusion), propose writing that synthesis back via `/wiki:ingest`.
 
 ## 7. Lint Rules
 

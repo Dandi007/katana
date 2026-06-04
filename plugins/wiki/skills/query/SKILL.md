@@ -19,8 +19,10 @@ Walk the five rungs in order. Do not skip a rung.
 ## 1. Orient
 
 - Read `<wiki_root>/WIKI.md` **§6** (citation format, back-fill rule) — it is the contract.
-- Read the index / relevant MOC, then `grep` the wiki for the question's key terms
-  **and their synonym variants** (a term miss is a coverage miss).
+- Read the index / relevant MOC. If no index/MOC exists (common in adopted libraries),
+  proceed directly to grep.
+- Grep key terms, expanding each to 2–4 synonyms or language variants derived from
+  the question and any schema glossary (a term miss is a coverage miss).
 - Produce a **candidate page list** — one line each: `<page path>` + one clause on
   why it's relevant. An empty list is a valid outcome → go to rung 4.
 
@@ -31,7 +33,9 @@ The hard threshold is **5**.
 - Candidates **≤5** → read all of them inline. No skipping ("close enough").
 - Candidates **>5** → dispatch an **Explore subagent**: give it the question and the
   full candidate list, require it to return the relevant passages with their page
-  paths. Read the converged set inline after it reports.
+  paths. Read the converged set inline after it reports. If no subagent tool is
+  available, read up to 10 inline (most relevant first) and state the coverage
+  limitation in the answer.
 
 Never inline-read a >5 set (context waste) and never read only the first few of a
 large set (coverage gap). The threshold decides, not your gut.
@@ -56,14 +60,14 @@ Candidate set empty, or everything read turned out irrelevant:
   knowledge — and if you do, label it clearly as **non-wiki**.
 - **Always** record the gap: run `date "+%Y-%m-%d %H:%M"` first, then append to
   `<wiki_root>/log.md`:
-  `## [YYYY-MM-DD HH:MM] query | gap: <question>`. Then propose adding the topic to
-  the ingest backlog.
+  `## [YYYY-MM-DD HH:MM] query | gap: <question>` (the only write this skill performs).
+  Then propose adding the topic to the ingest backlog.
 
 ## 5. Backfill judgment
 
-Apply schema **§6**: if synthesizing **≥2 pages** produced new structure (a
-comparison table, a new connection, a conclusion), proactively offer to write it
-back via `/wiki:ingest` (conversation-capture shape). Backfill only on the user's
+Apply schema **§6**: if synthesizing **≥2 pages** produced a structure not present
+in any single page (a comparison table or a conclusion), proactively offer to write
+it back via `/wiki:ingest` (conversation-capture shape). Backfill only on the user's
 yes — this skill writes nothing itself (the gap log line excepted).
 
 ## Forbidden
@@ -85,9 +89,13 @@ permits — give a general-knowledge answer **explicitly labeled non-wiki**. Nev
 ```
 <answer, each claim cited or [inference]-labeled>
 
+The two mechanisms share a common origin [inference] — neither page states this
+directly, but both trace to the same foundational constraint.
+
 Sources:
 - [[page-a]]
 - [[page-b]] — anchor / source ref
+- raw/article.md#L12-L40
 ```
 
 ## Boundary
