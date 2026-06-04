@@ -2,7 +2,10 @@
 # Three-tier binary resolution: cached → download prebuilt → cargo build → graceful skip.
 set -euo pipefail
 
-PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/katana-config.sh"
+
+PLUGIN_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BIN_DIR="${PLUGIN_DIR}/bin"
 BIN="${BIN_DIR}/claude-memory-scan"
 LEGACY_BIN="${PLUGIN_DIR}/target/release/claude-memory-scan"
@@ -12,8 +15,9 @@ PLUGIN_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1
 RELEASE_BASE="${KATANA_MEMORY_RELEASE_BASE:-https://github.com/Dandi007/katana/releases/download}"
 
 run_scan() {
+    # Read memory paths from config (env > .katana > default)
     SYSTEM_MEMORY="${CLAUDE_MEMORY_SYSTEM_DIR:-${HOME}/.claude/memory}"
-    PROJECT_MEMORY="${CLAUDE_MEMORY_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}/memory}"
+    PROJECT_MEMORY="$(katana_config_get "memory_project_dir" "${CLAUDE_MEMORY_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}/memory}" "CLAUDE_MEMORY_PROJECT_DIR")"
     exec "$1" --system "$SYSTEM_MEMORY" --project "$PROJECT_MEMORY"
 }
 

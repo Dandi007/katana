@@ -4,8 +4,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Source shared config parser
+source "${SCRIPT_DIR}/katana-config.sh"
+
+# Read work-folder path from config (env > .katana > default)
+WF_PATH="$(katana_config_get "work_folder_path" "docs/work-records" "KATANA_WORK_FOLDER")"
+
+# Read the template and substitute the path
 content=$(cat "${PLUGIN_ROOT}/rules/work-folder.md" 2>/dev/null || true)
 [ -z "$content" ] && exit 0
+
+# Replace the default path in the template with the configured path
+content="${content//docs\/work-records/${WF_PATH}}"
 
 escape_for_json() {
     local s="$1"

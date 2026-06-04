@@ -15,14 +15,16 @@ description: 核验 memory cards 是否仍与事实(SSoT)一致——结构体�
 - 用户说"深度扫描 / 深度核验 / 仔细查一遍" → 启用 **L3 深度模式**
 - 定期维护、怀疑某些 card 过期时
 
-## 存储路径
+## 配置
 
-路径可通过环境变量覆盖：
+Memory 存储路径可通过以下方式覆盖（优先级从高到低）：
 
-| Level | 默认路径 | 环境变量 |
-|-------|---------|---------|
-| Project | `<project-root>/memory/` | `CLAUDE_MEMORY_PROJECT_DIR` |
-| System | `~/.claude/memory/` | `CLAUDE_MEMORY_SYSTEM_DIR` |
+| Level | 默认路径 | 环境变量 | .katana key |
+|-------|---------|---------|-------------|
+| Project | `<project-root>/memory/` | `CLAUDE_MEMORY_PROJECT_DIR` | `memory_project_dir` |
+| System | `~/.claude/memory/` | `CLAUDE_MEMORY_SYSTEM_DIR` | — |
+
+如果项目 `.katana` 文件或环境变量指定了路径，以那个为准，忽略默认值。System 级只走环境变量（机器维度，不进 .katana）。
 
 ## 分层核验（深度由用户输入决定）
 
