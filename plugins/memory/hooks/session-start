@@ -17,7 +17,7 @@ RELEASE_BASE="${KATANA_MEMORY_RELEASE_BASE:-https://github.com/Dandi007/katana/r
 run_scan() {
     # Read memory paths from config (env > .katana > default)
     SYSTEM_MEMORY="${CLAUDE_MEMORY_SYSTEM_DIR:-${HOME}/.claude/memory}"
-    PROJECT_MEMORY="$(katana_config_get "memory_project_dir" "${CLAUDE_MEMORY_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}/memory}" "CLAUDE_MEMORY_PROJECT_DIR")"
+    PROJECT_MEMORY="$(katana_config_get "memory_project_dir" "${CLAUDE_PROJECT_DIR:-$(pwd)}/memory" "CLAUDE_MEMORY_PROJECT_DIR")"
     exec "$1" --system "$SYSTEM_MEMORY" --project "$PROJECT_MEMORY"
 }
 
