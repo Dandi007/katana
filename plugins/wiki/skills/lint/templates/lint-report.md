@@ -46,12 +46,12 @@ Each subsection below — if none, write `— none —`.
 
 If none: write `— none —`.
 
-The **fixer** column is bound to the SKILL §4 whitelist. `lint直接修` is allowed
+The **fixer** column is bound to the SKILL §4 whitelist. `lint-direct` is allowed
 **only** for the three whitelisted classes: conflict/stale annotations,
 broken-link fixes, and index entry back-fills. Everything else (building a page,
-merging, rewriting content) must be `转 ingest` or `人工` — never `lint直接修`.
+merging, rewriting content) must be `hand to ingest` or `manual` — never `lint-direct`.
 
-1. `<finding>` — zone `<z>`, policy `<propose|autonomous>`; fixer: **lint直接修 (whitelist only) / 转 ingest / 人工**.
+1. `<finding>` — zone `<z>`, policy `<propose|autonomous>`; fixer: **lint-direct (whitelist only) / hand to ingest / manual**.
 2. ...
 
 ## Skipped & exemptions

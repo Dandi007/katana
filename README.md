@@ -81,6 +81,9 @@ Claude Code-specific features degrade gracefully elsewhere:
 - `guide` / `work-folder` context injection and `memory` index injection use
   Claude Code SessionStart hooks. On Codex, paste the work-folder convention
   (`plugins/work-folder/rules/work-folder.md`) into your project's AGENTS.md.
+- `wiki` zone-index injection uses a Claude Code SessionStart hook. On other
+  tools, pass the index path via `WIKI_INDEX` env var or set `wiki.index_path`
+  in your `.katana` file.
 - `deep-research` orchestration uses Claude Code's Workflow tool; other tools
   can follow the SKILL.md flow manually.
 
