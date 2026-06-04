@@ -17,7 +17,7 @@ const SAFETY_CAP = 50    // runaway backstop，正常碰不到；命中即 log �
 
 const norm = c => (c.text || '').trim().toLowerCase()
 const coverage = L1 => L1
-  .flatMap(f => (f.findings || []).map(x => `- [${f.clue_id}] ${x.title}`))
+  .flatMap(f => (f.findings || []).map(x => `- [${f.clue_id}][${x.source_type}] ${x.title}`))
   .join('\n')
   .slice(0, 4000)   // 给 triage 的「已覆盖」摘要，控制长度
 

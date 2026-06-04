@@ -1,6 +1,6 @@
 ---
 name: deep-research
-description: 大规模多源探索并生成研究综述。本地知识库（环境变量 DEEP_RESEARCH_KB_DIR 指定根目录，默认当前目录）与 web 双源探索；不用于单概念快速解释。
+description: 大规模多源探索并生成研究综述。本地知识库（环境变量 DEEP_RESEARCH_KB_DIR 指定根目录，默认当前目录）、web 与 config 声明的命名源多源探索；不用于单概念快速解释。
 ---
 
 # 深度研究助手
