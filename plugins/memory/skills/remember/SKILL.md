@@ -9,14 +9,16 @@ description: 创建或更新 memory card（本地可验证事实），写入文�
 
 **硬约束：本 skill 的唯一成功条件是 card 文件被写入磁盘。仅回答用户问题而不写入 card 是失败。**
 
-## 存储路径
+## 配置
 
-路径可通过环境变量覆盖：
+Memory 存储路径可通过以下方式覆盖（优先级从高到低）：
 
-| Level | 默认路径 | 环境变量 |
-|-------|---------|---------|
-| Project | `<project-root>/memory/` | `CLAUDE_MEMORY_PROJECT_DIR` |
-| System | `~/.claude/memory/` | `CLAUDE_MEMORY_SYSTEM_DIR` |
+| Level | 默认路径 | 环境变量 | .katana key |
+|-------|---------|---------|-------------|
+| Project | `<project-root>/memory/` | `CLAUDE_MEMORY_PROJECT_DIR` | `memory_project_dir` |
+| System | `~/.claude/memory/` | `CLAUDE_MEMORY_SYSTEM_DIR` | — |
+
+如果项目 `.katana` 文件或环境变量指定了路径，以那个为准，忽略默认值。System 级只走环境变量（机器维度，不进 .katana）。
 
 ## 流程
 

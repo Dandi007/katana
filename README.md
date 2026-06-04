@@ -70,11 +70,55 @@ Claude Code-specific features degrade gracefully elsewhere:
 
 ## Configuration
 
-| Env var | Plugin | Meaning | Default |
-|---------|--------|---------|---------|
-| `DEEP_RESEARCH_KB_DIR` | deep-research | Knowledge-base root | current directory |
-| `CLAUDE_MEMORY_SYSTEM_DIR` | memory | System memory dir | `~/.claude/memory` |
-| `CLAUDE_MEMORY_PROJECT_DIR` | memory | Project memory dir | `$CLAUDE_PROJECT_DIR/memory` (falls back to `./memory`) |
+Katana plugins support three-tier configuration (highest priority first):
+
+1. **Environment variables** — machine-level overrides
+2. **`.katana` file** — project-level configuration (committed to repo)
+3. **Default values** — sensible defaults for most projects
+
+### `.katana` file
+
+Create a `.katana` file in your project root to customize plugin behavior:
+
+```bash
+# Katana plugin configuration
+# Priority: environment variables > this file > plugin defaults
+
+# work-folder: override the default work folder path
+work_folder_path=智元工作/工作记录
+
+# memory: override the project memory directory
+memory_project_dir=memory
+
+# deep-research: override the knowledge base root directory
+deep_research_kb_dir=.
+```
+
+The file uses simple `key=value` format. Lines starting with `#` are comments.
+
+### Configuration options
+
+| Plugin | Key | Env var | Default | Description |
+|--------|-----|---------|---------|-------------|
+| work-folder | `work_folder_path` | `KATANA_WORK_FOLDER` | `docs/work-records` | Work folder base path |
+| memory | `memory_project_dir` | `CLAUDE_MEMORY_PROJECT_DIR` | `memory` | Project memory directory |
+| memory | — | `CLAUDE_MEMORY_SYSTEM_DIR` | `~/.claude/memory` | System memory directory |
+| deep-research | `deep_research_kb_dir` | `DEEP_RESEARCH_KB_DIR` | current directory | Knowledge base root |
+
+**Note:** System-level memory directory only supports environment variables (machine dimension, not project-specific).
+
+### Example
+
+For a Chinese knowledge base project:
+
+```bash
+# .katana
+work_folder_path=智元工作/工作记录
+memory_project_dir=memory
+deep_research_kb_dir=.
+```
+
+This tells katana to use `智元工作/工作记录/YYYY/MM/DD/<topic>/` for work folders instead of the default `docs/work-records/...`.
 
 ## memory binary resolution
 

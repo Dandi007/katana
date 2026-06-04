@@ -10,6 +10,18 @@ description: 在 context 满或需要切换 session 前，把当前工作状态�
 - Update
 - Resume：新 session 开始时，从 work folder 加载状态、验证环境、建立上下文
 
+## 配置
+
+Work folder 路径可通过以下方式覆盖（优先级从高到低）：
+
+| 优先级 | 配置方式 | 示例 |
+|--------|---------|------|
+| 1 | 环境变量 `KATANA_WORK_FOLDER` | `export KATANA_WORK_FOLDER=智元工作/工作记录` |
+| 2 | 项目根目录 `.katana` 文件 | `work_folder_path=智元工作/工作记录` |
+| 3 | 默认值 | `docs/work-records` |
+
+如果项目 `.katana` 文件或环境变量指定了路径，以那个为准，忽略默认值。
+
 ## 核心原则
 
 1. **对齐 work-folder 约定**——通用 artifact 语义由 work-folder 约定定义（katana work-folder plugin 在 session 开始注入；或项目自身声明的 work folder 约定）；checkpoint 只负责 save/resume，保留/加载现状
