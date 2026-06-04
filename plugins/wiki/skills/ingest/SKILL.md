@@ -85,7 +85,8 @@ proceeding. This step is mandatory, not advisory.
 - **Non-interactive (`claude -p`):** AskUserQuestion is unavailable. In a propose
   zone, write **only** if the prompt explicitly pre-authorizes it (e.g. "本次提案视为已批准"
   / "proposals pre-approved"). Otherwise do not write any page — output the full
-  proposal text and append one log line `ingest-proposed`, then stop.
+  proposal text and append one log line
+  `## [YYYY-MM-DD HH:MM] ingest | proposed (not applied): <source>`, then stop.
 
 ## 8. Write + record
 

@@ -37,6 +37,7 @@ Prefer **update** over **create**. Only spin a new page when all hold:
 ## 5. Ingest Specifics
 
 - **Source types:** {{SOURCE_TYPES}} (e.g. chat, URL, pasted text, file).
+- **Raw layer path:** {{RAW_PATH|default: raw/}} — immutable; URL sources are archived here before citing.
 - Raw sources are immutable and archived; ingest never edits them in place.
 
 ## 6. Query Conventions
