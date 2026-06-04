@@ -10,6 +10,7 @@ installable — take only what you need.
 | `deep-research` | Workflow-orchestrated research over your knowledge base + web + named platform sources (declared in config); judgment-driven stop; cited report |
 | `memory` | Verified facts as memory cards, auto-injected as an L1 index each session |
 | `obsidian-md` | Obsidian Markdown writing rules grounded in official docs (`obsidian-writing`) — wikilinks, headings, frontmatter, embeds, callouts; every rule cites obsidian.md/help |
+| `wiki` | LLM-maintained wiki engine — schema-driven zones, provenance-enforced ingest, deterministic query ladder, adversarial lint (Karpathy pattern: compile not re-derive; governance: immutable raw, provenance, adversarial lint, human gate) |
 
 ## Install (Claude Code)
 
@@ -20,6 +21,7 @@ installable — take only what you need.
 /plugin install deep-research@katana
 /plugin install memory@katana
 /plugin install obsidian-md@katana
+/plugin install wiki@katana
 ```
 
 Enable/disable any plugin independently with `/plugin`.
@@ -48,6 +50,11 @@ cp -r /tmp/katana/plugins/deep-research/skills/deep-research .agents/skills/
 cp -r /tmp/katana/plugins/memory/skills/remember            .agents/skills/
 cp -r /tmp/katana/plugins/memory/skills/validate            .agents/skills/
 cp -r /tmp/katana/plugins/obsidian-md/skills/obsidian-writing .agents/skills/
+cp -r /tmp/katana/plugins/wiki/skills/using-wiki            .agents/skills/
+cp -r /tmp/katana/plugins/wiki/skills/init                  .agents/skills/
+cp -r /tmp/katana/plugins/wiki/skills/ingest                .agents/skills/
+cp -r /tmp/katana/plugins/wiki/skills/query                 .agents/skills/
+cp -r /tmp/katana/plugins/wiki/skills/lint                  .agents/skills/
 ```
 
 **User-level install** (skills available across all repos):
@@ -62,6 +69,11 @@ cp -r /tmp/katana/plugins/deep-research/skills/deep-research "$HOME/.agents/skil
 cp -r /tmp/katana/plugins/memory/skills/remember            "$HOME/.agents/skills/"
 cp -r /tmp/katana/plugins/memory/skills/validate            "$HOME/.agents/skills/"
 cp -r /tmp/katana/plugins/obsidian-md/skills/obsidian-writing "$HOME/.agents/skills/"
+cp -r /tmp/katana/plugins/wiki/skills/using-wiki            "$HOME/.agents/skills/"
+cp -r /tmp/katana/plugins/wiki/skills/init                  "$HOME/.agents/skills/"
+cp -r /tmp/katana/plugins/wiki/skills/ingest                "$HOME/.agents/skills/"
+cp -r /tmp/katana/plugins/wiki/skills/query                 "$HOME/.agents/skills/"
+cp -r /tmp/katana/plugins/wiki/skills/lint                  "$HOME/.agents/skills/"
 ```
 
 Claude Code-specific features degrade gracefully elsewhere:
@@ -114,6 +126,7 @@ The file uses simple `key=value` format. Lines starting with `#` are comments.
 | deep-research | `deep_research_kb_dir` | `DEEP_RESEARCH_KB_DIR` | current directory | Knowledge base root |
 | deep-research | `deep_research_sources` | `DEEP_RESEARCH_SOURCES` | (none) | Named sources, comma-separated `name:entry` |
 | deep-research | `deep_research_max_width` | `DEEP_RESEARCH_MAX_WIDTH` | 10 | Max clues explored per round (fan-out width) |
+| wiki | `wiki_root` | `KATANA_WIKI_ROOT` | `wiki` | Wiki knowledge base root directory |
 
 **Note:** System-level memory directory only supports environment variables (machine dimension, not project-specific).
 
