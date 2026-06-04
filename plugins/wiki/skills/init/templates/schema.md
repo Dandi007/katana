@@ -8,7 +8,8 @@ any `/wiki:*` operation.
 
 - **Purpose:** {{PURPOSE}}
 - **wiki_root:** {{WIKI_ROOT}}
-- **Zone map:** {{ZONE_MAP}}
+
+Zones are defined in §2.
 
 ## 2. Zones
 
@@ -46,7 +47,7 @@ Prefer **update** over **create**. Only spin a new page when all hold:
 ## 7. Lint Rules
 
 - **Antagonist rule:** Contradictions must be named as disagreements and cross-annotated on both pages — never smoothed into consensus.
-- **Stale threshold:** {{STALE_THRESHOLD}} (e.g. flag pages untouched > 180 days whose sources have moved).
+- **Stale threshold:** {{STALE_THRESHOLD|default: 180 days since last update}} — flag pages untouched beyond this whose sources have moved.
 - **Exemptions:** {{LINT_EXEMPTIONS}} (paths/pages excused from a given rule).
 
 ## 8. Retrieval Augmentation
