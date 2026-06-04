@@ -1,0 +1,56 @@
+# WIKI Schema
+
+The schema is the product. Every library-level difference — zones, write policy,
+page templates, link rules — lives here, not in plugin skills. Read this before
+any `/wiki:*` operation.
+
+## 1. Overview
+
+- **Purpose:** {{PURPOSE}}
+- **wiki_root:** {{WIKI_ROOT}}
+- **Zone map:** {{ZONE_MAP}}
+
+## 2. Zones
+
+| Zone | Path | Purpose | Write policy | Page template | Naming |
+|------|------|---------|--------------|---------------|--------|
+| notes | `notes/` | thinking | propose | atomic card (one idea per page) | concrete-noun, kebab-case |
+
+- **Purpose** ∈ `thinking` (exploratory, your reasoning) \| `executive` (durable, cited fact).
+- **Write policy** ∈ `propose` (human gate: ingest drafts, human approves) \| `autonomous` (ingest writes directly). Default `propose`.
+
+## 3. Page Conventions
+
+- **Required frontmatter:** `created`, `sources`, `tags`.
+- **Provenance:** every claim traces back to a `source` listed in frontmatter — no orphan assertions. `thinking` pages may hold un-sourced reasoning if labeled as such.
+- **Link rules:** every page carries **≥1 outlink** (no islands). On ingest, pages this page references are **back-updated** with a reciprocal link.
+
+## 4. Create-vs-Update Criteria
+
+Prefer **update** over **create**. Only spin a new page when all hold:
+
+1. **≥3 sentences** — less than that, it's a paragraph in an existing page.
+2. **Concrete-noun test** — if you can't name it with one concrete noun, it isn't a page.
+3. **Anti-cramming** — if a page would hold two distinct concepts, split instead of cram.
+
+## 5. Ingest Specifics
+
+- **Source types:** {{SOURCE_TYPES}} (e.g. chat, URL, pasted text, file).
+- Raw sources are immutable and archived; ingest never edits them in place.
+
+## 6. Query Conventions
+
+- **Citation format:** a wikilink to the page, or a `source` anchor for raw-backed claims.
+- **Back-fill rule:** when answering synthesizes **≥2 pages** into new structure (a comparison table, a connection, a conclusion), propose writing that synthesis back via `/wiki:ingest`.
+
+## 7. Lint Rules
+
+- **Antagonist rule:** Contradictions must be named as disagreements and cross-annotated on both pages — never smoothed into consensus.
+- **Stale threshold:** {{STALE_THRESHOLD}} (e.g. flag pages untouched > 180 days whose sources have moved).
+- **Exemptions:** {{LINT_EXEMPTIONS}} (paths/pages excused from a given rule).
+
+## 8. Retrieval Augmentation
+
+- **embedding:** none
+
+(Optional: set an OpenAI-compatible `/v1/embeddings` endpoint to enable semantic retrieval in `/wiki:query`.)
