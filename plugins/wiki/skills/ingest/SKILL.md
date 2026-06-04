@@ -76,7 +76,10 @@ Assemble the full package before touching disk:
 - **New-page drafts** — each following the zone's page template + required
   frontmatter (§3), `sources:` populated per `references/provenance.md`.
 - **Existing-page diffs** — including the **reciprocal back-links** on every page a
-  new page references (schema §3 rule — do this, don't skip it).
+  new page references (schema §3 rule — do this, don't skip it). When new content
+  disagrees with an existing page, annotate both sides with the same `> [!conflict]`
+  callout format defined by `/wiki:lint` (named disagreement + wikilink to the other
+  page) — prose-only annotations drift and are invisible to mechanical checks.
 - **Link plan** — every new page carries **≥1 outlink** (no islands). If the
   candidate set was empty, the minimum outlink is the index/MOC (or a parent MOC
   stub built per schema); never fabricate links.
@@ -110,12 +113,17 @@ proceeding. This step is mandatory, not advisory.
 - **Non-interactive (`claude -p`):** AskUserQuestion is unavailable. In a propose
   zone, write **only** if the prompt explicitly pre-authorizes it (e.g. "本次提案视为已批准"
   / "proposals pre-approved"). Otherwise do not write any page — output the full
-  proposal text and append one log line
-  `## [YYYY-MM-DD HH:MM] ingest | proposed (not applied): <source>`, then stop.
+  proposal text and you MUST still append the log line
+  `## [YYYY-MM-DD HH:MM] ingest | proposed (not applied): <source>` to `log.md`
+  — skipping this journaling is a pipeline violation, then stop.
 
 ## 8. Write + record
 
 - Write all approved files (new pages, updated pages, index/MOC).
+- **Inbox archival:** after a successful write, move the processed inbox file into
+  the raw layer (`git mv inbox/<file> <raw path>/`) so inbox holds only pending
+  sources and provenance points at the immutable raw copy. In propose zones without
+  authorization, leave inbox untouched.
 - Append to `<wiki_root>/log.md`:
   `## [YYYY-MM-DD HH:MM] ingest | <source>` followed by body lines listing every
   **created** and **updated** page.
