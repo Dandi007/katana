@@ -107,6 +107,8 @@ The file uses simple `key=value` format. Lines starting with `#` are comments.
 
 **Note:** System-level memory directory only supports environment variables (machine dimension, not project-specific).
 
+**Version control:** Commit `.katana` to share project config with your team. Use environment variables for machine-specific overrides (paths, credentials) that shouldn't be in the repo.
+
 ### Example
 
 For a Chinese knowledge base project:

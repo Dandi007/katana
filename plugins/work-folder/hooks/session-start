@@ -10,9 +10,10 @@ source "${SCRIPT_DIR}/katana-config.sh"
 # Read work-folder path from config (env > .katana > default)
 WF_PATH="$(katana_config_get "work_folder_path" "docs/work-records" "KATANA_WORK_FOLDER")"
 
-# Sanitize: only allow safe path characters (alphanumeric, slash, dash, underscore, dot, CJK)
-if [[ ! "$WF_PATH" =~ ^[a-zA-Z0-9/_.一-鿿\-]+$ ]]; then
-    echo "Error: work_folder_path contains invalid characters: $WF_PATH" >&2
+# Sanitize: only allow safe path characters (alphanumeric, slash, dash, underscore, dot, space, CJK)
+# Reject path traversal (..) to prevent writing outside project root
+if [[ ! "$WF_PATH" =~ ^[a-zA-Z0-9/_.一-鿿\ \-]+$ ]] || [[ "$WF_PATH" == *".."* ]]; then
+    echo "Error: work_folder_path contains invalid characters or path traversal: $WF_PATH" >&2
     exit 1
 fi
 
