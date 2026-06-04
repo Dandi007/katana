@@ -39,6 +39,13 @@
       "category": "productivity",
       "source": "./plugins/obsidian-md",
       "homepage": "https://github.com/Dandi007/katana"
+    },
+    {
+      "name": "wiki",
+      "description": "LLM-maintained wiki engine — schema-driven zones, provenance-enforced ingest, deterministic query ladder, adversarial lint",
+      "category": "productivity",
+      "source": "./plugins/wiki",
+      "homepage": "https://github.com/Dandi007/katana"
     }
   ]
 }

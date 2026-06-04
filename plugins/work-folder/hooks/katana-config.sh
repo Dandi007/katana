@@ -8,6 +8,7 @@
 # NOTE: Keep copies in sync across plugins:
 #   plugins/work-folder/hooks/katana-config.sh
 #   plugins/memory/hooks/katana-config.sh
+#   plugins/wiki/hooks/katana-config.sh
 
 # Parse .katana file: skip comments and empty lines, extract key=value
 katana_config_get() {

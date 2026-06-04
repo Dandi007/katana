@@ -1,0 +1,62 @@
+# Lint Report — {{YYYY-MM-DD HH:MM}}
+
+## Scope
+
+- **Range:** {{full | zone:<name> | incremental}}
+- **Run at:** {{YYYY-MM-DD HH:MM}}
+- **Baseline:** {{last lint timestamp, or "first run — full"}}
+
+## Mechanical findings
+
+If none: write `— none —` instead of the table.
+
+| type | page | detail |
+|------|------|--------|
+| orphan | `<page>` | no inlink anywhere |
+| broken-link | `<page>` | `[[<target>]]` has no file |
+| missing-frontmatter | `<page>` | missing `created` |
+| index-drift | `<page>` | in index, file absent |
+| naming | `<page>` | violates zone §2 rule |
+
+## Semantic findings
+
+Each subsection below — if none, write `— none —`.
+
+### Contradiction pairs (antagonist rule — name, never smooth)
+
+- **[[page-a]] ⟷ [[page-b]]** — disagreement: `<one sentence naming exactly what differs>`. → `> [!conflict]` callout proposed on both pages.
+
+### Stale claims
+
+- **[[page]]** — `<claim>` superseded by `<newer source>`; annotate stale, keep original.
+
+### Missing pages (create candidates)
+
+- `<concept>` — referenced by [[a]], [[b]], [[c]] (≥3), no page. → /wiki:ingest.
+
+### Provenance gaps
+
+- **[[page]]** — claim `<…>` has no backing source.
+
+### Merge candidates
+
+- **[[page-a]] + [[page-b]]** — `<why they overlap>`. Source: `<ingest log line | lint-found>`. → /wiki:ingest.
+
+## Fix proposals
+
+If none: write `— none —`.
+
+The **fixer** column is bound to the SKILL §4 whitelist. `lint-direct` is allowed
+**only** for the three whitelisted classes: conflict/stale annotations,
+broken-link fixes, and index entry back-fills. Everything else (building a page,
+merging, rewriting content) must be `hand to ingest` or `manual` — never `lint-direct`.
+
+1. `<finding>` — zone `<z>`, policy `<propose|autonomous>`; fixer: **lint-direct (whitelist only) / hand to ingest / manual**.
+2. ...
+
+## Skipped & exemptions
+
+If none: write `— none —`.
+
+- `<page/path>` — skipped via §7 exemption `<rule>`.
+- `<zone>` — naming check skipped: §2 declares no machine-checkable naming rule (CJK/free-form).
