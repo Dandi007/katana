@@ -4,13 +4,14 @@ export const meta = {
   phases: [{ title: 'Explore' }, { title: 'Triage' }, { title: 'Synthesize' }],
 }
 
-// args = { topic, topicDir, skillDir, initialClues: [{ id, text, local, suggested_sources, depth }] }
+// args = { topic, topicDir, skillDir, sources, maxWidth, initialClues: [{ id, text, local, suggested_sources, depth }] }
 // ⚠️ spike 实测：args 到脚本是 JSON 字符串，必须 parse（防御式兼容对象/字符串）
 const A = typeof args === 'string' ? JSON.parse(args) : args
 const { topic, topicDir, initialClues, skillDir } = A
+const SOURCES = (A.sources && typeof A.sources === 'object' && !Array.isArray(A.sources)) ? A.sources : {}  // 命名源 { name: entry }；entry=入口文档路径(相对KB根)或裸命令名
 const TPL = skillDir ? `${skillDir}/templates` : 'templates'  // 模板目录：未传 skillDir 时退回 CWD 相对路径
 
-const MAX_WIDTH = 6      // 每轮 fan-out 宽度上限（形状护栏，不决定停不停）
+const MAX_WIDTH = (Number.isInteger(A.maxWidth) && A.maxWidth > 0) ? A.maxWidth : 10  // 每轮 fan-out 宽度上限（deep_research_max_width 可配；形状护栏，不决定停不停）
 const MAX_DEPTH = 3      // 单条线索最大深度（形状护栏）
 const SAFETY_CAP = 50    // runaway backstop，正常碰不到；命中即 log 告警不静默截断
 
@@ -71,18 +72,28 @@ const TRIAGE_SCHEMA = {
   },
 }
 
+function sourceHints() {
+  const names = Object.keys(SOURCES)
+  if (!names.length) return ''
+  return `
+- 命名源（KB config 声明的平台源）：${names.map(n => `${n} → ${SOURCES[n]}`).join(' ； ')}
+  · entry 是文档路径 → 先 Read 它（相对当前工作目录，即 KB 根；同目录如有 errors.md 一并先读避坑），按其指引做只读检索；entry 是裸命令名 → 直接用该 CLI 的只读子命令。
+  · 入口不可用 / 无凭证 / 0 命中 → 用 blocked 字段如实上报（source+reason），不得编造。
+  · 平台源 finding 的 anchor 用消息/文档/issue/MR 的 URL 或唯一标识；source_type 填 "platform:<源名>"。`
+}
+
 function workerPrompt(clue, round) {
   return `TASK: 针对线索 "${clue.text}" 收集证据。建议起点 source: ${(clue.suggested_sources || []).join(', ') || '自行判断'}。
 
 MUST DO:
-- 本地线索：优先遵循知识库 CLAUDE.md/AGENTS.md 声明的检索约定；无约定时用 Grep/Glob/Read 直接检索。web 线索：用 WebSearch/WebFetch。
+- 本地线索：优先遵循知识库 CLAUDE.md/AGENTS.md 声明的检索约定；无约定时用 Grep/Glob/Read 直接检索。web 线索：用 WebSearch/WebFetch。${sourceHints()}
 - 把【L2 原文】写入文件 "${topicDir}/findings/r${round}-c${clue.id}.md"，严格按 "${TPL}/finding.md" 模板：
   · L2 只摘与线索相关的段落，逐字保留，每段必带 anchor（URL/路径/file:line）；不相关的不塞、不整页 dump。
 - 返回结构化结果（FINDING_SCHEMA）：clue_id="${clue.id}"；findings（每条含 anchor+summary+credibility）；
   signals 三个布尔据事实诚实上报；new_clues（3-8 条，depth=${round}）；l2_file 填上面的路径。
 
 MUST NOT:
-- 不写结论、不跨源综合；不修改 findings/ 以外任何文件；不做任何 mutation（不发消息/不开 issue/不 push）。`
+- 不写结论、不跨源综合；不修改 findings/ 以外任何文件；不做任何 mutation（不发消息/不回复群聊/不开或评论 issue·MR/不 push——平台源一律只读）。`
 }
 
 function triagePrompt(fresh, round) {
