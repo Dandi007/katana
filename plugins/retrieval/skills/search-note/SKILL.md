@@ -41,6 +41,7 @@ description: 本地知识库检索源（只读）。原子笔记/Index/工作记
 ```bash
 # 语义检索（脚本内部 --mode auto：索引可用走 vector，不可用自动降级 keyword）
 PY="$(katana_config_get search_note_python "python3" "")"
+PY="${PY/#\~/$HOME}"   # .katana 里的 ~ 不会被自动展开，须手动展（同 twitter profile / wiki hook 套路）
 "$PY" "${CLAUDE_PLUGIN_ROOT}/skills/search-note/scripts/query_lancedb.py" "查询词" --mode auto --top-k 10
 ```
 
