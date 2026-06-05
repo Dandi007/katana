@@ -34,12 +34,14 @@ and chains fallbacks so you always get an answer.
 非密配置写项目根目录 `.katana` 文件（键值格式，行注释用 `#`）：
 
 ```ini
-# 本地知识库路径（search-note 适配器用）
-RETRIEVAL_KB_DIR=~/Documents/Zettelkasten
+# 启用的源（逗号分隔）
+retrieval_sources=web,reddit,twitter,official-docs,github,gitlab,linear,feishu,search-note,code,agent-session-search
 
-# 默认搜索来源（逗号分隔，留空=全部）
-RETRIEVAL_DEFAULT_SOURCES=web,search-note
+# 本地知识库根（search-note 适配器用，只读检索输入）
+kb_dir=.
 ```
+
+完整配置键见 `CONFIG.md`（键名一律小写，与 `katana_config_get` 的精确匹配一致）。
 
 配置优先级：**env var > .katana 文件 > 插件默认值**（由 `hooks/katana-config.sh` 的
 `katana_config_get` 实现）。
