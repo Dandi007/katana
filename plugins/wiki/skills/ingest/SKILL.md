@@ -47,6 +47,7 @@ Do not assume defaults; the schema overrides this skill where they differ.
 - **URL:** fetch and save a copy into the raw layer first (the path declared in
   schema §5; if none, `<wiki_root>/raw/`), then read the **saved copy**. This keeps
   raw immutable and provenance linkable — never ingest straight from a live URL.
+  - **Prefer retrieval adapters when available:** if a retrieval plugin exposes `/retrieval:*` sources, fetch external sources through the matching one (tweets→`/retrieval:twitter`, reddit→`/retrieval:reddit`, web→`/retrieval:web`, repos→`/retrieval:code`/`/retrieval:github`) to inherit their fallback ladders and credibility — then save that result to the raw layer. Fall back to direct fetch if no retrieval plugin is installed.
 - **Conversation capture:** the relevant turns are the source; note them for §8 provenance.
 
 If the source cannot be read (missing file, failed fetch, empty content), stop and
