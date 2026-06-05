@@ -24,13 +24,13 @@ description: 大规模多源探索并生成研究综述。本地知识库（环�
 `deep_research_sources` 声明 KB 可用的命名信息源（飞书/GitLab/Linear/GitHub/任意），探索时 worker 可按线索性质检索这些源：
 
 ```
-deep_research_sources=feishu:.agents/skills/lark-cli/SKILL.md,gitlab:.agents/skills/gitlab/SKILL.md,github:gh
+deep_research_sources=feishu:/retrieval:feishu,gitlab:/retrieval:gitlab,linear:/retrieval:linear,github:/retrieval:github,reddit:/retrieval:reddit,web:/retrieval:web,code:/retrieval:code
 ```
 
 - 格式：逗号分隔的 `name:entry` 对，每段按**第一个冒号**切分
-- `entry`：相对 KB 根的入口文档路径（worker 先读它、按其指引只读检索），或裸命令名（CLI 自身即入口）
+- `entry`：`/retrieval:<name>` 形式的 retrieval plugin 源入口（调用 `/retrieval:<name>` 即可，fallback 梯度与可信度由 retrieval plugin 承载）
 - 优先级：env `DEEP_RESEARCH_SOURCES` → 项目根 `.katana` → 未配置（行为与纯 KB+web 完全一致）
-- **源语义不进 config**：什么时候用、怎么只读检索，由 entry 文档承载
+- **源语义不进 config**：什么时候用、怎么检索、fallback 策略，由 retrieval plugin 的对应源承载
 
 ### fan-out 宽度（可选）
 
@@ -50,7 +50,7 @@ deep_research_sources=feishu:.agents/skills/lark-cli/SKILL.md,gitlab:.agents/ski
    同时按同优先级读取 `deep_research_sources` / `deep_research_max_width`（env → `.katana` → 默认），解析出命名源映射 `{name: entry}` 与宽度值。
 4. 把输入拆成 3-6 条初始线索，每条形如
    `{ id:"c0", text:"...", local:<bool>, suggested_sources:[...], depth:0 }`。
-   suggested_sources 三类可选：①KB 内子目录（此时 local=true）②`web` ③已声明的命名源名（如 `feishu`/`gitlab`，按线索性质判断——「XX 的群里讨论」→feishu、「XX 的 MR/issue」→gitlab/linear）；②③均 local=false。
+   suggested_sources 三类可选：①KB 内子目录（此时 local=true）②`web` ③已声明的命名源名（如 `feishu`/`gitlab`/`reddit`/`code`，按线索性质判断——「XX 的群里讨论」→feishu、「XX 的 MR/issue」→gitlab/linear）；②③均 local=false。worker 解析时，每个命名源名（包括 `web`）映射到 `deep_research_sources` 中的对应 entry，即调用 `/retrieval:<name>`——retrieval plugin 自带 fallback 梯度与可信度，worker 无需自行处理降级。
    **不强制澄清提问**（Workflow 中途问不了，低摩擦直接跑；仅当输入完全无法解析时才追问）。
 
 ### B. 调用 Workflow（后台跑 BFS + 综合）
