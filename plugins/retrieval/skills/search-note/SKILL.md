@@ -1,6 +1,6 @@
 ---
 name: search-note
-description: 本地知识库检索源（只读）。原子笔记/Index/工作记录/facts；语义检索(embedding)→grep→目录遍历降级。
+description: 本地知识库检索源（只读）。原子笔记/Index/工作记录/facts；query_lancedb.py --mode auto（vector→keyword 自降级）。
 ---
 
 # /retrieval:search-note
@@ -32,42 +32,21 @@ description: 本地知识库检索源（只读）。原子笔记/Index/工作记
 | `智元工作/具身中心工程OKR/` | OKR、团队规划 |
 | `memory/` | 操作事实（机器、repo、凭证 pointer、服务端点） |
 
-## 检索降级链
+## 检索
 
-### 主路：语义检索（LanceDB / embedding）
+用 `query_lancedb.py --mode auto`：索引可用走 vector，不可用自动降级 keyword。脚本自身处理 vector→keyword 降级，无需外部 grep tier。
 
 索引位于 `~/.cache/agent-knowledge/Zettelkasten/lancedb/`（不在 iCloud 内）。
 
 ```bash
-cd "$KB_ROOT" && \
-  ~/.cache/agent-knowledge/Zettelkasten/venv/bin/python \
-  .agents/skills/search-note/scripts/query_lancedb.py "查询词" \
-  --mode auto --top-k 10
+# 语义检索（脚本内部 --mode auto：索引可用走 vector，不可用自动降级 keyword）
+PY="$(katana_config_get search_note_python "python3" "")"
+"$PY" "${CLAUDE_PLUGIN_ROOT}/skills/search-note/scripts/query_lancedb.py" "查询词" --mode auto --top-k 10
 ```
-
-`--mode auto`：优先 semantic vector search；索引不可用时自动降级 keyword。
 
 embedding 端点从 `.katana` 读取：
 ```bash
 EMBED_URL="$(katana_config_get search_note_embedding_url "" "")"
-```
-
-### 降级 1：keyword grep
-
-```bash
-KB="$(katana_config_get kb_dir "" "")"
-case "$KB" in
-  "."|"") KB="${CLAUDE_PROJECT_DIR:-$(pwd)}";;
-  /*) :;;
-  *) KB="${CLAUDE_PROJECT_DIR:-$(pwd)}/$KB";;
-esac
-grep -rl "<keyword>" "$KB/Zettelkasten" "$KB/memory" "$KB/智元工作" 2>/dev/null | head -20
-```
-
-### 降级 2：目录遍历
-
-```bash
-find "$KB" -name "*.md" | xargs grep -l "<keyword>" 2>/dev/null | head -20
 ```
 
 ## 只读约束
@@ -78,5 +57,4 @@ find "$KB" -name "*.md" | xargs grep -l "<keyword>" 2>/dev/null | head -20
 
 # References
 
-- `.agents/skills/search-note/SKILL.md` | source_type: internal | credibility: high — 原 skill（含 LanceDB 详细设置）
 - `WIKI.md` | source_type: internal | credibility: high — katana wiki plugin schema（`/wiki:query` 为优先检索路径）
