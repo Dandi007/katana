@@ -157,4 +157,4 @@ git config --global --get "http.https://${GITLAB_HOST}/.proxy"
 
 # References
 
-- `.agents/skills/gitlab/SKILL.md` | source_type: internal | credibility: high — 完整 GitLab ops skill（含写操作、line comment、代理 fallback 全集）
+- glab / GitLab API（host CLI）

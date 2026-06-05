@@ -56,4 +56,4 @@ grep -h "<keyword>" <matched_file> | head -40
 
 # References
 
-- `.agents/skills/agent-session-search/SKILL.md` | source_type: internal | credibility: high — 原 skill 定义
+- 本地 session 存储（AGENT_SESSION_STORE）

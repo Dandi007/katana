@@ -185,5 +185,5 @@ done
 
 # References
 
-- `.agents/skills/linear/SKILL.md` | source_type: internal | credibility: high — 完整 Linear ops skill（含写操作、Intake 分诊、profile 机制全集）
+- Linear GraphQL API（api.linear.app）
 - <https://developers.linear.app/docs/graphql/working-with-the-graphql-api> | source_type: official | credibility: high
