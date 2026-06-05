@@ -14,5 +14,6 @@
 | code_root_env | code root env 变量名 | AGENT_CODE_ROOT | 否 |
 | code_root_fallback_env | code root 回退 env 变量名 | AGENT_CODE_ROOT_FALLBACK | 否 |
 | code_clone_category_default | 自动 clone 默认落的类别子目录 | third_party | 否 |
+| search_note_python | search-note 语义脚本的 python 解释器（需装 lancedb 才走 vector，否则脚本自降级 keyword） | ~/.cache/agent-knowledge/Zettelkasten/venv/bin/python | 否 |
 
 **铁律**：raw token/key 绝不进 .katana。.katana 只放主机/路径/变量名；真密钥留 `~/.config/agent-shell/secrets.zsh`（host-local，不入 git）。

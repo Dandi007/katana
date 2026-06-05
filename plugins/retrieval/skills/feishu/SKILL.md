@@ -54,11 +54,6 @@ lark-cli base +list
 lark-cli base +records <app_token> <table_id> --filter "<filter>"
 ```
 
-## 降级链
-
-1. `lark-cli`（用户身份，OAuth）— 主路
-2. feishu Python CLI（`.agents/skills/feishu/scripts/feishu_cli.py`）— lark-cli 不可用时的 legacy 降级，需要 `.local/feishu/config.json` 与 token 缓存
-
 ## 安全约束
 
 - 凭证不写入 `.katana`、Git 追踪文件或聊天输出
@@ -67,5 +62,4 @@ lark-cli base +records <app_token> <table_id> --filter "<filter>"
 
 # References
 
-- `.agents/skills/feishu/SKILL.md` | source_type: internal | credibility: high — 完整飞书 legacy + lark-cli 能力集
-- `.agents/skills/feishu/lark-cli.md` | source_type: internal | credibility: high — lark-cli 命令速查
+- lark-cli（host CLI，自身 OAuth/Keychain 管理凭证）
