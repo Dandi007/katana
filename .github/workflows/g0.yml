@@ -1,0 +1,12 @@
+name: g0-structural-gate
+on:
+  pull_request:
+jobs:
+  g0:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}    # report sha diff 需要历史
+      - uses: astral-sh/setup-uv@v4
+      - name: G0 lint + coverage + report check
+        run: ./tests/lint-structure.sh --ci
