@@ -91,7 +91,9 @@ def _check(typ, val, ctx) -> AssertResult:
         return AssertResult(typ, ok, f"{val['path']}={got!r}" if not ok else "")
 
     if typ == "script":
-        script = ctx.contract_dir / val
+        script = (ctx.contract_dir / val).resolve()
+        if not script.is_relative_to(ctx.contract_dir.resolve()):
+            raise ValueError(f"script path escapes contract_dir: {val!r}")
         env = {
             "KB_DIR": str(ctx.cwd),
             "CASE_LOG": str(ctx.case_log),

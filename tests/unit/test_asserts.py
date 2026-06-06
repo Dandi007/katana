@@ -64,3 +64,20 @@ def test_failure_carries_detail(tmp_path):
     c = ctx(tmp_path)
     r = run_asserts([{"file_exists": "{cwd}/nope.md"}], c)[0]
     assert not r.ok and "nope.md" in r.detail
+
+
+def test_script_failure_and_escape(tmp_path):
+    c = ctx(tmp_path)
+    bad = tmp_path / "bad.sh"
+    bad.write_text("#!/bin/bash\necho boom >&2\nexit 3\n")
+    r = run_asserts([{"script": "bad.sh"}], c)[0]
+    assert not r.ok and "boom" in r.detail
+    r2 = run_asserts([{"script": "../../etc/evil.sh"}], c)[0]
+    assert not r2.ok and "escapes" in r2.detail
+
+
+def test_script_env_isolated(tmp_path):
+    c = ctx(tmp_path)
+    s = tmp_path / "env.sh"
+    s.write_text("#!/bin/bash\n[ -z \"${HOME:-}\" ]\n")
+    assert run_asserts([{"script": "env.sh"}], c)[0].ok
