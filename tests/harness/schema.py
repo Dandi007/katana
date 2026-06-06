@@ -35,7 +35,7 @@ def load_contract(path: Path) -> Contract:
     inp = raw.get("input") or {}
     if not inp.get("prompt"):
         raise ContractError(f"{path}: missing input.prompt")
-    asserts = raw.get("assert") or []
+    asserts = raw.get("assert") or []  # YAML key 是保留字 assert，dataclass field 用 asserts
     verdict = raw.get("verdict")
     if not asserts and not verdict:
         raise ContractError(f"{path}: needs at least one of assert / verdict")
@@ -47,13 +47,16 @@ def load_contract(path: Path) -> Contract:
             raise ContractError(f"{path}: unknown assert type '{typ}'")
     run = raw.get("run") or {}
     pre = raw.get("preconditions") or {}
+    tools = run.get("allowed_tools", list(DEFAULT_TOOLS))
+    if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
+        raise ContractError(f"{path}: run.allowed_tools must be a list of strings")
     return Contract(
         skill=raw["skill"], prompt=inp["prompt"], path=Path(path),
         case_id=Path(path).name.removesuffix(".contract.yaml"),
         cwd=inp.get("cwd", "kb"), requires=pre.get("requires", []) or [],
         model=run.get("model", "lingzhi/claude-opus-4-8"),
         permission_mode=run.get("permission_mode", "acceptEdits"),
-        allowed_tools=run.get("allowed_tools", list(DEFAULT_TOOLS)),
+        allowed_tools=tools,
         timeout=int(run.get("timeout", 600)),
         asserts=asserts, verdict=verdict,
     )
