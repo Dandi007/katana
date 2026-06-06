@@ -96,6 +96,10 @@ def main():
         if not ccs_online():
             sys.exit("ABORT: ccs (127.0.0.1:15721) offline — 绝不 fallback 直连")
         base_env["ANTHROPIC_BASE_URL"] = f"http://{CCS_HOST}:{CCS_PORT}"
+        # claude CLI requires ANTHROPIC_API_KEY to use API-key mode (not OAuth).
+        # ccs does not validate incoming tokens; any non-empty string works.
+        # Caller may override via ANTHROPIC_AUTH_TOKEN env var.
+        base_env["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_AUTH_TOKEN", "ccs-local")
 
     t0 = time.monotonic()
     tmp = Path(tempfile.mkdtemp(prefix="katana-contracts."))
