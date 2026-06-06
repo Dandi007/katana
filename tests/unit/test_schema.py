@@ -78,3 +78,13 @@ def test_bad_allowed_tools_rejected(tmp_path):
     """)
     with pytest.raises(ContractError, match="allowed_tools"):
         load_contract(p)
+
+
+def test_verdict_missing_rubric_rejected(tmp_path):
+    p = write(tmp_path, """\
+        skill: a:b
+        input: {prompt: hi}
+        verdict: {inputs: ["x"]}
+    """)
+    with pytest.raises(ContractError, match="rubric"):
+        load_contract(p)

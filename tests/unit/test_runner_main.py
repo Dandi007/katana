@@ -54,3 +54,13 @@ def test_validate_only(tmp_path):
         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(REPO / "tests")},
         capture_output=True, text=True)
     assert r.returncode == 0 and "1 contracts valid" in r.stdout
+
+
+def test_case_filter_no_match_exits_nonzero(tmp_path):
+    repo = make_mini_repo(tmp_path)
+    r = subprocess.run(
+        [sys.executable, str(REPO / "tests/runner.py"), "--case", "typo:nope",
+         "--repo", str(repo), "--no-ccs-check", "--skip-judge"],
+        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(REPO / "tests")},
+        capture_output=True, text=True)
+    assert r.returncode != 0 and "matched no contracts" in (r.stdout + r.stderr)

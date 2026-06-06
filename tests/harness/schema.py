@@ -39,6 +39,8 @@ def load_contract(path: Path) -> Contract:
     verdict = raw.get("verdict")
     if not asserts and not verdict:
         raise ContractError(f"{path}: needs at least one of assert / verdict")
+    if verdict is not None and not isinstance(verdict.get("rubric"), str):
+        raise ContractError(f"{path}: verdict.rubric must be a non-empty string")
     for a in asserts:
         if not isinstance(a, dict) or len(a) != 1:
             raise ContractError(f"{path}: each assert entry must be a single-key map: {a!r}")

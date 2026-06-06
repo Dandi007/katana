@@ -37,7 +37,9 @@ def touched_plugins(repo: Path) -> set:
 
 
 def sweep_setup(repo: Path, tmp: Path, plugins: set, claude_bin: str) -> Path:
-    """golden snapshot + 本地 marketplace 安装分支代码 + 冒烟。"""
+    """golden snapshot + 本地 marketplace 安装分支代码 + 冒烟。
+    每次 sweep 的 CLAUDE_CONFIG_DIR 都是 fresh mktemp 副本，marketplace add 不存在跨 sweep 幂等性问题。
+    """
     golden = tmp / "golden"
     shutil.copytree(repo / "tests/fixtures/kb", golden / "kb")
     shutil.copytree(repo / "tests/fixtures/claude-config", golden / "claude-config")
@@ -83,7 +85,9 @@ def main():
         sys.exit("choose one of --all / --touched / --case")
 
     if not contracts:
-        print("no contracts selected")
+        if args.case:
+            sys.exit(f"ERROR: --case {args.case!r} matched no contracts")
+        print("no contracts selected (no touched plugins)")
         return
 
     claude_bin = os.environ.get("CLAUDE_BIN", "claude")
@@ -104,7 +108,12 @@ def main():
                          base_env=base_env)
             # 契约断言通过后才跑 case verdict（assert-down：verdict 不替代 assert）
             if r.status == "PASS" and c.verdict and not args.skip_judge:
-                rubric = repo / "tests/judge" / c.verdict["rubric"]
+                rubric_key = c.verdict.get("rubric")
+                if not rubric_key:
+                    r.status = "NEEDS-REVIEW"
+                    r.verdict_result = {"error": "verdict.rubric missing in contract", "items": []}
+                    return r
+                rubric = repo / "tests/judge" / rubric_key
                 # 使用 r.case_dir 确保指向实际 PASS 的 attempt 目录（含重试场景）
                 case_root = Path(r.case_dir)
                 inputs = [Path(str(i).replace("{cwd}", str(case_root / c.cwd))
