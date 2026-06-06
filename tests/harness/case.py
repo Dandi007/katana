@@ -7,6 +7,8 @@ from .schema import Contract
 from .asserts import Ctx, run_asserts
 from .claude_cli import run_claude, ClaudeTimeout
 
+KNOWN_REQUIRE_KINDS = {"env", "dir", "cmd", "proc-free", "exclusive"}
+
 @dataclass
 class CaseResult:
     case_id: str
@@ -25,6 +27,8 @@ def check_requires(requires: list) -> str | None:
     """全部满足返回 None，否则返回第一条不满足原因。"""
     for req in requires:
         kind, _, val = req.partition(":")
+        if kind not in KNOWN_REQUIRE_KINDS:
+            raise ValueError(f"unknown requires kind: {kind!r} in {req!r}")
         if kind == "exclusive":
             continue
         if kind == "env" and not os.environ.get(val):
@@ -41,7 +45,9 @@ def check_requires(requires: list) -> str | None:
     return None
 
 def _snapshot(golden: Path, dest: Path):
-    """APFS clonefile 秒级复制；失败回退普通 cp。"""
+    """APFS clonefile 秒级复制；失败回退普通 cp。dest 残留先清（防嵌套复制）。"""
+    if dest.exists():
+        shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(["cp", "-c", "-R", str(golden), str(dest)],
                        capture_output=True)

@@ -50,3 +50,20 @@ def test_timeout_attributed_env(tmp_path, monkeypatch):
     c = make_contract(tmp_path, timeout=1)
     r = run_case(c, golden(tmp_path), tmp_path / "work", claude_bin=SHIM, base_env={})
     assert r.status == "FAIL" and r.attribution == "env"
+
+def test_snapshot_rerun_same_workroot_is_fresh(tmp_path, monkeypatch):
+    """同一 work_root 重跑：第二次必须是全新快照，不得嵌套/残留。"""
+    monkeypatch.setenv("FAKE_CLAUDE_STDOUT", "all OK")
+    g = golden(tmp_path)
+    run_case(make_contract(tmp_path), g, tmp_path / "work", claude_bin=SHIM, base_env={})
+    # 第一次跑完在 case 目录留一个脏文件
+    (tmp_path / "work" / "q" / "kb" / "dirty.md").write_text("leftover")
+    run_case(make_contract(tmp_path), g, tmp_path / "work", claude_bin=SHIM, base_env={})
+    assert not (tmp_path / "work" / "q" / "kb" / "dirty.md").exists()   # 脏文件被清
+    assert not (tmp_path / "work" / "q" / "golden").exists()            # 无嵌套
+    assert (tmp_path / "work" / "q" / "kb" / "seed.md").exists()
+
+def test_unknown_requires_kind_raises(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="envv"):
+        check_requires(["envv:TYPO"])
