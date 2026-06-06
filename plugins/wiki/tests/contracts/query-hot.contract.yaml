@@ -5,4 +5,4 @@ input:
 assert:
   - stdout_grep: "90"
   - stdout_grep: "1:15"
-  - stdout_grep: "\\[\\[.*\\]\\]|手冲咖啡萃取"
+  - stdout_grep: "\\[\\[.*\\]\\]"
