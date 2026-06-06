@@ -12,7 +12,7 @@ description: 小红书检索源。中文 UGC 消费决策/生活方式调研（�
 | 键 | 含义 | 示例 |
 |----|------|------|
 | `xiaohongshu_chrome_profile` | 登录态 profile 目录 | `~/.playwright-agent-profile` |
-| `xiaohongshu_raw_dir` | 下载落盘根目录 | `转换文档/web` |
+| `xiaohongshu_raw_dir` | 下载落盘根目录（相对路径时基于项目根，即 `.katana` 所在目录；与 `kb_dir` 同语义） | `转换文档/web` |
 
 铁律：`.katana` 只放路径；账号与登录态留在 profile 目录内，绝不进 repo。
 
@@ -21,7 +21,7 @@ description: 小红书检索源。中文 UGC 消费决策/生活方式调研（�
 - **已登录判定**：`browser_navigate` 到 `https://www.xiaohongshu.com/explore`，页面含「消息」「我」且无登录按钮/二维码弹窗。
 - **未登录 → 登录引导**：
   1. `/explore` 弹出登录框，`img.qrcode-img` 的 src 本身就是 base64 dataURL
-  2. `browser_evaluate` 取出 src，解码写成本地 png 交给用户手机扫
+  2. `browser_evaluate` 取出 src，解码写到项目根下用户可见处（如 `./xhs-login-qr-1.png`）交给用户手机扫；登录成功后删除
   3. QR 约 2-3 分钟过期；过期后刷新页面重抠（**换文件名**，避免查看端缓存旧图）
   4. 一次扫码登录态长期留 profile
 
@@ -36,6 +36,8 @@ description: 小红书检索源。中文 UGC 消费决策/生活方式调研（�
 ```
 browser_navigate https://www.xiaohongshu.com/search_result?keyword=<urlencoded>
 ```
+
+navigate 后先 `browser_wait_for` 等 `section.note-item` 出现（SPA 首屏渲染有延迟），再 evaluate。
 
 `browser_evaluate` 批量提取（一页约 20 条）：
 
@@ -61,7 +63,7 @@ navigate 带 token 的 href，然后一次提取：
 | 评论总数 | `.comments-container .total` |
 | 评论项 | `.comment-item`（作者 `.author .name`、内容 `.content`、点赞 `.like .count`） |
 
-长评论区滚动加载：循环 `window.scrollTo(0, document.body.scrollHeight)` + `document.querySelector('.note-scroller').scrollTop = <scrollHeight>`，每轮 sleep ~700ms，**上限 8 轮**（约可加载百余条）。
+长评论区滚动加载：每轮 `browser_evaluate` 执行 `() => { window.scrollTo(0, document.body.scrollHeight); const el = document.querySelector('.note-scroller'); if (el) el.scrollTop = el.scrollHeight; }`（页面与内层滚动容器是两个滚动面，需同时推进），轮间用 `browser_wait_for`（time ~0.7s）等待加载，**上限 8 轮**（约可加载百余条）。
 
 经验：视频帖正文常只有 hashtag，信息在评论区；「求推荐」类帖的评论区是金矿（店名/避雷/票选都在评论里）。
 
@@ -88,10 +90,12 @@ navigate 带 token 的 href，然后一次提取：
 
 ## 可信度判别
 
-- 评论全是「馋了/想吃」无价格无细节 = 疑似推广（**封顶 low**）
-- 多人指控「外地 IP 同话术」= 水军
-- 独立多源交叉（≥2 个不相关账号同结论）= **high**
-- 单篇详实测评（带负面点、具体价格）= medium-high
+本源属 UGC，按插件可信度阶梯**整体封顶 medium**；以下判别用于源内相对分级与剔除噪声：
+
+- 评论全是「馋了/想吃」无价格无细节 = 疑似推广（**low，建议丢弃**）
+- 多人指控「外地 IP 同话术」= 水军（low，丢弃）
+- 独立多源交叉（≥2 个不相关账号同结论）= **medium（本源上限）**
+- 单篇详实测评（带负面点、具体价格）= medium-low
 
 ## 坑表
 
