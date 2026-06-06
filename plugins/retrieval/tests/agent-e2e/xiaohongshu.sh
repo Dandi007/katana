@@ -25,7 +25,10 @@ if pgrep -f "user-data-dir=$PROF" >/dev/null 2>&1; then
 fi
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/xhs-e2e.XXXXXX")"
-if [ -z "${KEEP_WORK_DIR:-}" ]; then trap 'rm -rf "$WORK_DIR"' EXIT; else echo "WORK_DIR=$WORK_DIR (kept)"; fi
+# 仅 PASS 时自动清理；FAIL 保留产物目录供排查（KEEP_WORK_DIR=1 则 PASS 也保留）
+CLEANUP_ON_EXIT=0
+trap 'if [ "$CLEANUP_ON_EXIT" = 1 ] && [ -z "${KEEP_WORK_DIR:-}" ]; then rm -rf "$WORK_DIR"; else echo "WORK_DIR kept: $WORK_DIR"; fi' EXIT
+echo "WORK_DIR=$WORK_DIR"
 
 if [ -n "${SKILL_FILE:-}" ]; then
   HOWTO="先完整阅读 ${SKILL_FILE} 并严格按其中的工作流执行"
@@ -45,16 +48,20 @@ PROMPT="${HOWTO}：搜索小红书关键词「盒马 快手菜」，取赞数最
     --permission-mode acceptEdits \
     --mcp-config "$MCP_CONFIG" --strict-mcp-config \
     --allowedTools "mcp__playwright__browser_navigate,mcp__playwright__browser_evaluate,mcp__playwright__browser_wait_for,mcp__playwright__browser_snapshot,Write,Read,Edit" \
-    ${EXTRA_DIR:+--add-dir "$EXTRA_DIR"} ) || { echo "FAIL: claude run errored"; exit 1; }
+    ${EXTRA_DIR:+--add-dir "$EXTRA_DIR"} 2>&1 | tee "$WORK_DIR/claude.log" ) || { echo "FAIL: claude run errored"; exit 1; }
 
 DIR="$(find "$WORK_DIR" -maxdepth 1 -type d -name "小红书-*" | head -1)"
 [ -n "$DIR" ] || { echo "FAIL: no 小红书-* dir under $WORK_DIR"; exit 1; }
 [ -f "$DIR/index.md" ] || { echo "FAIL: no index.md"; exit 1; }
+grep -q '|' "$DIR/index.md" || { echo "FAIL: index.md has no table rows"; exit 1; }
 NOTE="$(find "$DIR" -name "*.md" ! -name index.md | head -1)"
 [ -n "$NOTE" ] || { echo "FAIL: no note md"; exit 1; }
 grep -q "xsec_token" "$NOTE" || { echo "FAIL: url missing xsec_token"; exit 1; }
 grep -q "^author:" "$NOTE" || { echo "FAIL: no author in frontmatter"; exit 1; }
 grep -q "^likes:" "$NOTE" || { echo "FAIL: no likes in frontmatter"; exit 1; }
+grep -q "^note_id:" "$NOTE" || { echo "FAIL: no note_id in frontmatter"; exit 1; }
+grep -q "^fetched_at:" "$NOTE" || { echo "FAIL: no fetched_at in frontmatter"; exit 1; }
 [ "$(wc -c < "$NOTE")" -gt 500 ] || { echo "FAIL: note too small (<500B)"; exit 1; }
+CLEANUP_ON_EXIT=1
 echo "PASS: e2e artifacts verified"
 ls -la "$DIR"
