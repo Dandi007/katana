@@ -11,6 +11,8 @@ installable — take only what you need.
 | `memory` | Verified facts as memory cards, auto-injected as an L1 index each session |
 | `obsidian-md` | Obsidian Markdown writing rules grounded in official docs (`obsidian-writing`) — wikilinks, headings, frontmatter, embeds, callouts; every rule cites obsidian.md/help |
 | `wiki` | LLM-maintained wiki engine — schema-driven zones, provenance-enforced ingest, deterministic query ladder, adversarial lint (Karpathy pattern: compile not re-derive; governance: immutable raw, provenance, adversarial lint, human gate) |
+| `retrieval` | Multi-source information retrieval — intent→source routing, credibility ladder, fallback chains; web/reddit/twitter/code/github/gitlab/linear/feishu/search-note adapters |
+| `fpa` | First Principles Analysis — enforced four-step reasoning (deconstruct/challenge/reconstruct/validate) with adversarial Workflow verification, mechanical acceptance hooks (`FPA-*.md` structure + three-artifact suite), and an inline calibration skill (`first-principles-thinking`) |
 
 ## Install (Claude Code)
 
@@ -22,6 +24,8 @@ installable — take only what you need.
 /plugin install memory@katana
 /plugin install obsidian-md@katana
 /plugin install wiki@katana
+/plugin install retrieval@katana
+/plugin install fpa@katana
 ```
 
 Enable/disable any plugin independently with `/plugin`.
@@ -55,6 +59,8 @@ cp -r /tmp/katana/plugins/wiki/skills/init                  .agents/skills/
 cp -r /tmp/katana/plugins/wiki/skills/ingest                .agents/skills/
 cp -r /tmp/katana/plugins/wiki/skills/query                 .agents/skills/
 cp -r /tmp/katana/plugins/wiki/skills/lint                  .agents/skills/
+cp -r /tmp/katana/plugins/fpa/skills/fpa                    .agents/skills/
+cp -r /tmp/katana/plugins/fpa/skills/first-principles-thinking .agents/skills/
 ```
 
 **User-level install** (skills available across all repos):
@@ -74,6 +80,8 @@ cp -r /tmp/katana/plugins/wiki/skills/init                  "$HOME/.agents/skill
 cp -r /tmp/katana/plugins/wiki/skills/ingest                "$HOME/.agents/skills/"
 cp -r /tmp/katana/plugins/wiki/skills/query                 "$HOME/.agents/skills/"
 cp -r /tmp/katana/plugins/wiki/skills/lint                  "$HOME/.agents/skills/"
+cp -r /tmp/katana/plugins/fpa/skills/fpa                    "$HOME/.agents/skills/"
+cp -r /tmp/katana/plugins/fpa/skills/first-principles-thinking "$HOME/.agents/skills/"
 ```
 
 Claude Code-specific features degrade gracefully elsewhere:
@@ -86,6 +94,10 @@ Claude Code-specific features degrade gracefully elsewhere:
   in your `.katana` file.
 - `deep-research` orchestration uses Claude Code's Workflow tool; other tools
   can follow the SKILL.md flow manually.
+- `fpa` mechanical acceptance uses a Claude Code PostToolUse hook and its
+  adversarial verification uses the Workflow tool. On other tools, run
+  `python3 skills/fpa/scripts/validate_fpa.py <file>` manually and dispatch
+  skeptic subagents per the SKILL.md prompts.
 
 ## Configuration
 
