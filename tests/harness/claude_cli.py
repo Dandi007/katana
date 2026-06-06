@@ -32,6 +32,8 @@ def run_claude(*, prompt: str, cwd: Path, log_path: Path, model: str,
     except subprocess.TimeoutExpired:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         proc.wait()
+        if proc.stdout: proc.stdout.close()
+        if proc.stdin: proc.stdin.close()
         raise ClaudeTimeout(f"timeout {timeout}s")
     Path(log_path).write_text(out, encoding="utf-8")
     return ClaudeResult(exit_code=proc.returncode, stdout=out)
