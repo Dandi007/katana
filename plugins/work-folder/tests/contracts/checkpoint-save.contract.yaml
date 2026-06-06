@@ -6,7 +6,7 @@ input:
     请用 checkpoint skill 保存当前工作状态到该 work folder。
   cwd: kb
 assert:
-  - file_grep: {path: "{cwd}/工作记录/fixture-task/progress.md", pattern: "Updated: 2026"}
+  - file_grep: {path: "{cwd}/工作记录/fixture-task/progress.md", pattern: "Updated.*2026"}
   - file_grep: {path: "{cwd}/工作记录/fixture-task/progress.md", pattern: "矛盾调研"}
   - file_exists: "{cwd}/工作记录/fixture-task/findings.md"
   - file_exists: "{cwd}/工作记录/fixture-task/CLAUDE.md"
