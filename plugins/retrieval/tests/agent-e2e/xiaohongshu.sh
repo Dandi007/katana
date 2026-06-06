@@ -17,7 +17,9 @@ PROF="$(katana_config_get xiaohongshu_chrome_profile "" "")"
 case "$PROF" in "~"*) PROF="${HOME}${PROF#\~}";; esac
 [ -n "$PROF" ] && [ -d "$PROF" ] || { echo "SKIP: no chrome profile"; exit 2; }
 command -v claude >/dev/null || { echo "SKIP: no claude CLI"; exit 2; }
-# profile 单实例：已被占用则 skip（不在测试脚本里替用户 kill）
+# profile 单实例：已被占用则 skip（不在测试脚本里替用户 kill）。
+# 注意保留 = 形式：playwright 拉起的 Chrome cmdline 是 --user-data-dir=<path>（锁持有者）；
+# 空格形式只会匹配 idle 的 MCP server 进程（不持锁），会造成误报 busy。
 if pgrep -f "user-data-dir=$PROF" >/dev/null 2>&1; then
   echo "SKIP: profile busy (close the running agent browser first)"; exit 2
 fi
@@ -26,7 +28,7 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/xhs-e2e.XXXXXX")"
 if [ -z "${KEEP_WORK_DIR:-}" ]; then trap 'rm -rf "$WORK_DIR"' EXIT; else echo "WORK_DIR=$WORK_DIR (kept)"; fi
 
 if [ -n "${SKILL_FILE:-}" ]; then
-  HOWTO="先完整阅读 $SKILL_FILE 并严格按其中的工作流执行"
+  HOWTO="先完整阅读 ${SKILL_FILE} 并严格按其中的工作流执行"
   EXTRA_DIR="$(cd "$(dirname "$SKILL_FILE")" && pwd)"
 else
   HOWTO="使用 /retrieval:xiaohongshu skill"
@@ -36,7 +38,7 @@ fi
 # 自带 Playwright MCP（隔离 profile）
 MCP_CONFIG="$(printf '{"mcpServers":{"playwright":{"command":"npx","args":["-y","@playwright/mcp@latest","--user-data-dir","%s"]}}}' "$PROF")"
 
-PROMPT="$HOWTO：搜索小红书关键词「盒马 快手菜」，取赞数最高的 1 篇笔记抓取详情与评论，按 skill 的落盘格式下载到 $WORK_DIR（本次 xiaohongshu_raw_dir 视为 $WORK_DIR）。完成后输出落盘文件清单。"
+PROMPT="${HOWTO}：搜索小红书关键词「盒马 快手菜」，取赞数最高的 1 篇笔记抓取详情与评论，按 skill 的落盘格式下载到 ${WORK_DIR}（本次 xiaohongshu_raw_dir 视为 ${WORK_DIR}）。完成后输出落盘文件清单。"
 
 ( cd "$WORK_DIR" && claude -p \
     --permission-mode acceptEdits \
