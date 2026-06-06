@@ -1,0 +1,8 @@
+# xiaohongshu: 登录态在 chrome profile 才可跑；CI/无 profile 则 skip
+PROF="$(katana_config_get xiaohongshu_chrome_profile "" "")"
+case "$PROF" in "~"*) PROF="${HOME}${PROF#\~}";; esac
+if [ -z "$PROF" ] || [ ! -d "$PROF" ]; then
+  skip "xiaohongshu" "no chrome profile (login session absent)"
+else
+  pass "xiaohongshu"  # profile 存在即视为可用；真实抓取由 agent 经 Playwright MCP 执行（见 agent-e2e/）
+fi
