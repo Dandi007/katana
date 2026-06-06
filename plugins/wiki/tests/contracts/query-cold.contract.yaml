@@ -1,0 +1,10 @@
+skill: wiki:query
+input:
+  prompt: "用 /wiki:query 回答：tokio 的 work-stealing 调度器原理是什么？"
+  cwd: kb
+run:
+  allowed_tools: [Read, Grep, Glob, Write, Edit]
+assert:
+  - stdout_grep: "不覆盖|non-wiki|未收录"
+  - file_grep: {path: "{cwd}/gap-log.md", pattern: "tokio"}
+  - file_absent: "{cwd}/笔记/*tokio*"

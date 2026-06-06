@@ -20,10 +20,5 @@ retrieval:feishu                wave-2
 retrieval:search-note           wave-2
 retrieval:code                  wave-2
 retrieval:agent-session-search  wave-2
-retrieval:xiaohongshu           temp-until-task-11
 fpa:first-principles-thinking   wave-2
 fpa:fpa                         wave-2
-work-folder:checkpoint          temp-until-task-11
-wiki:query                      temp-until-task-11
-wiki:ingest                     temp-until-task-11
-wiki:lint                       temp-until-task-11
