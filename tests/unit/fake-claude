@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Test shim. 行为由 env 控制：
+#   FAKE_CLAUDE_STDOUT  输出文本；FAKE_CLAUDE_WRITE  "relpath:content" 在 cwd 写文件
+#   FAKE_CLAUDE_EXIT    退出码（默认 0）；FAKE_CLAUDE_SLEEP  延迟秒
+# 子命令（plugin/...）一律 echo 后成功返回，供 sweep-setup 单测。
+if [ "$1" != "-p" ]; then echo "fake-claude: $*"; exit 0; fi
+cat >/dev/null   # 消费 stdin prompt
+[ -n "${FAKE_CLAUDE_SLEEP:-}" ] && sleep "$FAKE_CLAUDE_SLEEP"
+if [ -n "${FAKE_CLAUDE_WRITE:-}" ]; then
+  rel="${FAKE_CLAUDE_WRITE%%:*}"; content="${FAKE_CLAUDE_WRITE#*:}"
+  mkdir -p "$(dirname "$rel")"; printf '%s' "$content" > "$rel"
+fi
+printf '%s\n' "${FAKE_CLAUDE_STDOUT:-fake output}"
+exit "${FAKE_CLAUDE_EXIT:-0}"
