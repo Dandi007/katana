@@ -32,7 +32,7 @@ def render_report(results, *, branch, sha, jobs, total_s,
 
     # 汇总表
     for r in results:
-        detail = (r.detail or "").replace("|", "\\|")[:120]
+        detail = (r.detail or "")[:120].replace("|", "\\|")
         if r.kept_dir:
             detail += f" (kept: {r.kept_dir})"
         lines.append(f"| {r.skill}#{r.case_id} | {r.status} | {r.attribution or '—'} "

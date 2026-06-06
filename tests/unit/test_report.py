@@ -24,3 +24,16 @@ def test_render_contains_all_sections():
     assert "## NEEDS-REVIEW" in md and "裸断言" in md
     assert "## Overall Verdict" in md and "整体可" in md
     assert "abc1234" in md
+
+
+def test_detail_pipe_at_truncation_boundary():
+    r = CaseResult("c", "p:s", "FAIL", attempts=2, attribution="unknown",
+                   detail="x" * 119 + "|tail")
+    md = render_report([r], branch="b", sha="s", jobs=1, total_s=1.0)
+    row = [l for l in md.splitlines() if l.startswith("| p:s#c")][0]
+    # 关键：列结构不被破坏。计算非转义的管道符数量（表格分隔符）
+    # 表格行应有 7 列 = 8 个非转义分隔符
+    unescaped_pipes = row.count("|") - row.count("\\|")
+    assert unescaped_pipes == 8
+    # 管道符被正确转义（位置 120 处的 | 被截断到包含在内，应被转义）
+    assert "\\|" in row
