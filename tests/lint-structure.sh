@@ -35,15 +35,21 @@ if mkt != disk:
     print(f"G0-FAIL: marketplace {sorted(mkt)} != disk {sorted(disk)}"); sys.exit(1)
 PY
 
-# 5) --ci 模式：PR 必须带本机 sweep 报告，且报告 commit 之后无实质改动
+# 5) --ci 模式：PR 必须带本机 sweep 报告，且至少一份报告之后无实质改动。
+#    不可用 ls -t 选"最新"——CI checkout 后 mtime 全相同，顺序随机；
+#    语义正确的判定：任一报告的 sha..HEAD 无 tests/reports 之外的 diff 即新鲜。
 if [ "${1:-}" = "--ci" ]; then
-  R=$(ls -t "$HERE/reports/"*.md 2>/dev/null | head -1)
-  [ -n "$R" ] || err "no sweep report in tests/reports/"
-  if [ -n "$R" ]; then
-    SHA=$(basename "$R" .md | sed 's/.*-//')
-    git -C "$REPO" cat-file -e "$SHA" 2>/dev/null || err "report sha $SHA not in history"
-    CHANGED=$(git -C "$REPO" diff --name-only "$SHA" HEAD -- ':!tests/reports' 2>/dev/null)
-    [ -z "$CHANGED" ] || err "substantive changes after report $SHA: $CHANGED"
+  REPORTS=$(ls "$HERE/reports/"*.md 2>/dev/null)
+  [ -n "$REPORTS" ] || err "no sweep report in tests/reports/"
+  if [ -n "$REPORTS" ]; then
+    FRESH=""
+    for R in $REPORTS; do
+      SHA=$(basename "$R" .md | sed 's/.*-//')
+      git -C "$REPO" cat-file -e "$SHA" 2>/dev/null || continue
+      CHANGED=$(git -C "$REPO" diff --name-only "$SHA" HEAD -- ':!tests/reports' 2>/dev/null)
+      [ -z "$CHANGED" ] && { FRESH="$R"; break; }
+    done
+    [ -n "$FRESH" ] || err "no sweep report is fresh (every report sha has substantive changes before HEAD)"
   fi
 fi
 
