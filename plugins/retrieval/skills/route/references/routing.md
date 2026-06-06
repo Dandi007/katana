@@ -11,6 +11,7 @@
 | 代码求真（入口、调用链、配置） | code, github, gitlab |
 | 平台搜索（飞书文档、issue、MR） | feishu, github, gitlab, linear |
 | 网络发现（公开信息、官方文档） | web, reddit, twitter, official-docs |
+| 中文消费决策/生活方式调研（口碑、测评、避雷） | xiaohongshu, web |
 | 跨源搜索（不确定来源） | local_text, web, code |
 
 ## 信息源 → 入口
@@ -27,3 +28,5 @@
 | reddit | `/retrieval:reddit` |
 | twitter | `/retrieval:twitter` |
 | official-docs | `/retrieval:official-docs` |
+| linear | `/retrieval:linear` |
+| xiaohongshu | `/retrieval:xiaohongshu` |
