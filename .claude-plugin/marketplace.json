@@ -53,6 +53,13 @@
       "category": "productivity",
       "source": "./plugins/retrieval",
       "homepage": "https://github.com/Dandi007/katana"
+    },
+    {
+      "name": "fpa",
+      "description": "First Principles Analysis — enforced four-step reasoning (deconstruct/challenge/reconstruct/validate) with adversarial Workflow verification, mechanical acceptance hooks, and a three-artifact paper trail; plus a lightweight inline calibration skill",
+      "category": "productivity",
+      "source": "./plugins/fpa",
+      "homepage": "https://github.com/Dandi007/katana"
     }
   ]
 }
