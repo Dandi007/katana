@@ -20,6 +20,7 @@ class CaseResult:
     attribution: str = ""        # env / prompt / model / unknown（FAIL 时必填）
     detail: str = ""
     kept_dir: str = ""
+    case_dir: str = ""           # 实际产物目录（PASS 时为成功 attempt 的目录）
     assert_results: list = field(default_factory=list)
     verdict_result: dict | None = None
 
@@ -85,6 +86,7 @@ def run_case(contract: Contract, golden: Path, work_root: Path,
                 return CaseResult(contract.case_id, contract.skill, "FAIL",
                                   attempts=attempt, attribution="env",
                                   detail=str(e), kept_dir=str(case_dir),
+                                  case_dir=str(case_dir),
                                   duration_s=time.monotonic() - t0,
                                   model=contract.model)
             continue
@@ -92,13 +94,15 @@ def run_case(contract: Contract, golden: Path, work_root: Path,
         if not failed:
             return CaseResult(contract.case_id, contract.skill, "PASS",
                               attempts=attempt, model=contract.model,
+                              case_dir=str(case_dir),
                               duration_s=time.monotonic() - t0,
                               assert_results=[vars(r) for r in results])
         if attempt == 2:
             return CaseResult(contract.case_id, contract.skill, "FAIL",
                               attempts=attempt, attribution="unknown",
                               detail="; ".join(f"{r.type}: {r.detail}" for r in failed),
-                              kept_dir=str(case_dir), model=contract.model,
+                              kept_dir=str(case_dir), case_dir=str(case_dir),
+                              model=contract.model,
                               duration_s=time.monotonic() - t0,
                               assert_results=[vars(r) for r in results])
     raise AssertionError("unreachable")

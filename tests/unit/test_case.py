@@ -30,6 +30,7 @@ def test_run_case_pass(tmp_path, monkeypatch):
     r = run_case(make_contract(tmp_path), golden(tmp_path), tmp_path / "work",
                  claude_bin=SHIM, base_env={})
     assert r.status == "PASS" and r.attempts == 1
+    assert r.case_dir.endswith("/q")
     # 快照隔离：case 目录有独立 kb 副本
     assert (tmp_path / "work" / "q" / "kb" / "seed.md").exists()
 
