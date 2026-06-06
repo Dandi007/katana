@@ -40,12 +40,12 @@ MCP_CONFIG="$(printf '{"mcpServers":{"playwright":{"command":"npx","args":["-y",
 
 PROMPT="${HOWTO}：搜索小红书关键词「盒马 快手菜」，取赞数最高的 1 篇笔记抓取详情与评论，按 skill 的落盘格式下载到 ${WORK_DIR}（本次 xiaohongshu_raw_dir 视为 ${WORK_DIR}）。完成后输出落盘文件清单。"
 
-( cd "$WORK_DIR" && claude -p \
+# prompt 走 stdin：--add-dir 是变长参数，紧跟其后的位置参数会被吞成目录
+( cd "$WORK_DIR" && printf '%s\n' "$PROMPT" | claude -p \
     --permission-mode acceptEdits \
     --mcp-config "$MCP_CONFIG" --strict-mcp-config \
     --allowedTools "mcp__playwright__browser_navigate,mcp__playwright__browser_evaluate,mcp__playwright__browser_wait_for,mcp__playwright__browser_snapshot,Write,Read,Edit" \
-    ${EXTRA_DIR:+--add-dir "$EXTRA_DIR"} \
-    "$PROMPT" ) || { echo "FAIL: claude run errored"; exit 1; }
+    ${EXTRA_DIR:+--add-dir "$EXTRA_DIR"} ) || { echo "FAIL: claude run errored"; exit 1; }
 
 DIR="$(find "$WORK_DIR" -maxdepth 1 -type d -name "小红书-*" | head -1)"
 [ -n "$DIR" ] || { echo "FAIL: no 小红书-* dir under $WORK_DIR"; exit 1; }
