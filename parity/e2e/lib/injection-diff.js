@@ -41,7 +41,7 @@ function extractSegments(systemPrompt) {
   return segments;
 }
 
-function queryPayloads(since, model) {
+function queryPayloads(since, model, appType) {
   if (!fs.existsSync(CCS_DB_PATH)) {
     console.error(`[injection-diff] ccs DB not found at ${CCS_DB_PATH}`);
     return [];
@@ -51,19 +51,21 @@ function queryPayloads(since, model) {
     const Database = require('better-sqlite3');
     const db = new Database(CCS_DB_PATH, { readonly: true });
     const stmt = db.prepare(`
-      SELECT payload, created_at
-      FROM payloads
-      WHERE created_at >= ?
-        AND model LIKE ?
-      ORDER BY created_at DESC
+      SELECT prp.request_body, prp.created_at
+      FROM proxy_request_payloads prp
+      JOIN proxy_request_logs prl ON prp.request_id = prl.request_id
+      WHERE prp.created_at >= ?
+        AND prl.model LIKE ?
+        AND prl.app_type = ?
+      ORDER BY prp.created_at DESC
       LIMIT 10
     `);
 
-    const rows = stmt.all(since, `%${model}%`);
+    const rows = stmt.all(since, `%${model}%`, appType);
     db.close();
 
     return rows.map(r => ({
-      payload: JSON.parse(r.payload),
+      payload: JSON.parse(r.request_body),
       created_at: r.created_at
     }));
   } catch (err) {
@@ -92,8 +94,8 @@ function extractSystemPrompt(payload) {
 }
 
 function diff(ccSide, ocSide, model, startTime) {
-  const ccPayloads = queryPayloads(startTime, model);
-  const ocPayloads = queryPayloads(startTime, model);
+  const ccPayloads = queryPayloads(startTime, model, 'claude');
+  const ocPayloads = queryPayloads(startTime, model, 'codex');
 
   if (ccPayloads.length === 0) {
     return { error: 'No CC payloads found in time window' };
