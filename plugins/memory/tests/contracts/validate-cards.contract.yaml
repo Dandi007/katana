@@ -1,0 +1,8 @@
+skill: memory:validate
+input:
+  prompt: "用 memory:validate 核验 ./memory/ 下的 memory cards 是否与本库实际一致"
+  cwd: kb
+assert:
+  - stdout_grep: "kb-wiki-root"
+  - stdout_grep: "kb-coffee-notes"
+  - stdout_grep: "verified|active|PASS"
