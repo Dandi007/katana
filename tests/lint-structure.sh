@@ -46,7 +46,7 @@ if not table_path.exists():
 
 table = json.loads(table_path.read_text())
 
-# Check sessionStart entries
+# Forward check: table.json entries must have corresponding hooks
 for entry in table.get("sessionStart", []):
     plugin = entry["plugin"]
     hooks_json = repo / "plugins" / plugin / "hooks" / "hooks.json"
@@ -60,7 +60,6 @@ for entry in table.get("sessionStart", []):
         print(f"G0-FAIL: {plugin} listed in table.json sessionStart but no SessionStart hooks in {hooks_json}")
         sys.exit(1)
 
-# Check postToolUse entries
 for entry in table.get("postToolUse", []):
     plugin = entry["plugin"]
     hooks_json = repo / "plugins" / plugin / "hooks" / "hooks.json"
@@ -72,6 +71,16 @@ for entry in table.get("postToolUse", []):
     post_hooks = hooks.get("hooks", {}).get("PostToolUse", [])
     if not post_hooks:
         print(f"G0-FAIL: {plugin} listed in table.json postToolUse but no PostToolUse hooks in {hooks_json}")
+        sys.exit(1)
+
+# Reverse check: every plugin with SessionStart hooks must be in table.json
+table_session_plugins = {e["plugin"] for e in table.get("sessionStart", [])}
+for hooks_json in repo.glob("plugins/*/hooks/hooks.json"):
+    plugin = hooks_json.parent.parent.name
+    hooks = json.loads(hooks_json.read_text())
+    session_hooks = hooks.get("hooks", {}).get("SessionStart", [])
+    if session_hooks and plugin not in table_session_plugins:
+        print(f"G0-FAIL: {plugin} has SessionStart hooks but not listed in table.json sessionStart")
         sys.exit(1)
 
 print("table.json ↔ hooks.json consistency: OK")
