@@ -1,0 +1,15 @@
+skill: retrieval:twitter
+preconditions:
+  requires:
+    - "env:KATANA_E2E_NETWORK"
+input:
+  prompt: |
+    用 /retrieval:twitter 抓取 @jack 的第一条推文（tweet id 20，
+    内容为 "just setting up my twttr"），给出推文正文与可信度。
+  cwd: kb
+run:
+  timeout: 300
+  allowed_tools: [Read, Grep, Glob, Bash]
+assert:
+  - stdout_grep: "twttr|jack"
+  - stdout_grep: "high|medium|low"
