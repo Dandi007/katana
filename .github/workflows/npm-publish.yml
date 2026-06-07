@@ -2,8 +2,7 @@ name: Publish to npm
 
 on:
   push:
-    tags:
-      - 'oc-v*'
+    tags: ['oc-v*']
 
 jobs:
   publish:
