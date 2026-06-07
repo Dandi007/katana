@@ -1,0 +1,7 @@
+skill: memory:remember
+input:
+  prompt: "用 memory:remember 记住：本测试库的咖啡矛盾对是意式浓缩 92°C vs 96°C，两派互链不抹平；卡片写到 ./memory/"
+  cwd: kb
+assert:
+  - file_exists: "{cwd}/memory/*.md"
+  - script: remember-card.verify.sh
