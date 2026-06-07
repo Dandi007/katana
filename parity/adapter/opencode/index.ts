@@ -214,9 +214,10 @@ export const KatanaParity = async (ctx: { directory?: string }) => {
       const sessionID: string | undefined = ev.properties?.sessionID ?? ev.properties?.info?.id;
       if (ev.type === 'session.created' && sessionID) {
         const s = state(sessionID);
-        // Store the in-flight promise so chat.message can await readiness even
-        // if it fires before this handler's await resolves.
-        if (!s.ready) s.ready = onSessionCreated(sessionID);
+        // A session.created always (re)computes the session-start context and
+        // publishes the in-flight promise, so chat.message can await readiness
+        // even if it fires before this handler's await resolves.
+        s.ready = onSessionCreated(sessionID);
         await s.ready;
       }
     },
