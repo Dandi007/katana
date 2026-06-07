@@ -1,0 +1,16 @@
+skill: retrieval:official-docs
+preconditions:
+  requires:
+    - "env:KATANA_E2E_NETWORK"
+input:
+  prompt: |
+    用 /retrieval:official-docs 查 Python 官方文档里 list.sort() 是否稳定排序，
+    给出来源 URL 与可信度。
+  cwd: kb
+run:
+  timeout: 300
+  allowed_tools: [Read, Grep, Glob, Bash]
+assert:
+  - stdout_grep: "stable|稳定"
+  - stdout_grep: "docs\\.python\\.org"
+  - stdout_grep: "high|medium|low"

@@ -1,0 +1,17 @@
+skill: retrieval:github
+preconditions:
+  requires:
+    - "env:KATANA_E2E_NETWORK"
+    - "cmd:gh"
+input:
+  prompt: |
+    用 /retrieval:github 查 Dandi007/katana 仓库的 description 和默认分支，
+    给出来源标注。
+  cwd: kb
+run:
+  timeout: 300
+  allowed_tools: [Read, Grep, Glob, Bash]
+assert:
+  - stdout_grep: "katana"
+  - stdout_grep: "main"
+  - stdout_grep: "github\\.com|github"

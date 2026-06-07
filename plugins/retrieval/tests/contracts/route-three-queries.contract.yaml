@@ -1,0 +1,16 @@
+skill: retrieval:route
+input:
+  prompt: |
+    使用 /retrieval:route，对以下 3 个 query 各自路由到正确信息源，
+    直接列出每条 query 对应的源名称（无需真实检索）：
+    1. "reddit 上大家怎么评价 RX 7900 XTX 显卡"
+    2. "React useEffect 官方文档怎么说"
+    3. "我本地笔记里关于意式浓缩的记录"
+  cwd: kb
+run:
+  timeout: 120
+  allowed_tools: [Read]
+assert:
+  - stdout_grep: "reddit"
+  - stdout_grep: "official-docs"
+  - stdout_grep: "search-note"

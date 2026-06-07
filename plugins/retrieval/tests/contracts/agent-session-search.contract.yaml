@@ -1,0 +1,15 @@
+skill: retrieval:agent-session-search
+preconditions:
+  requires:
+    - "dir:~/.claude/projects"
+input:
+  prompt: |
+    用 /retrieval:agent-session-search 搜历史会话里关于 mihomo 的讨论，
+    列出最多 3 条命中（session 路径或摘要）。
+  cwd: kb
+run:
+  timeout: 300
+  allowed_tools: [Read, Grep, Glob, Bash]
+assert:
+  - stdout_grep: "mihomo"
+  - stdout_grep: "session|会话"

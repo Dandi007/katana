@@ -1,0 +1,16 @@
+skill: retrieval:reddit
+preconditions:
+  requires:
+    - "env:KATANA_E2E_NETWORK"
+input:
+  prompt: |
+    用 /retrieval:reddit 搜索 r/espresso 里关于 temperature 的讨论，
+    列出至少 1 条结果，给出来源链接与可信度。
+  cwd: kb
+run:
+  timeout: 300
+  allowed_tools: [Read, Grep, Glob, Bash]
+assert:
+  - stdout_grep: "reddit|r/"
+  - stdout_grep: "https?://"
+  - stdout_grep: "high|medium|low"

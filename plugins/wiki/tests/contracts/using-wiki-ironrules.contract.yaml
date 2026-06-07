@@ -1,0 +1,8 @@
+skill: wiki:using-wiki
+input:
+  prompt: "意式浓缩的最佳萃取温度是多少？"
+  cwd: kb
+assert:
+  - stdout_grep: "\\[\\[.*\\]\\]"
+  - stdout_grep: "92"
+  - stdout_grep: "96"

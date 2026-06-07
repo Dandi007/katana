@@ -17,6 +17,7 @@
 只验机械不变量（结构完整性），不验语义质量——语义由 fpa skill 的
 adversarial verify（Workflow skeptics）负责。
 """
+from __future__ import annotations
 import json
 import os
 import re

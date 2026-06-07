@@ -1,0 +1,8 @@
+skill: wiki:init
+input:
+  prompt: "把当前目录领养为 wiki，schema 从存量笔记归纳，提案视为已批准，直接生成 WIKI.md"
+  cwd: kb/init-arena
+assert:
+  - file_exists: "{cwd}/WIKI.md"
+  - file_grep: {path: "{cwd}/WIKI.md", pattern: "Zones"}
+  - file_grep: {path: "{cwd}/WIKI.md", pattern: "Ingest"}

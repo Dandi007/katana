@@ -1,0 +1,8 @@
+skill: guide:using-katana
+input:
+  prompt: "根据本 session 已注入的 katana 约定，work folder 有哪些控制文件、checkpoint 应在什么时机做"
+  cwd: kb
+assert:
+  - stdout_grep: "golden-order"
+  - stdout_grep: "checkpoint"
+  - stdout_grep: "work.folder"

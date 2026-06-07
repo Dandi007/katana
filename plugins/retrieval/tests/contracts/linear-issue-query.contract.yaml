@@ -1,0 +1,15 @@
+skill: retrieval:linear
+preconditions:
+  requires:
+    - "env:LINEAR_API_KEY"
+input:
+  prompt: |
+    用 /retrieval:linear 列当前 workspace 最近 1 条 issue 的 identifier（只读），
+    给出来源标注。
+  cwd: kb
+run:
+  timeout: 300
+  allowed_tools: [Read, Grep, Glob, Bash]
+assert:
+  - stdout_grep: "[A-Z]+-[0-9]+"
+  - stdout_grep: "linear|Linear"

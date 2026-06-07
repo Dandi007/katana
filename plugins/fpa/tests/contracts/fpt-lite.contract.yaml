@@ -1,0 +1,9 @@
+skill: fpa:first-principles-thinking
+input:
+  prompt: "请用 first-principles-thinking 对以下主张做 Lite 校准：「我们的内部工具必须拆 microservices，因为大家都这么做」"
+  cwd: kb
+assert:
+  - stdout_grep: "Constraint / Claim"
+  - stdout_grep: "Reconstruction"
+  - stdout_grep: "Key Insight"
+  - stdout_grep: "Unvalidated assumption"
