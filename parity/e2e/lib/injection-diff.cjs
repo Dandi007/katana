@@ -1,122 +1,88 @@
 #!/usr/bin/env node
-// Injection forensics: extract and diff injected context from ccs payload recording
-// Reads ccs payload DB, filters by time window + model, extracts 4 deterministic segments
+// Injection forensics — the first-principles parity gate.
+//
+// Both CC (`claude -p`) and OC (`opencode run`) send their requests to the SAME
+// ccs proxy (15721), which records every request body. Empirically BOTH sides
+// register as app_type='claude' with the same model, so they CANNOT be told
+// apart by app_type/model. They ARE separable by TIME: run.sh runs the two
+// sides sequentially and stamps a disjoint [start,end] epoch window per side
+// (sandbox/<side>/window). We pull each side's request bodies by its window and
+// grep the WHOLE body (system + every message) for the 4 deterministic
+// session-start segment fingerprints — OC injects into the first user message,
+// CC into the system/context, so a system-only scan would miss OC.
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
-const CCS_DB_PATH = process.env.CCS_DB_PATH || path.join(process.env.HOME, '.cc-switch/cc-switch.db');
+const CCS_DB_PATH = process.env.CCS_DB_PATH || '/Volumes/Data/cc-switch/cc-switch.db';
 
-function extractSegments(systemPrompt) {
-  const segments = {
-    guide: false,
-    'work-folder': false,
-    retrieval: false,
-    wiki: false
-  };
+// Fingerprint = a stable header string in each plugin's injected SKILL/rule text.
+const FINGERPRINTS = {
+  guide: 'Using Katana',
+  'work-folder': 'Work Folder',
+  retrieval: 'Using Retrieval',
+  wiki: 'Using Wiki',
+};
 
-  if (!systemPrompt) return segments;
+// fpa PostToolUse exit-2 stderr is fed back to the model, so it lands in a
+// SUBSEQUENT request body within the same window — same forensic channel as
+// injection. validate_fpa.py emits this exact phrase on structure failure.
+const FPA_FINGERPRINT = '机械验收失败';
 
-  // guide: using-katana skill
-  if (systemPrompt.includes('using-katana') || systemPrompt.includes('katana plugin')) {
-    segments.guide = true;
-  }
-
-  // work-folder: work folder convention
-  if (systemPrompt.includes('work folder') || systemPrompt.includes('work-folder')) {
-    segments['work-folder'] = true;
-  }
-
-  // retrieval: multi-source retrieval
-  if (systemPrompt.includes('retrieval') || systemPrompt.includes('/retrieval:')) {
-    segments.retrieval = true;
-  }
-
-  // wiki: wiki engine
-  if (systemPrompt.includes('wiki') || systemPrompt.includes('WIKI.md')) {
-    segments.wiki = true;
-  }
-
-  return segments;
-}
-
-function queryPayloads(since, model, appType) {
+// Pull the concatenated request bodies whose created_at falls in [t0,t1].
+// sqlite3 CLI keeps this dependency-free (no better-sqlite3).
+function bodiesInWindow(t0, t1) {
   if (!fs.existsSync(CCS_DB_PATH)) {
-    console.error(`[injection-diff] ccs DB not found at ${CCS_DB_PATH}`);
-    return [];
+    return { error: `ccs DB not found at ${CCS_DB_PATH}` };
   }
-
   try {
-    const Database = require('better-sqlite3');
-    const db = new Database(CCS_DB_PATH, { readonly: true });
-    const stmt = db.prepare(`
-      SELECT prp.request_body, prp.created_at
-      FROM proxy_request_payloads prp
-      JOIN proxy_request_logs prl ON prp.request_id = prl.request_id
-      WHERE prp.created_at >= ?
-        AND prl.model LIKE ?
-        AND prl.app_type = ?
-      ORDER BY prp.created_at DESC
-      LIMIT 10
-    `);
-
-    const rows = stmt.all(since, `%${model}%`, appType);
-    db.close();
-
-    return rows.map(r => ({
-      payload: JSON.parse(r.request_body),
-      created_at: r.created_at
-    }));
+    const sql =
+      `SELECT request_body FROM proxy_request_payloads ` +
+      `WHERE created_at >= ${t0 - 1} AND created_at <= ${t1 + 1};`;
+    const out = execFileSync('sqlite3', ['-noheader', CCS_DB_PATH, sql], {
+      encoding: 'utf8', maxBuffer: 256 * 1024 * 1024,
+    });
+    return { text: out };
   } catch (err) {
-    console.error(`[injection-diff] Failed to query ccs DB: ${err.message}`);
-    return [];
+    return { error: `sqlite3 query failed: ${err.message}` };
   }
 }
 
-function extractSystemPrompt(payload) {
-  // OpenAI format: messages[0].content (if role=system)
-  // Anthropic format: system field
-  const msg = payload.payload || payload;
-
-  if (msg.system) {
-    return typeof msg.system === 'string' ? msg.system : JSON.stringify(msg.system);
+function readWindow(sandbox, side) {
+  const p = path.join(sandbox, side, 'window');
+  const raw = fs.readFileSync(p, 'utf8').trim().split(/\s+/).map(Number);
+  if (raw.length < 2 || raw.some(Number.isNaN)) {
+    throw new Error(`bad window file ${p}: ${JSON.stringify(raw)}`);
   }
+  return [raw[0], raw[1]];
+}
 
-  if (msg.messages && msg.messages.length > 0) {
-    const first = msg.messages[0];
-    if (first.role === 'system') {
-      return typeof first.content === 'string' ? first.content : JSON.stringify(first.content);
+function segmentsFor(text) {
+  return Object.fromEntries(
+    Object.entries(FINGERPRINTS).map(([seg, fp]) => [seg, text.includes(fp)]),
+  );
+}
+
+// diff(sandbox): returns { cc:{seg:bool}, oc:{seg:bool}, cc_bytes, oc_bytes } or { error }.
+function diff(sandbox) {
+  const result = {};
+  for (const side of ['cc', 'oc']) {
+    let win;
+    try {
+      win = readWindow(sandbox, side);
+    } catch (err) {
+      return { error: `${side}: ${err.message}` };
     }
+    const got = bodiesInWindow(win[0], win[1]);
+    if (got.error) return { error: `${side}: ${got.error}` };
+    if (!got.text.trim()) return { error: `${side}: no ccs payloads recorded in window [${win[0]},${win[1]}]` };
+    result[side] = segmentsFor(got.text);
+    result[`${side}_fpa`] = got.text.includes(FPA_FINGERPRINT);
+    result[`${side}_bytes`] = got.text.length;
   }
-
-  return '';
+  return result;
 }
 
-function diff(ccSide, ocSide, model, startTime) {
-  const ccPayloads = queryPayloads(startTime, model, 'claude');
-  const ocPayloads = queryPayloads(startTime, model, 'codex');
-
-  if (ccPayloads.length === 0) {
-    return { error: 'No CC payloads found in time window' };
-  }
-  if (ocPayloads.length === 0) {
-    return { error: 'No OC payloads found in time window' };
-  }
-
-  // Take the first (most recent) session-start payload from each side
-  const ccSystem = extractSystemPrompt(ccPayloads[0].payload);
-  const ocSystem = extractSystemPrompt(ocPayloads[0].payload);
-
-  const ccSegments = extractSegments(ccSystem);
-  const ocSegments = extractSegments(ocSystem);
-
-  return {
-    cc: ccSegments,
-    oc: ocSegments,
-    cc_payload_count: ccPayloads.length,
-    oc_payload_count: ocPayloads.length
-  };
-}
-
-module.exports = { diff, extractSegments, queryPayloads };
+module.exports = { diff, segmentsFor, FINGERPRINTS, FPA_FINGERPRINT };

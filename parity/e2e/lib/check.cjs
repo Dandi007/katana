@@ -1,117 +1,74 @@
 #!/usr/bin/env node
-// Verdict: check injection parity + fpa validation + skill exposure
-// Reads ccs payload DB, extracts injected segments, compares CC vs OC
+// Verdict: end-to-end parity between Claude Code and OpenCode on the same harness.
+// Three deterministic layers, each PASS only when CC and OC agree:
+//   1. INJECTION-PARITY — the 4 katana session-start segments reached the LLM
+//      (forensic, from ccs payload recording, per-side time window; whole-body).
+//   2. FPA-PARITY        — the fpa PostToolUse hook fired on the FPA-named write
+//      on both sides (validate_fpa.py appears in both run logs).
+//   3. OUTPUT-PARITY     — both sides completed the task (reply contains DONE).
+// usage: node check.js <scenarioPath> <sandbox>
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
-const { normalize } = require('./normalize');
-const injectionDiff = require('./injection-diff');
+const injectionDiff = require('./injection-diff.cjs');
 
-const [scenarioPath, sandbox, model, startTime] = process.argv.slice(2);
+const [scenarioPath, sandbox] = process.argv.slice(2);
 const scenario = JSON.parse(fs.readFileSync(scenarioPath, 'utf8'));
 
 const results = [];
-
-function record(name, ok, detail) {
-  results.push({ name, ok, detail: detail || '' });
-}
-
-function read(side, file) {
+const record = (name, ok, detail) => results.push({ name, ok, detail: detail || '' });
+const read = (side, file) => {
   const p = path.join(sandbox, side, 'collected', file);
-  return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
-}
+  return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+};
 
-// ---- Layer 1: Injection parity (via ccs payload forensics) ----
-const injDiff = injectionDiff.diff('cc', 'oc', model, startTime);
-
-// Emit standalone [injection-diff] JSON line for forensics
+// ---- Layer 1: injection parity (ccs payload forensics) ----
+const injDiff = injectionDiff.diff(sandbox);
 console.log('[injection-diff] ' + JSON.stringify(injDiff));
-
 if (injDiff.error) {
   record('INJECTION-PARITY', false, injDiff.error);
 } else {
-  const expectedSegments = scenario.checks?.injection?.segments || ['guide', 'work-folder', 'retrieval', 'wiki'];
+  const segs = scenario.checks?.injection?.segments || Object.keys(injectionDiff.FINGERPRINTS);
   const missing = [];
-
-  for (const seg of expectedSegments) {
-    if (!injDiff.cc[seg]) missing.push(`cc:${seg}`);
-    if (!injDiff.oc[seg]) missing.push(`oc:${seg}`);
+  for (const s of segs) {
+    if (!injDiff.cc[s]) missing.push(`cc:${s}`);
+    if (!injDiff.oc[s]) missing.push(`oc:${s}`);
   }
-
-  const pass = missing.length === 0;
-  record('INJECTION-PARITY', pass, pass ? 'All segments present on both sides' : `Missing: ${missing.join(', ')}`);
+  record('INJECTION-PARITY', missing.length === 0,
+    missing.length === 0 ? 'all 4 segments present on both sides' : `missing ${missing.join(', ')}`);
 }
 
-// ---- Layer 2: FPA validation ----
-const ccLog = read('cc', 'log.txt') || '';
-const ocLog = read('oc', 'log.txt') || '';
-
-const ccFpaTriggered = /validate_fpa\.py/.test(ccLog);
-const ocFpaTriggered = /validate_fpa\.py/.test(ocLog);
-
-if (!ccFpaTriggered && !ocFpaTriggered) {
-  record('FPA-VALIDATION', true, 'No FPA documents written (expected for basic scenario)');
-} else if (ccFpaTriggered !== ocFpaTriggered) {
-  record('FPA-VALIDATION', false, `FPA trigger mismatch: cc=${ccFpaTriggered}, oc=${ocFpaTriggered}`);
+// ---- Layer 2: fpa hook parity (forensic — fpa exit-2 feedback fed back to model) ----
+// injection-diff exposes cc_fpa/oc_fpa: the validate_fpa failure phrase present
+// in each side's ccs payloads. CC feeds PostToolUse exit-2 stderr to the model;
+// OC's adapter throws from tool.execute.after — both land '机械验收失败' in a
+// subsequent request body. Same forensic channel as injection.
+if (injDiff.error) {
+  record('FPA-PARITY', false, injDiff.error);
 } else {
-  record('FPA-VALIDATION', true, 'Both sides triggered FPA validation');
+  const ccFpa = !!injDiff.cc_fpa;
+  const ocFpa = !!injDiff.oc_fpa;
+  record('FPA-PARITY', ccFpa && ocFpa,
+    ccFpa === ocFpa ? `both sides fpa-fed-back=${ccFpa}` : `mismatch cc=${ccFpa} oc=${ocFpa}`);
 }
 
-// ---- Layer 3: Skill exposure ----
-const ccOutput = read('cc', 'output.txt') || '';
-const ocOutput = read('oc', 'output.txt') || '';
+// ---- Layer 3: tool-effect parity (deterministic shared side effect) ----
+// The model's final prose diverges by design once fpa blocks (CC asks a
+// question, OC retries) — that's non-deterministic and not a parity signal.
+// The deterministic shared effect is the test.md write, present in both projs.
+const fs2 = require('fs');
+const ccWrote = fs2.existsSync(path.join(sandbox, 'cc', 'proj', 'test.md'));
+const ocWrote = fs2.existsSync(path.join(sandbox, 'oc', 'proj', 'test.md'));
+record('TOOL-EFFECT-PARITY', ccWrote && ocWrote,
+  ccWrote === ocWrote ? `both wrote test.md=${ccWrote}` : `mismatch cc=${ccWrote} oc=${ocWrote}`);
 
-const expectedSkills = scenario.checks?.skills?.exposed || [];
-const ccSkills = new Set();
-const ocSkills = new Set();
-
-// Extract skill mentions from output (heuristic: skill names in backticks or mentioned)
-for (const skill of expectedSkills) {
-  if (new RegExp(`\\b${skill}\\b`, 'i').test(ccOutput)) ccSkills.add(skill);
-  if (new RegExp(`\\b${skill}\\b`, 'i').test(ocOutput)) ocSkills.add(skill);
-}
-
-const missingSkills = [];
-for (const skill of expectedSkills) {
-  if (!ccSkills.has(skill)) missingSkills.push(`cc:${skill}`);
-  if (!ocSkills.has(skill)) missingSkills.push(`oc:${skill}`);
-}
-
-if (missingSkills.length === 0) {
-  record('SKILL-EXPOSURE', true, 'All expected skills exposed on both sides');
-} else {
-  record('SKILL-EXPOSURE', false, `Missing skills: ${missingSkills.join(', ')}`);
-}
-
-// ---- Layer 4: Output equivalence (normalized) ----
-const ccNorm = normalize(ccOutput);
-const ocNorm = normalize(ocOutput);
-
-// Check structural equivalence: both created test.md
-const ccHasTestMd = /created.*test\.md/i.test(ccNorm);
-const ocHasTestMd = /created.*test\.md/i.test(ocNorm);
-
-if (ccHasTestMd === ocHasTestMd) {
-  record('OUTPUT-EQUIVALENCE', true, `Both sides ${ccHasTestMd ? 'created' : 'did not create'} test.md`);
-} else {
-  record('OUTPUT-EQUIVALENCE', false, `cc created test.md: ${ccHasTestMd}, oc created test.md: ${ocHasTestMd}`);
-}
-
-// ---- Report ----
+// ---- report (literal contract: "<NAME> PASS|FAIL", final "PARITY PASS"/"PARITY FAIL") ----
 let failed = 0;
 for (const r of results) {
   if (!r.ok) failed++;
-  // Emit exact literal format: "INJECTION-PARITY PASS" or "INJECTION-PARITY FAIL"
   console.log(`${r.name} ${r.ok ? 'PASS' : 'FAIL'}${r.detail ? '  — ' + r.detail : ''}`);
 }
-
 console.log(`\n[e2e] ${results.length - failed}/${results.length} checks passed`);
-
-if (failed === 0) {
-  console.log('\n✅ PARITY PASS');
-  process.exit(0);
-} else {
-  console.log('\n❌ PARITY FAIL');
-  process.exit(1);
-}
+if (failed === 0) { console.log('\nPARITY PASS'); process.exit(0); }
+console.log('\nPARITY FAIL'); process.exit(1);

@@ -19,8 +19,9 @@ SCENARIO="${1:?usage: run.sh <scenario.json> [cc|oc|both]}"
 SIDE="${2:-both}"
 
 CCS_URL="${KATANA_PARITY_CCS_URL:-http://127.0.0.1:15721}"
-CC_MODEL="${KATANA_PARITY_CC_MODEL:-claude-haiku-4-5}"
-OC_MODEL="${KATANA_PARITY_OC_MODEL:-ccs/claude-haiku-4-5}"
+# ccs 路由必须带 lingzhi family 前缀，否则无法路由（CC 侧会卡死）；两侧同一 model 同一 family
+CC_MODEL="${KATANA_PARITY_CC_MODEL:-lingzhi/claude-haiku-4-5-20251001}"
+OC_MODEL="${KATANA_PARITY_OC_MODEL:-ccs/lingzhi/claude-haiku-4-5-20251001}"
 
 # Verify ccs is online (root path 404 = alive)
 if ! curl -s -o /dev/null -w "%{http_code}" "$CCS_URL/" 2>/dev/null | grep -qE "^(200|404)$"; then
@@ -39,19 +40,27 @@ echo "[e2e] oc_model: $OC_MODEL"
 # Record start time for ccs payload query
 START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-make_side() { # $1 = cc|oc
-  local side="$1" home tmp
-  home="$SANDBOX/$side/home"; tmp="$SANDBOX/$side/tmp"
-  mkdir -p "$home/.claude" "$tmp" "$SANDBOX/$side/proj" "$SANDBOX/$side/bin"
+# ccs payload DB — injection forensics reads request bodies from here.
+export CCS_DB_PATH="${CCS_DB_PATH:-/Volumes/Data/cc-switch/cc-switch.db}"
+
+make_side() { # $1 = cc|oc — identical fixture both sides (byte-identical inputs)
+  local side="$1" home tmp proj
+  home="$SANDBOX/$side/home"; tmp="$SANDBOX/$side/tmp"; proj="$SANDBOX/$side/proj"
+  mkdir -p "$home/.claude" "$tmp" "$proj" "$SANDBOX/$side/bin"
+  # Activate all 4 deterministic session-start segments: guide+work-folder are
+  # unconditional; retrieval needs retrieval_sources; wiki needs wiki_root+WIKI.md.
+  printf 'wiki_root=.\nretrieval_sources=web:web\n' > "$proj/.katana"
+  printf '# WIKI\n\nschema stub for e2e parity\n' > "$proj/WIKI.md"
 }
 
 run_cc() {
   make_side cc
   local home="$SANDBOX/cc/home" tmp="$SANDBOX/cc/tmp" proj="$SANDBOX/cc/proj"
   # Generate CC settings with katana hooks
-  node "$E2E/lib/gen-cc-settings.js" "$ROOT" > "$home/.claude/settings.json"
+  node "$E2E/lib/gen-cc-settings.cjs" "$ROOT" > "$home/.claude/settings.json"
   printf '{"hasCompletedOnboarding": true}\n' > "$home/.claude.json"
   echo "[e2e] cc: running claude -p ..."
+  date +%s > "$SANDBOX/cc/window"   # window start (forensic side discrimination)
   (
     cd "$proj"
     env -u CLAUDE_CONFIG_DIR \
@@ -62,6 +71,7 @@ run_cc() {
       claude -p --model "$CC_MODEL" --permission-mode bypassPermissions "$PROMPT" \
       > "$SANDBOX/cc/run.out" 2> "$SANDBOX/cc/run.err"
   ) || { echo "[e2e] cc run FAILED"; tail -5 "$SANDBOX/cc/run.err" || true; }
+  date +%s >> "$SANDBOX/cc/window"  # window end
   collect cc "$home" "$tmp"
 }
 
@@ -69,9 +79,10 @@ run_oc() {
   make_side oc
   local home="$SANDBOX/oc/home" tmp="$SANDBOX/oc/tmp" proj="$SANDBOX/oc/proj"
   mkdir -p "$SANDBOX/oc/xdg-config/opencode" "$SANDBOX/oc/xdg-data" "$proj/.opencode/plugin"
-  node "$E2E/lib/gen-oc-config.js" "$OC_MODEL" "$CCS_URL" > "$SANDBOX/oc/xdg-config/opencode/opencode.json"
+  node "$E2E/lib/gen-oc-config.cjs" "$OC_MODEL" "$CCS_URL" > "$SANDBOX/oc/xdg-config/opencode/opencode.json"
   ln -sf "$ROOT/parity/adapter/opencode/index.ts" "$proj/.opencode/plugin/katana-parity.ts"
   echo "[e2e] oc: running opencode run ..."
+  date +%s > "$SANDBOX/oc/window"   # window start (disjoint from cc — sequential)
   (
     cd "$proj"
     env -u OPENCODE_HOST -u OPENCODE_SERVER_PASSWORD -u OPENCODE_SKIP_START -u OPENCODE_PORT \
@@ -83,6 +94,7 @@ run_oc() {
       opencode run "$PROMPT" \
       > "$SANDBOX/oc/run.out" 2> "$SANDBOX/oc/run.err"
   ) || { echo "[e2e] oc run FAILED"; tail -5 "$SANDBOX/oc/run.err" || true; }
+  date +%s >> "$SANDBOX/oc/window"  # window end
   collect oc "$home" "$tmp"
 }
 
@@ -101,5 +113,5 @@ if [ "$SIDE" = both ]; then
   # Wait for ccs to flush payloads
   sleep 2
   echo "[e2e] Running verdict..."
-  node "$E2E/lib/check.js" "$ROOT/$SCENARIO" "$SANDBOX" "$CC_MODEL" "$START_TIME"
+  node "$E2E/lib/check.cjs" "$ROOT/$SCENARIO" "$SANDBOX"
 fi
