@@ -1,0 +1,9 @@
+skill: obsidian-md:obsidian-writing
+input:
+  prompt: "按 obsidian-writing 规范在当前目录写 冷萃实验.md：frontmatter 带 tags、一个指向 手冲咖啡萃取 的 wikilink、一个 note 类型 callout"
+  cwd: kb
+assert:
+  - file_exists: "{cwd}/冷萃实验.md"
+  - file_grep: {path: "{cwd}/冷萃实验.md", pattern: "^---"}
+  - file_grep: {path: "{cwd}/冷萃实验.md", pattern: "\\[\\[手冲咖啡萃取"}
+  - file_grep: {path: "{cwd}/冷萃实验.md", pattern: "> \\[!note\\]"}
