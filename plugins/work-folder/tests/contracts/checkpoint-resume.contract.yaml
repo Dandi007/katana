@@ -1,0 +1,9 @@
+skill: work-folder:checkpoint
+input:
+  prompt: |
+    用 checkpoint skill 的 resume 模式加载 工作记录/fixture-task/ 的工作状态，
+    汇报当前 Goal、Phase 和下一步。
+  cwd: kb
+assert:
+  - stdout_grep: "咖啡萃取知识页"
+  - stdout_grep: "意式浓缩"

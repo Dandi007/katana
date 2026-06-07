@@ -84,6 +84,14 @@ cp -r /tmp/katana/plugins/fpa/skills/fpa                    "$HOME/.agents/skill
 cp -r /tmp/katana/plugins/fpa/skills/first-principles-thinking "$HOME/.agents/skills/"
 ```
 
+## Testing
+
+Skills are regression-tested by contract: each skill declares an explicit
+contract (input prompt + mechanical artifact assertions), executed for real
+via `claude -p` in an isolated fixture KB with per-case snapshots. A judge
+layer backstops semantic expectations (NEEDS-REVIEW, never hard-fail). See
+`tests/README.md`.
+
 Claude Code-specific features degrade gracefully elsewhere:
 
 - `guide` / `work-folder` context injection and `memory` index injection use

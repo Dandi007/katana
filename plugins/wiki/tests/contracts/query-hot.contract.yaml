@@ -1,0 +1,8 @@
+skill: wiki:query
+input:
+  prompt: "用 /wiki:query 回答：手冲咖啡的推荐萃取水温和粉水比是多少？"
+  cwd: kb
+assert:
+  - stdout_grep: "90"
+  - stdout_grep: "1:15"
+  - stdout_grep: "\\[\\[.*\\]\\]"
