@@ -35,7 +35,49 @@ if mkt != disk:
     print(f"G0-FAIL: marketplace {sorted(mkt)} != disk {sorted(disk)}"); sys.exit(1)
 PY
 
-# 5) --ci 模式：PR 必须带本机 sweep 报告，且至少一份报告之后无实质改动。
+# 5) table.json ↔ hooks.json 一致性校验
+python3 - "$REPO" <<'PY' || FAIL=1
+import json, sys, pathlib
+repo = pathlib.Path(sys.argv[1])
+table_path = repo / "parity/adapter/opencode/table.json"
+if not table_path.exists():
+    print("G0-FAIL: parity/adapter/opencode/table.json not found")
+    sys.exit(1)
+
+table = json.loads(table_path.read_text())
+
+# Check sessionStart entries
+for entry in table.get("sessionStart", []):
+    plugin = entry["plugin"]
+    hooks_json = repo / "plugins" / plugin / "hooks" / "hooks.json"
+    if not hooks_json.exists():
+        print(f"G0-FAIL: {plugin} listed in table.json sessionStart but {hooks_json} not found")
+        sys.exit(1)
+
+    hooks = json.loads(hooks_json.read_text())
+    session_hooks = hooks.get("hooks", {}).get("SessionStart", [])
+    if not session_hooks:
+        print(f"G0-FAIL: {plugin} listed in table.json sessionStart but no SessionStart hooks in {hooks_json}")
+        sys.exit(1)
+
+# Check postToolUse entries
+for entry in table.get("postToolUse", []):
+    plugin = entry["plugin"]
+    hooks_json = repo / "plugins" / plugin / "hooks" / "hooks.json"
+    if not hooks_json.exists():
+        print(f"G0-FAIL: {plugin} listed in table.json postToolUse but {hooks_json} not found")
+        sys.exit(1)
+
+    hooks = json.loads(hooks_json.read_text())
+    post_hooks = hooks.get("hooks", {}).get("PostToolUse", [])
+    if not post_hooks:
+        print(f"G0-FAIL: {plugin} listed in table.json postToolUse but no PostToolUse hooks in {hooks_json}")
+        sys.exit(1)
+
+print("table.json ↔ hooks.json consistency: OK")
+PY
+
+# 6) --ci 模式：PR 必须带本机 sweep 报告，且至少一份报告之后无实质改动。
 #    不可用 ls -t 选"最新"——CI checkout 后 mtime 全相同，顺序随机；
 #    语义正确的判定：任一报告的 sha..HEAD 无 tests/reports 之外的 diff 即新鲜。
 if [ "${1:-}" = "--ci" ]; then

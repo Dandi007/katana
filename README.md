@@ -30,6 +30,43 @@ installable — take only what you need.
 
 Enable/disable any plugin independently with `/plugin`.
 
+## Install (OpenCode)
+
+katana provides an OpenCode parity adapter that enables the same hook
+implementations to work on OpenCode. Install via npm:
+
+```bash
+opencode plugin opencode-katana
+```
+
+Or for development, add the local path to your `opencode.json`:
+
+```json
+{
+  "plugin": ["/path/to/katana"]
+}
+```
+
+The adapter maps OpenCode events to Claude Code hook semantics, spawning the
+same `plugins/*/hooks/*` scripts. SessionStart hooks inject context (guide,
+work-folder, retrieval, wiki), PostToolUse hooks validate FPA documents, and
+all skills are exposed to OpenCode's skill discovery.
+
+**Configuration:**
+
+- `KATANA_PARITY_ROOT` — override katana root path (default: auto-detect from adapter location)
+- `KATANA_DISABLED_PLUGINS` — comma-separated list of plugins to disable (e.g., `wiki,retrieval`)
+
+**Parity verification:**
+
+```bash
+./parity/e2e/run.sh parity/e2e/scenarios/basic.json both
+```
+
+This runs the same scenario on both Claude Code and OpenCode, comparing
+injection parity (via ccs payload forensics), FPA validation triggers, and
+skill exposure.
+
 ## Install (Codex)
 
 SKILL.md files follow the [Agent Skills](https://agentskills.io) open standard,

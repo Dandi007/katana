@@ -1,0 +1,18 @@
+{
+  "name": "basic",
+  "description": "Basic parity test: session-start injection + fpa validation + skill exposure",
+  "prompt": "Create a file named test.md with content: # Test\n\nThis is a test document.\n\nThen create an FPA document named FPA-test.md with proper structure (frontmatter with 创建日期/类型/决策类型, and all 6 required sections: Deconstruction, Constraint Classification, Reconstruction, Adversarial Review, Validation / Measurement Plan, Key Insight). Make it minimal but structurally complete.",
+  "checks": {
+    "injection": {
+      "segments": ["guide", "work-folder", "retrieval", "wiki"],
+      "source": "ccs_payload"
+    },
+    "fpa": {
+      "trigger": "Write.*FPA-.*\\.md",
+      "expected_exit": 0
+    },
+    "skills": {
+      "exposed": ["using-katana", "checkpoint", "deep-research", "remember", "validate", "obsidian-writing", "using-wiki", "init", "ingest", "query", "lint", "fpa", "first-principles-thinking"]
+    }
+  }
+}

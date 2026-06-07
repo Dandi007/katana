@@ -1,0 +1,39 @@
+# session-start-inject — 5 hook 注入契约
+# trigger: session.created event
+# input: {session_id, source:'startup', cwd, hook_event_name:'SessionStart'}
+# effect: stdout 解析 hookSpecificOutput.additionalContext，按表序拼接为 <katana-context> 块
+hook: SessionStart
+trigger:
+  event: session.created
+  properties:
+    sessionID: string
+input:
+  session_id: string
+  source: "startup"
+  cwd: string
+  hook_event_name: "SessionStart"
+effect:
+  stdout_parse: hookSpecificOutput.additionalContext
+  injection:
+    tag: "<katana-context>"
+    order: table.json.sessionStart 顺序
+    join: "\n\n"
+  timing: chat.message 首条 user message prepend
+  race_handling: 首条消息先于 hook 完成 → 该 session 放弃注入
+plugins:
+  - guide
+  - memory
+  - work-folder
+  - retrieval
+  - wiki
+env:
+  CLAUDE_PLUGIN_ROOT: "<pkgRoot>/plugins/<plugin>"
+  CLAUDE_PROJECT_DIR: "<ctx.directory>"
+gate:
+  env: KATANA_DISABLED_PLUGINS
+  format: csv
+  semantics: 黑名单（列出的 plugin 跳过）
+opencode_specific:
+  schema_validation: ">=1.16 强制 user part 带 id/sessionID/messageID"
+  injection_strategy: "prepend 进已有 text part（避免 SchemaError）"
+  fallback: "无 text part 时补齐 id/sessionID/messageID 再 unshift"
