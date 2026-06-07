@@ -1,0 +1,42 @@
+skill: fpa:fpa
+input:
+  prompt: |
+    用 /fpa:fpa 分析：本测试知识库用 92°C 和 96°C 两篇笔记并存的方式记录意式浓缩温度分歧，
+    这种"矛盾互链不抹平"的设计是否合理？落盘到 ./docs/fpa/。
+  cwd: kb
+
+run:
+  timeout: 1800
+  allowed_tools:
+    - Workflow
+    - Agent
+    - Read
+    - Write
+    - Edit
+    - Grep
+    - Glob
+    - Bash
+    - WebSearch
+    - WebFetch
+
+preconditions:
+  requires:
+    - env:KATANA_E2E_NETWORK
+
+assert:
+  # 三件套文件存在
+  - file_exists: "{cwd}/docs/fpa/FPA-*.md"
+  - file_exists: "{cwd}/docs/fpa/adversarial-verdicts.json"
+  - file_exists: "{cwd}/docs/fpa/RUN-REPORT-*.md"
+  # script 校验：①validate_fpa PASS ②verdicts.json 结构合法 ③slug 一致 ④normalize FPA-LATEST.md
+  - script: fpa-full.verify.sh
+  # RUN-REPORT 含裁决汇总标志（对抗验证真跑了）
+  - file_grep:
+      path: "{cwd}/docs/fpa/RUN-REPORT-*.md"
+      pattern: "裁决汇总|upheld|revised"
+
+# verdict 指向 normalize 后的固定路径（verify.sh 末尾 cp FPA-*.md → FPA-LATEST.md）
+verdict:
+  rubric: case-rubrics/fpa-full.md
+  inputs:
+    - "{cwd}/docs/fpa/FPA-LATEST.md"
