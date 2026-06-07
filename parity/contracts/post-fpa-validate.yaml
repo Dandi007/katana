@@ -22,12 +22,11 @@ effect:
     args: ["--hook"]
     stdin: input (JSON)
     await: true  # 需要 exit code
-  exit_codes:
-    0: pass
-    2:
-      cc: "throw new Error(stderr) → 模型可见"
-      opencode: "throw new Error(stderr) → spike①验证 OC 呈现给模型"
-    other_nonzero: ignore（与 CC 一致）
+  exit_0: pass
+  exit_2:
+    cc: "throw new Error(stderr) → 模型可见"
+    opencode: throw
+  exit_other_nonzero: ignore（与 CC 一致）
 gate:
   env: KATANA_DISABLED_PLUGINS
   format: csv
