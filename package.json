@@ -5,10 +5,10 @@
   "type": "module",
   "main": "parity/adapter/opencode/index.ts",
   "files": [
-    "parity/adapter/opencode/",
-    "parity/contracts/",
-    "plugins/*/hooks/",
-    "plugins/*/skills/",
+    "parity/adapter/opencode/**",
+    "parity/contracts/**",
+    "plugins/*/hooks/**",
+    "plugins/*/skills/**",
     "plugins/*/.claude-plugin/plugin.json",
     "README.md",
     "LICENSE"
