@@ -35,6 +35,7 @@ interface TableEntry {
   script: string;
   matcher: string;
   interpreter?: string;
+  args?: string[];
 }
 
 interface Table {
@@ -94,6 +95,8 @@ function runHook(
   const pluginRoot = path.join(ROOT, 'plugins', entry.plugin);
   const scriptPath = path.join(pluginRoot, entry.script);
   const interpreter = entry.interpreter ?? 'bash';
+  // Script args from the table (e.g. fpa's `--hook`); CC passes these via hooks.json.
+  const spawnArgs = [scriptPath, ...(entry.args ?? [])];
   const common = {
     cwd: opts.cwd ?? ROOT,
     env: { ...process.env, CLAUDE_PLUGIN_ROOT: pluginRoot, CLAUDE_PROJECT_DIR: opts.cwd ?? ROOT }
@@ -101,7 +104,7 @@ function runHook(
   return new Promise(resolve => {
     try {
       if (opts.capture) {
-        const child = spawn(interpreter, [scriptPath], {
+        const child = spawn(interpreter, spawnArgs, {
           ...common,
           stdio: [stdinFd, 'pipe', 'pipe']
         });
@@ -118,7 +121,7 @@ function runHook(
           resolve({ code, stdout, stderr });
         });
       } else {
-        const child = spawn(interpreter, [scriptPath], {
+        const child = spawn(interpreter, spawnArgs, {
           ...common,
           detached: true,
           stdio: [stdinFd, 'ignore', 'ignore']
@@ -138,6 +141,10 @@ function runHook(
 interface SessionState {
   injection: string | null;
   injected: boolean;
+  // Resolves when onSessionCreated has finished populating `injection`.
+  // chat.message awaits this so the first user message can never out-race the
+  // session-start hooks (the headless `opencode run` race ECC documented).
+  ready: Promise<void> | null;
 }
 
 const sessions = new Map<string, SessionState>();
@@ -145,7 +152,7 @@ const sessions = new Map<string, SessionState>();
 function state(sessionID: string): SessionState {
   let s = sessions.get(sessionID);
   if (!s) {
-    s = { injection: null, injected: false };
+    s = { injection: null, injected: false, ready: null };
     sessions.set(sessionID, s);
   }
   return s;
@@ -165,6 +172,7 @@ function parseAdditionalContext(stdout: string): string | null {
 }
 
 // ---------- plugin ----------
+
 
 export const KatanaParity = async (ctx: { directory?: string }) => {
   const projectDir = ctx?.directory ?? process.cwd();
@@ -204,13 +212,24 @@ export const KatanaParity = async (ctx: { directory?: string }) => {
       const ev = input?.event;
       if (!ev?.type) return;
       const sessionID: string | undefined = ev.properties?.sessionID ?? ev.properties?.info?.id;
-      if (ev.type === 'session.created' && sessionID) await onSessionCreated(sessionID);
+      if (ev.type === 'session.created' && sessionID) {
+        const s = state(sessionID);
+        // Store the in-flight promise so chat.message can await readiness even
+        // if it fires before this handler's await resolves.
+        if (!s.ready) s.ready = onSessionCreated(sessionID);
+        await s.ready;
+      }
     },
 
     'chat.message': async (_input: { sessionID?: string }, output: { message?: { id?: string; sessionID?: string; role?: string }; parts?: Array<{ type: string; text?: string; id?: string; sessionID?: string; messageID?: string }> }) => {
       const sid = output?.message?.sessionID;
       if (!sid || output?.message?.role !== 'user' || !Array.isArray(output?.parts)) return;
       const s = state(sid);
+      // Wait for session-start hooks to finish before deciding on injection —
+      // otherwise the first user message races ahead and injection is lost.
+      // If chat.message somehow precedes session.created, kick it off here.
+      if (!s.ready) s.ready = onSessionCreated(sid);
+      try { await s.ready; } catch {}
       // session-start context injection: prepend once, before the first user message.
       // Official opencode (>=1.16) schema-validates user parts on save: a bare
       // {type,text} part dies with `Missing key ["id"]/["sessionID"]/["messageID"]`

@@ -31,7 +31,8 @@
       "plugin": "fpa",
       "script": "skills/fpa/scripts/validate_fpa.py",
       "matcher": "Write|Edit",
-      "interpreter": "python3"
+      "interpreter": "python3",
+      "args": ["--hook"]
     }
   ]
 }
