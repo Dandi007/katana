@@ -1,0 +1,16 @@
+skill: retrieval:gitlab
+preconditions:
+  requires:
+    - "env:KATANA_E2E_NETWORK"
+    - "cmd:glab"
+input:
+  prompt: |
+    用 /retrieval:gitlab 查 Dandi007/katana 项目的存在性与默认分支，
+    给出项目路径回显与来源标注。
+  cwd: kb
+run:
+  timeout: 300
+  allowed_tools: [Read, Grep, Glob, Bash]
+assert:
+  - stdout_grep: "katana"
+  - stdout_grep: "gitlab|glab|project"
