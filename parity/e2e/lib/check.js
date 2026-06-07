@@ -25,6 +25,9 @@ function read(side, file) {
 // ---- Layer 1: Injection parity (via ccs payload forensics) ----
 const injDiff = injectionDiff.diff('cc', 'oc', model, startTime);
 
+// Emit standalone [injection-diff] JSON line for forensics
+console.log('[injection-diff] ' + JSON.stringify(injDiff));
+
 if (injDiff.error) {
   record('INJECTION-PARITY', false, injDiff.error);
 } else {
@@ -37,7 +40,7 @@ if (injDiff.error) {
   }
 
   const pass = missing.length === 0;
-  record('INJECTION-PARITY', pass, pass ? JSON.stringify(injDiff) : `Missing: ${missing.join(', ')}`);
+  record('INJECTION-PARITY', pass, pass ? 'All segments present on both sides' : `Missing: ${missing.join(', ')}`);
 }
 
 // ---- Layer 2: FPA validation ----
@@ -99,7 +102,8 @@ if (ccHasTestMd === ocHasTestMd) {
 let failed = 0;
 for (const r of results) {
   if (!r.ok) failed++;
-  console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? '  — ' + r.detail : ''}`);
+  // Emit exact literal format: "INJECTION-PARITY PASS" or "INJECTION-PARITY FAIL"
+  console.log(`${r.name} ${r.ok ? 'PASS' : 'FAIL'}${r.detail ? '  — ' + r.detail : ''}`);
 }
 
 console.log(`\n[e2e] ${results.length - failed}/${results.length} checks passed`);
