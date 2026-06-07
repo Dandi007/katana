@@ -3,7 +3,7 @@ name: Publish to npm
 on:
   push:
     tags:
-      - 'v*'
+      - 'oc-v*'
 
 jobs:
   publish:
@@ -33,10 +33,9 @@ jobs:
       - name: Extract version from tag
         id: version
         run: |
-          TAG=${GITHUB_REF#refs/tags/}
-          VERSION=${TAG#v}
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          TAG=${GITHUB_REF_NAME#oc-v}
+          echo "tag=$GITHUB_REF_NAME" >> $GITHUB_OUTPUT
+          echo "version=$TAG" >> $GITHUB_OUTPUT
 
       - name: Verify package.json version matches tag
         run: |
