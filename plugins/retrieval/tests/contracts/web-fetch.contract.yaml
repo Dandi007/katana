@@ -1,0 +1,15 @@
+skill: retrieval:web
+preconditions:
+  requires:
+    - "env:KATANA_E2E_NETWORK"
+input:
+  prompt: |
+    用 /retrieval:web 查 example.com 首页标题并给出来源与可信度。
+  cwd: kb
+run:
+  timeout: 300
+  allowed_tools: [Read, Grep, Glob, Bash]
+assert:
+  - stdout_grep: "Example Domain"
+  - stdout_grep: "example\\.com"
+  - stdout_grep: "high|medium|low"
