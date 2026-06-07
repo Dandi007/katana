@@ -5,4 +5,4 @@ input:
 assert:
   - file_exists: "{cwd}/WIKI.md"
   - file_grep: {path: "{cwd}/WIKI.md", pattern: "Zones"}
-  - file_grep: {path: "{cwd}/WIKI.md", pattern: "Write Policy"}
+  - file_grep: {path: "{cwd}/WIKI.md", pattern: "Ingest"}

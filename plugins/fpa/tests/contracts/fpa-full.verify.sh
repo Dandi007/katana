@@ -22,7 +22,11 @@ if [ ! -f "$VALIDATE" ]; then
 fi
 
 # ── 2. FPA-*.md 存在且唯一 ──────────────────────────────────────────────────
-FPA_FILES=("$FPA_DIR"/FPA-*.md)
+# 重入安全：排除上次 normalize 产物
+FPA_FILES=()
+for f in "$FPA_DIR"/FPA-*.md; do
+  [ "$(basename "$f")" = "FPA-LATEST.md" ] || FPA_FILES+=("$f")
+done
 if [ ${#FPA_FILES[@]} -eq 0 ] || [ ! -f "${FPA_FILES[0]}" ]; then
   echo "FAIL: $FPA_DIR 中找不到 FPA-*.md"
   exit 1
