@@ -72,6 +72,8 @@ PYEOF
 
 # ── 6. normalize：cp FPA 文档到固定名供 verdict.inputs 使用 ─────────────────
 cp "$FPA_FILE" "$FPA_DIR/FPA-LATEST.md"
+grep -qE "裁决汇总|upheld|revised" "$FPA_DIR/RUN-REPORT-$SLUG.md" || { echo "FAIL: RUN-REPORT 缺裁决汇总标志"; exit 1; }
+echo "RUN-REPORT 裁决汇总 ✓"
 echo "normalized → FPA-LATEST.md ✓"
 
 echo "ALL CHECKS PASS"
