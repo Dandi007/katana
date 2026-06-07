@@ -1,4 +1,2 @@
 # 格式：<plugin>:<skill>  <原因>。G0 对此清单内 skill 不要求契约。
 # Wave 2 铺开时逐行删除。
-deep-research:deep-research     wave-2
-fpa:fpa                         wave-2
