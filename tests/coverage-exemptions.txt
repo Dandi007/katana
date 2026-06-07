@@ -1,12 +1,4 @@
 # 格式：<plugin>:<skill>  <原因>。G0 对此清单内 skill 不要求契约。
 # Wave 2 铺开时逐行删除。
 deep-research:deep-research     wave-2
-retrieval:web                   wave-2
-retrieval:reddit                wave-2
-retrieval:twitter               wave-2
-retrieval:official-docs         wave-2
-retrieval:github                wave-2
-retrieval:gitlab                wave-2
-retrieval:linear                wave-2
-retrieval:feishu                wave-2
 fpa:fpa                         wave-2
