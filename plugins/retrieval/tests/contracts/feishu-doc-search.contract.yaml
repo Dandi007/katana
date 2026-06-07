@@ -1,0 +1,16 @@
+skill: retrieval:feishu
+preconditions:
+  requires:
+    - "cmd:lark-cli"
+    - "dir:~/.lark-cli"
+input:
+  prompt: |
+    用 /retrieval:feishu 搜索飞书 wiki 关键词「OKR」（只读搜索，不发消息不创建内容），
+    列出至少 1 条结果，给出来源标注。
+  cwd: kb
+run:
+  timeout: 300
+  allowed_tools: [Read, Grep, Glob, Bash]
+assert:
+  - stdout_grep: "OKR|okr"
+  - stdout_grep: "feishu|lark|飞书"
