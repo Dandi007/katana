@@ -66,7 +66,8 @@ def section_by_token(sections: dict[str, str], token: str) -> str | None:
 def validate(path: str) -> list[str]:
     issues: list[str] = []
     try:
-        text = open(path, encoding="utf-8").read()
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
     except OSError as e:
         return [f"无法读取文件: {e}"]
 
@@ -113,9 +114,11 @@ def validate(path: str) -> list[str]:
     if found["Validate"] is not None and not table_data_rows(found["Validate"]):
         issues.append("Validate 节缺少对抗裁决表（至少 reconstruction 一行）")
 
-    # key insight 非空
-    if found["Key Insight"] is not None and not found["Key Insight"].strip():
-        issues.append("Key Insight 为空")
+    # key insight 非空（body 可能包含后续 H1，截掉 ^# 行再判空）
+    if found["Key Insight"] is not None:
+        ki_body = re.split(r"^#", found["Key Insight"], maxsplit=1, flags=re.MULTILINE)[0]
+        if not ki_body.strip():
+            issues.append("Key Insight 为空")
 
     # references（仓库硬约束：事实性内容文末保留 References）
     ref = re.search(r"^# References\s*$(.*)\Z", text, re.MULTILINE | re.DOTALL)
@@ -140,7 +143,8 @@ def validate_suite(report_path: str) -> list[str]:
     else:
         issues += [f"FPA-{slug}.md: {i}" for i in validate(fpa_path)]
         try:
-            fpa_sections = parse_sections(open(fpa_path, encoding="utf-8").read())
+            with open(fpa_path, encoding="utf-8") as f:
+                fpa_sections = parse_sections(f.read())
             val_body = section_by_token(fpa_sections, "Validate") or ""
             ar_rows = len(table_data_rows(val_body))
         except OSError:
@@ -151,7 +155,8 @@ def validate_suite(report_path: str) -> list[str]:
         issues.append("缺少同级 adversarial-verdicts.json（Phase 2 verdict 原文，正文表只是摘要）")
     else:
         try:
-            data = json.load(open(verdicts_path, encoding="utf-8"))
+            with open(verdicts_path, encoding="utf-8") as f:
+                data = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
             data = None
             issues.append(f"adversarial-verdicts.json 不是合法 JSON: {e}")
