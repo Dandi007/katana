@@ -24,13 +24,15 @@ import re
 import sys
 
 REQUIRED_FRONTMATTER_KEYS = ["创建日期", "类型", "决策类型"]
-REQUIRED_SECTIONS = [
-    "Deconstruction",
-    "Constraint Classification",
-    "Reconstruction",
-    "Adversarial Review",
-    "Validation / Measurement Plan",
-    "Key Insight",
+# (token, 报错用人类可读名)——token 在 `## ` 标题里出现即算该 section 存在，
+# 对编号前缀与「｜中文注解」鲁棒。
+REQUIRED_SECTION_TOKENS = [
+    ("目标与需求", "目标与需求"),
+    ("Deconstruct", "Deconstruct｜拆解"),
+    ("Challenge", "Challenge｜约束三分类"),
+    ("Reconstruct", "Reconstruct｜重建"),
+    ("Validate", "Validate｜验证与对抗裁决"),
+    ("Key Insight", "Key Insight"),
 ]
 TYPE_PATTERN = re.compile(r"hard\s+constraint|soft\s+constraint|assumption", re.IGNORECASE)
 FPA_NAME = re.compile(r"^FPA-(.+)\.md$")
@@ -53,6 +55,14 @@ def parse_sections(text: str) -> dict[str, str]:
     return sections
 
 
+def section_by_token(sections: dict[str, str], token: str) -> str | None:
+    """按 token 在 `## ` 标题里找正文；命中第一个标题含 token 的 section。"""
+    for header, body in sections.items():
+        if token.lower() in header.lower():
+            return body
+    return None
+
+
 def validate(path: str) -> list[str]:
     issues: list[str] = []
     try:
@@ -73,22 +83,22 @@ def validate(path: str) -> list[str]:
     if not re.search(r"^# First Principles Analysis:\s*\S", text, re.MULTILINE):
         issues.append("缺少 H1: `# First Principles Analysis: <主题>`")
 
-    # sections
     sections = parse_sections(text)
-    for name in REQUIRED_SECTIONS:
-        if name not in sections:
-            issues.append(f"缺少 section: `## {name}`")
+    found = {tok: section_by_token(sections, tok) for tok, _ in REQUIRED_SECTION_TOKENS}
+    for tok, label in REQUIRED_SECTION_TOKENS:
+        if found[tok] is None:
+            issues.append(f"缺少 section: `## …{label}…`")
 
-    # deconstruction 需求拆解表
-    if "Deconstruction" in sections and not table_data_rows(sections["Deconstruction"]):
-        issues.append("Deconstruction 缺少需求拆解表（子需求 → 现有方案中由什么满足）")
+    # Deconstruct 对齐映射表（子需求 → 现状由什么满足 → gap）
+    if found["Deconstruct"] is not None and not table_data_rows(found["Deconstruct"]):
+        issues.append("Deconstruct 节缺少对齐映射表（子需求 → 现状由什么满足 → gap）")
 
-    # constraint table
-    cc = sections.get("Constraint Classification", "")
-    if "Constraint Classification" in sections:
+    # Challenge 约束三分类表
+    cc = found["Challenge"]
+    if cc is not None:
         rows = table_data_rows(cc)
         if not rows:
-            issues.append("Constraint Classification 表没有数据行")
+            issues.append("Challenge 约束表没有数据行")
         else:
             for r in rows:
                 cols = [c.strip() for c in r.strip().strip("|").split("|")]
@@ -99,13 +109,12 @@ def validate(path: str) -> list[str]:
                 elif not cols[2]:
                     issues.append(f"约束表 Evidence 列为空: {cols[0][:40]}")
 
-    # adversarial review
-    if "Adversarial Review" in sections:
-        if not table_data_rows(sections["Adversarial Review"]):
-            issues.append("Adversarial Review 表没有数据行（至少须有 reconstruction 一行）")
+    # Validate 对抗裁决表（至少 reconstruction 一行）
+    if found["Validate"] is not None and not table_data_rows(found["Validate"]):
+        issues.append("Validate 节缺少对抗裁决表（至少 reconstruction 一行）")
 
-    # key insight
-    if "Key Insight" in sections and not sections["Key Insight"].strip():
+    # key insight 非空
+    if found["Key Insight"] is not None and not found["Key Insight"].strip():
         issues.append("Key Insight 为空")
 
     # references（仓库硬约束：事实性内容文末保留 References）
@@ -131,8 +140,9 @@ def validate_suite(report_path: str) -> list[str]:
     else:
         issues += [f"FPA-{slug}.md: {i}" for i in validate(fpa_path)]
         try:
-            ar = parse_sections(open(fpa_path, encoding="utf-8").read()).get("Adversarial Review", "")
-            ar_rows = len(table_data_rows(ar))
+            fpa_sections = parse_sections(open(fpa_path, encoding="utf-8").read())
+            val_body = section_by_token(fpa_sections, "Validate") or ""
+            ar_rows = len(table_data_rows(val_body))
         except OSError:
             pass
 
@@ -151,7 +161,7 @@ def validate_suite(report_path: str) -> list[str]:
                 issues.append("adversarial-verdicts.json 缺少非空 verdicts 数组")
             elif ar_rows is not None and len(verdicts) < ar_rows:
                 issues.append(
-                    f"verdict 原文条数({len(verdicts)}) < FPA 文档 Adversarial Review 表行数({ar_rows})"
+                    f"verdict 原文条数({len(verdicts)}) < FPA 文档 Validate 裁决表行数({ar_rows})"
                     "——正文裁决多于原始记录，疑似编造")
 
     return issues
