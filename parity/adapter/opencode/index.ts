@@ -171,8 +171,20 @@ function parseAdditionalContext(stdout: string): string | null {
   }
 }
 
-// ---------- plugin ----------
+// Existing plugins/<name>/skills directories, minus disabled plugins. Exposed
+// to OpenCode's skill discovery via the `config` hook (cfg.skills.paths).
+function skillDirs(disabled: string[]): string[] {
+  try {
+    return fs.readdirSync(path.join(ROOT, 'plugins'), { withFileTypes: true })
+      .filter(d => d.isDirectory() && !disabled.includes(d.name))
+      .map(d => path.join(ROOT, 'plugins', d.name, 'skills'))
+      .filter(p => fs.existsSync(p));
+  } catch {
+    return [];
+  }
+}
 
+// ---------- plugin ----------
 
 export const KatanaParity = async (ctx: { directory?: string }) => {
   const projectDir = ctx?.directory ?? process.cwd();
@@ -207,6 +219,22 @@ export const KatanaParity = async (ctx: { directory?: string }) => {
   }
 
   return {
+    // Register katana skills with OpenCode's discovery by appending each
+    // plugins/<name>/skills dir to cfg.skills.paths. OC v1.16.2 runs the config
+    // hook during plugin init, before skill discovery reads cfg.skills.paths
+    // (spike②), so the appended paths are scanned. Defensive: never break load.
+    config: async (cfg: any) => {
+      try {
+        const dirs = skillDirs(disabled);
+        if (!dirs.length) return;
+        cfg.skills = cfg.skills ?? {};
+        const existing = Array.isArray(cfg.skills.paths) ? cfg.skills.paths : [];
+        cfg.skills.paths = [...existing, ...dirs.filter(d => !existing.includes(d))];
+      } catch {
+        /* never break config load */
+      }
+    },
+
     // lifecycle arrives ONLY on the generic event bus (spike-verified)
     event: async (input: { event?: { type?: string; properties?: any } }) => {
       const ev = input?.event;
