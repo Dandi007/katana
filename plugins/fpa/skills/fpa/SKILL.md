@@ -39,14 +39,18 @@ plugin 目录只读。执行中遇到错误/踩坑，append 到**消费 repo** �
 2. 读取同 plugin 的 `../first-principles-thinking/SKILL.md`（方法定义）与消费 repo 的 `docs/fpa/errors.md`（如存在）。
 3. 确定落盘去向：用户指定路径 > active work folder（与 `findings.md` 同级）> `docs/fpa/`（项目 CLAUDE.md 可声明覆盖默认）。
 
-### Phase 1 — 四步草稿（单 agent，顺序执行）
+### Phase 1 — 目标与需求 + 四步草稿（单 agent，顺序执行）
 
-按四步循环产出草稿：Deconstruct → Challenge（约束三分类表）→ Reconstruct → Validate。
+产出草稿分两段，先目标后四步——同一上下文顺序推理：
+
+**第 0 步 · 明确目标与需求**（四步的前提）：先写清楚「要什么」——真正要完成的 function、验收口径（满足什么才算「对」）、本质命题（如有）。新 Deconstruct 是「拆解：现状 vs 需求」，逻辑上预设需求已先被陈述；跳过这步会让产物 `## 0. 目标与需求` 沦为事后回填的空槽（format without substance）。
+
+**四步循环**：Deconstruct（拆解：现状 vs 需求，产出对齐映射表）→ Challenge（约束三分类表）→ Reconstruct → Validate。
 
 硬规则：
 
 - **禁止把四步拆给不同 subagent**——四步是顺序推理，必须共享同一上下文。
-- Deconstruct 步必须包含**需求拆解**表：把源需求拆成子需求，每条标注「现有方案中由什么满足」——没有任何部分满足的子需求就是设计缺口，必须在 Reconstruct 步补位或显式列为非目标。（实证：本 skill 自指分析中，两个真实设计缺口正是分别由 skeptic 自下而上核对与用户人工各自从需求拆解的空格里发现的。）
+- Deconstruct 步必须包含**对齐映射**表：把第 0 步的目标与需求拆成子需求，每条标注「现状/默认方案由什么满足」——没有任何部分满足的子需求就是设计缺口，必须在 Reconstruct 步补位或显式列为非目标。（实证：本 skill 自指分析中，两个真实设计缺口正是分别由 skeptic 自下而上核对与用户人工各自从对齐映射的空格里发现的。）
 - 证据缺口显式写入草稿（"当前证据缺口：…"），禁止编造数据。
 - 分类表中每条 claim 必须有 Evidence 列；写不出 evidence 的 claim 自动归为 Unvalidated assumption。
 
@@ -105,14 +109,14 @@ return await parallel(tasks)
 裁决处理规则：
 
 - `refuted` / `revised` 的条目**必须**修订正文（重新分类、改 challenge 或改方案），不得静默忽略。
-- 全部 verdict 与处理方式写入文档 `## Adversarial Review` 一节。
-- 即使草稿没有任何 assumption，也必须对 Reconstruction 跑 skeptic（所以 Adversarial Review 永远非空）。
+- 全部 verdict 与处理方式写入文档 `## 4. Validate` 的对抗裁决表。
+- 即使草稿没有任何 assumption，也必须对 Reconstruction 跑 skeptic（所以 Validate 的对抗裁决表永远非空）。
 
 ### Phase 3 — 修订并落盘
 
 按 `templates/fpa-doc.md` 写 `FPA-<topic-slug>.md`（slug 用英文 kebab-case）。
 
-同级落盘 `adversarial-verdicts.json`：全部 verdict 原文（含完整 evidence / note）。正文 Adversarial Review 表只是压缩摘要；取证细节若只留在临时 task output 会随系统清理丢失，References 复核 skeptic 转述时以此为原料。
+同级落盘 `adversarial-verdicts.json`：全部 verdict 原文（含完整 evidence / note）。正文 Validate 裁决表只是压缩摘要；取证细节若只留在临时 task output 会随系统清理丢失，References 复核 skeptic 转述时以此为原料。
 
 证据可信度规则（写入文档时强制）：
 
@@ -128,8 +132,8 @@ python3 <本 skill base dir>/scripts/validate_fpa.py <FPA 文件路径>
 
 plugin 自带 PostToolUse hook（`hooks/hooks.json`），安装即生效，按文件名分两档自动校验（被 block 时按 stderr 指出的缺失项修复后重写）：
 
-- Write/Edit `FPA-*.md` → 结构校验（frontmatter、六 section、表格不变量）；
-- Write/Edit `RUN-REPORT-*.md`（Phase 5 落盘时触发）→ **三件套 suite 校验**：同级同 slug 的 `FPA-*.md` 结构通过 + `adversarial-verdicts.json` 存在且 verdict 原文条数 ≥ 正文 Adversarial Review 表行数。过程合规由此转化为「过程产物链可机械验证」，不依赖执行自觉；挂在 run report（最后一个产物）上是为了不误伤 Phase 3→5 之间的中间状态。
+- Write/Edit `FPA-*.md` → 结构校验（frontmatter、目标与需求 + 四步 + Key Insight 六节、表格不变量）；
+- Write/Edit `RUN-REPORT-*.md`（Phase 5 落盘时触发）→ **三件套 suite 校验**：同级同 slug 的 `FPA-*.md` 结构通过 + `adversarial-verdicts.json` 存在且 verdict 原文条数 ≥ 正文 Validate 裁决表行数。过程合规由此转化为「过程产物链可机械验证」，不依赖执行自觉；挂在 run report（最后一个产物）上是为了不误伤 Phase 3→5 之间的中间状态。
 
 ### Phase 5 — Run Report（必出）
 
@@ -137,12 +141,12 @@ plugin 自带 PostToolUse hook（`hooks/hooks.json`），安装即生效，按�
 
 - **对话内必须输出全文**——分析跑完没有向用户呈报等于没跑完；
 - 同时落盘 `RUN-REPORT-<topic-slug>.md`（与 FPA 文档同级，**slug 必须与 FPA 文档一致**——suite 校验按 slug 配对）；
-- 结构固定：需求拆解 → 裁决汇总（含 upheld/revised/refuted 计数行）→ 草稿→终稿关键变化 → Key Insight → 遗留实验/下一步；
+- 结构固定：目标与需求 → 对齐映射 → 四步精简（第 4 步带 upheld/revised/refuted 计数 + 草稿→终稿关键变化）→ Key Insight → 下一步；
 - 术语规约：列名用读者无需上下文即可理解的明白话（「现有方案中由什么满足」「FPA 文档据此改了什么」），禁止内部行话漏出。
 
 ## 验收标准
 
-机械（validate 脚本强制）：frontmatter 完整、六个必需 section 齐全、Deconstruction 含需求拆解表、约束表与 Adversarial Review 非空、Key Insight 非空、文末 `# References` 至少一条；run report 落盘时追加三件套 suite 校验（FPA 文档结构 + verdicts 原文存在 + 条数不少于正文裁决行数）。
+机械（validate 脚本强制）：frontmatter 完整、目标与需求/Deconstruct/Challenge/Reconstruct/Validate/Key Insight 六节齐全、Deconstruct 含对齐映射表、Challenge 约束表与 Validate 裁决表非空、Key Insight 非空、文末 `# References` 至少一条；run report 落盘时追加三件套 suite 校验（FPA 文档结构 + verdicts 原文存在 + 条数不少于正文裁决行数）。
 
 语义（自检）：一份合格的 FPA 必须包含三样东西——约束分类表、**被推翻或被对抗检验过的具体假设**、从真实约束重建的方案。缺一即伪分析。运行结束时三件套产物必须齐全（`FPA-*.md` / `adversarial-verdicts.json` / `RUN-REPORT-*.md`），且 run report 已在对话内呈给用户。
 
