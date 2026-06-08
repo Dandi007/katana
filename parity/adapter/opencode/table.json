@@ -1,0 +1,38 @@
+{
+  "sessionStart": [
+    {
+      "plugin": "guide",
+      "script": "hooks/session-start",
+      "matcher": "startup|clear|compact"
+    },
+    {
+      "plugin": "memory",
+      "script": "hooks/session-start",
+      "matcher": "startup|clear|compact"
+    },
+    {
+      "plugin": "work-folder",
+      "script": "hooks/session-start",
+      "matcher": "startup|clear|compact"
+    },
+    {
+      "plugin": "retrieval",
+      "script": "hooks/session-start",
+      "matcher": "startup|clear|compact"
+    },
+    {
+      "plugin": "wiki",
+      "script": "hooks/session-start",
+      "matcher": "startup|clear|compact"
+    }
+  ],
+  "postToolUse": [
+    {
+      "plugin": "fpa",
+      "script": "skills/fpa/scripts/validate_fpa.py",
+      "matcher": "Write|Edit",
+      "interpreter": "python3",
+      "args": ["--hook"]
+    }
+  ]
+}

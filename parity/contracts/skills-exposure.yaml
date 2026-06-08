@@ -1,0 +1,37 @@
+# skills-exposure — skill 发现与可用性契约
+# trigger: adapter 初始化
+# input: 无
+# effect: 向 OC config 追加 skills.paths（首选）或 README 给一行 config（fallback）
+hook: SkillsExposure
+trigger:
+  event: adapter.init
+  timing: plugin 加载时
+input: null
+effect:
+  preferred:
+    mechanism: "config hook（v1.16.2 plugin/index.ts:251）"
+    action: "cfg.skills.paths 追加 <pkgRoot>/plugins/<p>/skills × 8"
+    autonomy: 零配置全自治
+    spike: "spike②验证 cfg 突变对 skill discovery 的时序可见性"
+  fallback:
+    mechanism: "README 安装文档"
+    config: '"skills": {"paths": [...]}'
+    user_action: 手动一行 config
+known_differences:
+  - namespace: "OC skill 扁平命名空间（frontmatter name 即全局名，无 plugin 前缀）"
+    risk: "katana 裸名 skill（query/ingest 等）存在撞名风险"
+    oc_behavior: "重名仅 warn"
+    mitigation: 记录不修
+  - tool_dependency: "依赖 CC 专属工具的 skill 在 OC 降级"
+    affected:
+      - deep-research  # 用 Workflow tool
+      - fpa            # 用 Workflow tool（adversarial verify）
+    oc_behavior: "skill 可见可调，编排步骤需 LLM 按文内 fallback 自行替代"
+    mitigation: 记录不修
+gate:
+  env: KATANA_DISABLED_PLUGINS
+  format: csv
+  semantics: 黑名单
+opencode_specific:
+  skill_discovery: "frontmatter name 即全局名"
+  config_hook: "plugin/index.ts:251（存在但未文档化）"

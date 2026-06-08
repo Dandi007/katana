@@ -1,0 +1,33 @@
+# katana parity — shared contract rules
+# 启用集合派生（不 hardcode hook 清单）：
+#   enabled(plugin) = !KATANA_DISABLED_PLUGINS.includes(plugin)
+#   env: KATANA_DISABLED_PLUGINS (csv)
+schema: katana.parity.v1
+state_root: "$HOME/.claude"          # 两 runtime 共享同一状态根（HOME 注入决定隔离/生产）
+tmp_root: "$TMPDIR"                  # e2e 必须重定向
+tool_name_map:                       # OpenCode → Claude Code
+  bash: Bash
+  write: Write
+  edit: Edit
+  read: Read
+  glob: Glob
+  grep: Grep
+  todowrite: TodoWrite
+  task: Agent
+normalize:                           # diff 前豁免规则（两侧产物先 normalize 再比）
+  - kind: regex
+    pattern: "ses_[a-zA-Z0-9]+|[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    replace: "<SESSION_ID>"
+  - kind: regex
+    pattern: "[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9:.]+(Z|[+-][0-9:]+)?"
+    replace: "<TIMESTAMP>"
+  - kind: regex
+    pattern: "[0-9]{2}:[0-9]{2}(:[0-9]{2})?"
+    replace: "<TIME>"
+  - kind: regex
+    pattern: "(/private)?(/var/folders/[^ \"]+|/tmp/[^ \"]*sandbox[^ \"]*)"
+    replace: "<TMP>"
+  - kind: path-prefix                # sandbox 根之下的绝对路径前缀
+    replace: "<ROOT>"
+tool_input_key_map:                  # OpenCode camelCase → Claude Code snake_case
+  filePath: file_path

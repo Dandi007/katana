@@ -1,0 +1,49 @@
+{
+  "name": "opencode-katana",
+  "version": "0.1.0",
+  "description": "OpenCode parity adapter for katana plugins — enables the same hook implementations to work on both Claude Code and OpenCode",
+  "type": "module",
+  "main": "parity/adapter/opencode/index.ts",
+  "files": [
+    "parity/adapter/opencode/**",
+    "parity/contracts/**",
+    "plugins/*/hooks/**",
+    "plugins/*/skills/**",
+    "plugins/*/.claude-plugin/plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bun test parity/adapter/opencode/",
+    "lint": "./tests/lint-structure.sh",
+    "e2e": "./parity/e2e/run.sh parity/e2e/scenarios/basic.json both"
+  },
+  "keywords": [
+    "opencode",
+    "claude-code",
+    "katana",
+    "plugin",
+    "parity",
+    "adapter"
+  ],
+  "author": "Dandi007",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dandi007/katana.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Dandi007/katana/issues"
+  },
+  "homepage": "https://github.com/Dandi007/katana#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "opencode": ">=1.16.2"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "better-sqlite3": "^11.0.0"
+  }
+}

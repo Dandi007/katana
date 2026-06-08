@@ -1,0 +1,37 @@
+# post-fpa-validate — FPA 文档机械校验契约
+# trigger: tool.execute.after (Write|Edit)
+# input: {session_id, hook_event_name:'PostToolUse', tool_name, tool_input, tool_output, cwd}
+# effect: spawn python3 validate_fpa.py --hook，exit code 决定行为
+hook: PostToolUse
+trigger:
+  event: tool.execute.after
+  tool_matcher: "Write|Edit"
+input:
+  session_id: string
+  hook_event_name: "PostToolUse"
+  tool_name: string
+  tool_input:
+    file_path: string  # OpenCode filePath → file_path
+    content: string
+  tool_output: string
+  cwd: string
+effect:
+  spawn:
+    interpreter: python3
+    script: "skills/fpa/scripts/validate_fpa.py"
+    args: ["--hook"]
+    stdin: input (JSON)
+    await: true  # 需要 exit code
+  exit_0: pass
+  exit_2:
+    cc: "throw new Error(stderr) → 模型可见"
+    opencode: throw
+  exit_other_nonzero: ignore（与 CC 一致）
+gate:
+  env: KATANA_DISABLED_PLUGINS
+  format: csv
+  semantics: 黑名单
+opencode_specific:
+  tool_name_mapping: "write/edit → Write/Edit"
+  args_key_mapping: "filePath → file_path"
+  throw_behavior: "spike①验证：OC 把 throw 呈现给模型（与 CC 等效）"
