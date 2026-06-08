@@ -1,0 +1,32 @@
+name: tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  memory-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: memory scanner byte-parity (golden)
+        run: bash plugins/memory/tests/scan-memory.test.sh
+
+  pack-parity:
+    # Guards the "published artifact is missing runtime assets" failure class:
+    # packs the real npm tarball and runs the hooks FROM the package.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: packed-artifact injection parity
+        run: bash tests/pack-parity.sh
+
+  adapter-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: OpenCode parity adapter unit tests
+        run: bun test parity/adapter/opencode/

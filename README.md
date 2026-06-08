@@ -207,17 +207,20 @@ deep_research_max_width=10
 
 This tells katana to use `智元工作/工作记录/YYYY/MM/DD/<topic>/` for work folders instead of the default `docs/work-records/...`. The `deep_research_sources` / `deep_research_max_width` entries declare named platform sources for deep-research workers and the per-round fan-out width.
 
-## memory binary resolution
+## memory scanner
 
-On session start the memory hook resolves its Rust scanner in order:
-cached binary in `bin/` or `target/release/` (version-matched) → prebuilt download from GitHub
-Releases (macos-arm64, sha256-verified) → local `cargo build` → graceful
-skip (never blocks the session).
+On session start the memory hook (`plugins/memory/hooks/session-start`) scans the
+memory card frontmatter with a pure shell + awk scanner
+(`plugins/memory/hooks/scan-memory.awk`) and injects the `<memory-index>`. It is a
+text script — no compiled binary, no download, no build step — so it ships intact
+in the npm package and runs anywhere `bash` + `awk` exist. If no cards are found it
+emits nothing (never blocks the session). Output is locked to a golden by
+`plugins/memory/tests/scan-memory.test.sh`.
 
 ## Releasing (maintainer)
 
-1. Bump `version` in the plugin's `plugin.json` (and `Cargo.toml` for memory — keep them equal).
-2. Tag `v<version>` and push; CI uploads `claude-memory-scan-macos-arm64` + `checksums.txt`.
+1. Bump `version` in the plugin's `plugin.json` and `version` in the root `package.json`.
+2. Tag `v<version>` and push; `npm-publish.yml` publishes the package and creates the GitHub Release.
 
 ## License
 

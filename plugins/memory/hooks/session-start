@@ -1,70 +1,41 @@
 #!/usr/bin/env bash
-# Three-tier binary resolution: cached → download prebuilt → cargo build → graceful skip.
+# SessionStart hook: scan memory cards and inject the <memory-index> as
+# additionalContext. Pure shell + awk — no compiled binary, no download, no
+# build step, so it ships intact in the npm package and runs anywhere bash+awk
+# exist. (Replaces the former Rust `claude-memory-scan` binary; see
+# docs/specs/2026-06-08-shell-rewrite.md.)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/katana-config.sh"
 
-PLUGIN_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-BIN_DIR="${PLUGIN_DIR}/bin"
-BIN="${BIN_DIR}/claude-memory-scan"
-LEGACY_BIN="${PLUGIN_DIR}/target/release/claude-memory-scan"
+AWK_PROG="${SCRIPT_DIR}/scan-memory.awk"
 
-PLUGIN_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-    "${PLUGIN_DIR}/.claude-plugin/plugin.json" 2>/dev/null | head -1 || true)"
-RELEASE_BASE="${KATANA_MEMORY_RELEASE_BASE:-https://github.com/Dandi007/katana/releases/download}"
+# Memory paths: env > .katana > default (identical resolution to the old binary).
+SYSTEM_MEMORY="${CLAUDE_MEMORY_SYSTEM_DIR:-${HOME}/.claude/memory}"
+PROJECT_MEMORY="$(katana_config_get "memory_project_dir" "${CLAUDE_PROJECT_DIR:-$(pwd)}/memory" "CLAUDE_MEMORY_PROJECT_DIR")"
 
-run_scan() {
-    # Read memory paths from config (env > .katana > default)
-    SYSTEM_MEMORY="${CLAUDE_MEMORY_SYSTEM_DIR:-${HOME}/.claude/memory}"
-    PROJECT_MEMORY="$(katana_config_get "memory_project_dir" "${CLAUDE_PROJECT_DIR:-$(pwd)}/memory" "CLAUDE_MEMORY_PROJECT_DIR")"
-    exec "$1" --system "$SYSTEM_MEMORY" --project "$PROJECT_MEMORY"
-}
-
-# Tier 1: cached binary with matching version
-for candidate in "$BIN" "$LEGACY_BIN"; do
-    if [ -x "$candidate" ] && [ "$("$candidate" --version 2>/dev/null)" = "$PLUGIN_VERSION" ]; then
-        run_scan "$candidate"
-    fi
-done
-
-# Tier 2: download prebuilt (macos-arm64 only)
-# Detect hardware arch, not the (possibly Rosetta-translated) process arch:
-# under Rosetta on Apple Silicon, `uname -m` reports x86_64, so consult
-# hw.optional.arm64 to recognize genuine arm64 hardware.
-HW_ARCH="$(uname -m)"
-if [ "$(uname -s)" = "Darwin" ] && [ "$HW_ARCH" = "x86_64" ] \
-        && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
-    HW_ARCH="arm64"
+# Collect byte-sorted *.md lists (parity with the Rust PathBuf sort). A missing
+# directory simply yields no files — the scanner then emits nothing for it.
+sysfiles=(); projfiles=()
+if [ -d "$SYSTEM_MEMORY" ]; then
+    while IFS= read -r -d '' f; do sysfiles+=("$f"); done \
+        < <(find "$SYSTEM_MEMORY" -maxdepth 1 -name '*.md' -print0 2>/dev/null | LC_ALL=C sort -z)
 fi
-if [ "$(uname -s)/${HW_ARCH}" = "Darwin/arm64" ] && [ -n "$PLUGIN_VERSION" ]; then
-    url_base="${RELEASE_BASE}/v${PLUGIN_VERSION}"
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
-    if curl -fsSL --connect-timeout 5 --max-time 30 \
-            -o "${tmp}/claude-memory-scan" "${url_base}/claude-memory-scan-macos-arm64" \
-       && curl -fsSL --connect-timeout 5 --max-time 10 \
-            -o "${tmp}/checksums.txt" "${url_base}/checksums.txt"; then
-        expected="$(awk '/claude-memory-scan-macos-arm64/{print $1}' "${tmp}/checksums.txt")"
-        actual="$(shasum -a 256 "${tmp}/claude-memory-scan" | awk '{print $1}')"
-        if [ -n "$expected" ] && [ "$expected" = "$actual" ]; then
-            mkdir -p "$BIN_DIR"
-            install -m 0755 "${tmp}/claude-memory-scan" "$BIN"
-            rm -rf "$tmp"
-            run_scan "$BIN"
-        fi
-    fi
-    rm -rf "$tmp"
+if [ -d "$PROJECT_MEMORY" ]; then
+    while IFS= read -r -d '' f; do projfiles+=("$f"); done \
+        < <(find "$PROJECT_MEMORY" -maxdepth 1 -name '*.md' -print0 2>/dev/null | LC_ALL=C sort -z)
 fi
 
-# Tier 3: local cargo build (max parallelism)
-if command -v cargo >/dev/null 2>&1; then
-    JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
-    if cargo build --release --jobs "$JOBS" \
-            --manifest-path "${PLUGIN_DIR}/Cargo.toml" >&2; then
-        run_scan "$LEGACY_BIN"
-    fi
+# No cards anywhere → emit nothing (never block the session).
+if [ "${#sysfiles[@]}" -eq 0 ] && [ "${#projfiles[@]}" -eq 0 ]; then
+    exit 0
 fi
 
-# Tier 4: graceful skip — never block the session
-exit 0
+# Note: `${arr[@]+"${arr[@]}"}` safely expands to nothing for an empty array
+# under `set -u` on macOS bash 3.2 (plain `"${arr[@]}"` would error there).
+exec awk \
+    -v nsys="${#sysfiles[@]}" \
+    -v sysdir="$SYSTEM_MEMORY" \
+    -v projdir="$PROJECT_MEMORY" \
+    -f "$AWK_PROG" -- ${sysfiles[@]+"${sysfiles[@]}"} ${projfiles[@]+"${projfiles[@]}"}
