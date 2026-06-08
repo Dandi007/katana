@@ -1,6 +1,6 @@
 {
   "name": "opencode-katana",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenCode parity adapter for katana plugins — enables the same hook implementations to work on both Claude Code and OpenCode",
   "type": "module",
   "main": "parity/adapter/opencode/index.ts",
@@ -39,11 +39,7 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "peerDependencies": {
-    "opencode": ">=1.16.2"
-  },
   "devDependencies": {
-    "@types/bun": "latest",
-    "better-sqlite3": "^11.0.0"
+    "@types/bun": "latest"
   }
 }
