@@ -24,6 +24,7 @@ const FINGERPRINTS = {
   'work-folder': 'Work Folder',
   retrieval: 'Using Retrieval',
   wiki: 'Using Wiki',
+  memory: '<memory-index>',
 };
 
 // fpa PostToolUse exit-2 stderr is fed back to the model, so it lands in a
