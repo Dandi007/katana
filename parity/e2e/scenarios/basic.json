@@ -1,10 +1,10 @@
 {
   "name": "basic",
-  "description": "Parity test: same harness/cwd/input on CC and OC. Verifies (1) session-start injection of the 4 deterministic katana segments reaches the LLM (forensic via ccs payload recording), and (2) the fpa PostToolUse hook fires on a write to an FPA-named file. Inputs are byte-identical across sides; the prompt is intentionally light + deterministic.",
+  "description": "Parity test: same harness/cwd/input on CC and OC. Verifies (1) session-start injection of the 5 deterministic katana segments (guide/work-folder/retrieval/wiki/memory) reaches the LLM (forensic via ccs payload recording), and (2) the fpa PostToolUse hook fires on a write to an FPA-named file. Inputs are byte-identical across sides; the prompt is intentionally light + deterministic.",
   "prompt": "Do exactly these steps, nothing more. 1) Use the write tool to create a file named test.md whose entire content is the single line: hello. 2) Use the write tool to create a file named FPA-demo.md whose entire content is the single line: placeholder. 3) Reply with exactly one word: DONE",
   "checks": {
     "injection": {
-      "segments": ["guide", "work-folder", "retrieval", "wiki"],
+      "segments": ["guide", "work-folder", "retrieval", "wiki", "memory"],
       "source": "ccs_payload"
     },
     "fpa": {

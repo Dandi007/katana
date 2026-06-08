@@ -36,7 +36,7 @@ if (injDiff.error) {
     if (!injDiff.oc[s]) missing.push(`oc:${s}`);
   }
   record('INJECTION-PARITY', missing.length === 0,
-    missing.length === 0 ? 'all 4 segments present on both sides' : `missing ${missing.join(', ')}`);
+    missing.length === 0 ? `all ${segs.length} segments present on both sides` : `missing ${missing.join(', ')}`);
 }
 
 // ---- Layer 2: fpa hook parity (forensic — fpa exit-2 feedback fed back to model) ----
