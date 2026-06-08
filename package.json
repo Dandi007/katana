@@ -1,6 +1,6 @@
 {
   "name": "opencode-katana",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "OpenCode parity adapter for katana plugins — enables the same hook implementations to work on both Claude Code and OpenCode",
   "type": "module",
   "main": "parity/adapter/opencode/index.ts",
@@ -9,12 +9,15 @@
     "parity/contracts/**",
     "plugins/*/hooks/**",
     "plugins/*/skills/**",
+    "plugins/*/rules/**",
     "plugins/*/.claude-plugin/plugin.json",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "test": "bun test parity/adapter/opencode/",
+    "test:shell": "bash plugins/memory/tests/scan-memory.test.sh",
+    "test:pack": "bash tests/pack-parity.sh",
     "lint": "./tests/lint-structure.sh",
     "e2e": "./parity/e2e/run.sh parity/e2e/scenarios/basic.json both"
   },
