@@ -6,19 +6,13 @@ Claude Code plugin：operational memory system。用 SessionStart hook 扫描 me
 
 | 维度 | 值 |
 |------|-----|
-| 语言 | Rust (binary) + Bash (hook wrapper) |
-| 构建 | `cargo build --release` |
-| 测试 | `cargo test` |
-| 插件框架 | Claude Code plugin system |
+| 语言 | Bash + awk（纯脚本，无编译产物） |
+| 核心 | `hooks/session-start`（dir 解析 + 调度）+ `hooks/scan-memory.awk`（扫描/格式化/JSON 输出） |
+| 测试 | `bash tests/scan-memory.test.sh`（字节级 golden 回归）+ 仓库根 `parity/e2e/run.sh`（双 runtime） |
+| 插件框架 | Claude Code plugin system + OpenCode parity adapter |
 
-## Current Dev Task
+## 设计要点
 
-正在进行 Rust 重写。详细任务文档在 `docs/dev/rust-rewrite/`：
-
-| 文档 | 说明 |
-|------|------|
-| `docs/specs/2026-05-26-rust-rewrite-design.md` | 设计 spec |
-| `docs/dev/rust-rewrite/plan.md` | 分步实现计划 |
-| `docs/dev/rust-rewrite/AGENTS.md` | 任务级指引 |
-
-**请先读 `docs/dev/rust-rewrite/AGENTS.md`，然后按 plan 执行。**
+- scanner 是**逐行解析**，不是完整 YAML parser；只承诺覆盖 `memory:remember` 写出的稳定 card schema（见 `CLAUDE.md` 的「Frontmatter 解析约定」）。
+- 输出格式以 `tests/fixtures/expected.json`（golden，原 Rust `claude-memory-scan` 的冻结输出）为准；任何改动必须保持 `tests/scan-memory.test.sh` 通过。
+- 历史：本插件曾用 Rust binary 实现，因二进制分发与 npm 发布模型不匹配（包里漏装二进制 → OpenCode 侧静默失效）于 2026-06-08 改为纯 shell。详见 `docs/specs/2026-06-08-shell-rewrite.md`。
