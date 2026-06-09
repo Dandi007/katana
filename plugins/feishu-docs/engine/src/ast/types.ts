@@ -12,11 +12,22 @@ export interface AstNode {
   feishuSyncedHash: string;
 }
 
+// 飞书位置元数据：以"链接图 + breadcrumb"保留 layout，而非文件夹
+export interface FeishuBreadcrumbNode { title: string; docId: string; nodeToken: string; }
+export interface FeishuLocation {
+  url: string;                      // 原始飞书 URL
+  objType: string;                  // docx | file | sheet | bitable | mindnote | ...
+  isWiki: boolean;
+  spaceId?: string;                 // wiki 空间 id（drive 文档无）
+  breadcrumb: FeishuBreadcrumbNode[]; // root → ... → 直接父节点（不含自身）；drive 文档为空
+}
+
 export interface DocModel {
   docId: string;                    // canonical key
   feishuDocToken: string;
   title: string;
   root: AstNode[];
+  location?: FeishuLocation;        // 飞书位置（pull 时解析填充）
 }
 
 export interface IndexEntry { docId: string; path: string; title: string; feishuDocToken: string; }
