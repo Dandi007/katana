@@ -23,6 +23,9 @@ Zones are defined in §2.
 ## 3. Page Conventions
 
 - **Required frontmatter:** `created`, `sources`, `tags`.
+- **`摘要`（推荐）：** 每页 frontmatter 一行自描述摘要（一句话，≤~40 字：这页讲什么 +
+  核心结论）。供检索/关联走读只读 frontmatter 即可预览页面，不必翻正文。
+  ingest 新建页生成、lint 可对存量 backfill。
 - **Provenance:** every claim traces back to a `source` listed in frontmatter — no orphan assertions. `thinking` pages may hold un-sourced reasoning if labeled as such.
 - **Link rules:** every page carries **≥1 outlink** (no islands). On ingest, pages this page references are **back-updated** with a reciprocal link.
 
