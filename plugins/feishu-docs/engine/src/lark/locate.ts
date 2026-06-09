@@ -21,9 +21,14 @@ function host(url: string): string {
 function isWikiUrl(url: string): boolean { return /\/wiki\//.test(url); }
 
 async function nodeGet(wikiUrl: string, run: Runner): Promise<WikiNode | null> {
-  const out = await run(["wiki", "+node-get", "--node-token", wikiUrl]);
-  const env = JSON.parse(out);
-  if (!env.ok) return null;
+  // 非致命：节点无读权限（131006）等会让 lark-cli 非零退出（run 抛错），
+  // 或返回 ok:false。任一情况都返回 null，让调用方截断祖先链而非整体失败——
+  // 文档本身可读时，某个跨空间祖先不可读不应阻断 pull。
+  let env: any;
+  try {
+    env = JSON.parse(await run(["wiki", "+node-get", "--node-token", wikiUrl]));
+  } catch { return null; }
+  if (!env?.ok) return null;
   const d = env.data;
   return {
     title: d.title ?? "",
