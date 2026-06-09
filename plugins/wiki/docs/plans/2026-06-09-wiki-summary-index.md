@@ -22,7 +22,7 @@
 - Create: `plugins/wiki/tests/fixtures/kb-summary/` — 专用小 fixture 库（独立于共享 `kb/`，避免动到其它 contract 的计数断言）。
 - Create: `plugins/wiki/tests/contracts/lint-summary-backfill.contract.yaml` — 新 contract。
 - Create: `plugins/wiki/tests/contracts/scripts/check-summary-backfill.sh` — 确定性断言脚本。
-- Create: `plugins/wiki/tests/case-rubrics/wiki-lint-summary.md` — judge rubric。
+- Create: `tests/judge/case-rubrics/wiki-lint-summary.md` — judge rubric。
 
 **Zettelkasten 库（Part B，合并后）**
 
@@ -203,7 +203,7 @@ git commit -m "test(wiki): summary-backfill fixture + deterministic assert scrip
 
 **Files:**
 - Create: `plugins/wiki/tests/contracts/lint-summary-backfill.contract.yaml`
-- Create: `plugins/wiki/tests/case-rubrics/wiki-lint-summary.md`
+- Create: `tests/judge/case-rubrics/wiki-lint-summary.md`
 
 - [ ] **Step 1: 写 contract**
 
@@ -223,7 +223,7 @@ verdict:
 
 - [ ] **Step 2: 写 judge rubric**
 
-`plugins/wiki/tests/case-rubrics/wiki-lint-summary.md`：
+`tests/judge/case-rubrics/wiki-lint-summary.md`：
 
 ```markdown
 # Rubric: wiki:lint 摘要 backfill
@@ -259,7 +259,7 @@ Expected: **FAIL** — `script` 断言打印 `NO-SUMMARY`，因为 lint skill �
 - [ ] **Step 5: Commit**
 
 ```bash
-git add plugins/wiki/tests/contracts/lint-summary-backfill.contract.yaml plugins/wiki/tests/case-rubrics/wiki-lint-summary.md
+git add plugins/wiki/tests/contracts/lint-summary-backfill.contract.yaml tests/judge/case-rubrics/wiki-lint-summary.md
 git commit -m "test(wiki): live contract + rubric for lint summary backfill (fail-first)"
 ```
 

@@ -2,7 +2,6 @@
 # 断言：lint 跑完后，笔记/ 下每页 frontmatter 都有非空 摘要，且正文 byte 不变。
 # 由 contract 的 script 断言调用，env: KB_DIR（lint 跑过的库副本）。
 set -uo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GOLDEN="$KB_DIR/.golden"
 fail=0
 for f in 手冲咖啡萃取 咖啡豆烘焙度 V60滤杯; do
