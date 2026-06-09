@@ -18,7 +18,9 @@ function headingLevel(type: string): number | null {
 
 function block(n: AstNode): string {
   const lvl = headingLevel(n.type);
-  if (lvl) return `${"#".repeat(lvl)} ${inline(n.text)}`;
+  // 降一级：frontmatter 的 title 才是文档唯一 H1；飞书 body h1→## …，
+  // 避免一篇里多个 `# ` 触发 markdownlint MD025（single-h1）。封顶 h6。
+  if (lvl) return `${"#".repeat(Math.min(lvl + 1, 6))} ${inline(n.text)}`;
   if (["sheet", "bitable", "whiteboard"].includes(n.type))
     return `<!-- ${n.type} token=${n.props.token ?? ""} (只读视图，详见飞书) -->`;
   const self = inline(n.text);
