@@ -11,6 +11,9 @@
     "plugins/*/skills/**",
     "plugins/*/rules/**",
     "plugins/*/.claude-plugin/plugin.json",
+    "plugins/*/engine/src/**",
+    "plugins/*/engine/package.json",
+    "plugins/*/engine/tsconfig.json",
     "README.md",
     "LICENSE"
   ],
