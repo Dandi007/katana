@@ -8,8 +8,9 @@ import type { AstNode, DocModel, InlineRun, InlineMark } from "../ast/types";
 // ---------------------------------------------------------------------------
 
 /** Block tags whose children are other block elements (containers). */
+// 注：colgroup/col 不入此集——它们在容器遍历时被显式跳过（无 block 语义）
 const CONTAINER_TAGS = new Set([
-  "callout", "ul", "ol", "table", "colgroup", "thead", "tbody", "tr",
+  "callout", "ul", "ol", "table", "thead", "tbody", "tr",
   "th", "td", "grid", "column", "blockquote",
 ]);
 
@@ -31,8 +32,9 @@ const EMPTY_TAGS = new Set(["hr", "br"]);
 // Helpers
 // ---------------------------------------------------------------------------
 
+// 本地稳定 ID：用完整 UUID，避免大文档下 8-hex 截断的生日碰撞（INV-1 要求唯一稳定）
 function makeId(): string {
-  return "n-" + randomUUID().slice(0, 8);
+  return "n-" + randomUUID();
 }
 
 function getAttrsExcept(el: HTMLElement, ...exclude: string[]): Record<string, unknown> {
@@ -268,10 +270,16 @@ function buildNode(el: HTMLElement): AstNode | null {
 // Public API
 // ---------------------------------------------------------------------------
 
-export function parseContent(content: string, docId: string): DocModel {
+/**
+ * 解析 DocxXML content 为 DocModel。
+ * docId 以 content 内 `<title id>` 为准（parser 自己拥有提取）；
+ * `fallbackDocId` 仅在 title 缺 id 时兜底（如 fetch envelope 的 document_id）。
+ */
+export function parseContent(content: string, fallbackDocId: string): DocModel {
   const root = parse(content);
 
   let title = "";
+  let titleId = "";
   const nodes: AstNode[] = [];
 
   for (const child of root.childNodes) {
@@ -281,6 +289,7 @@ export function parseContent(content: string, docId: string): DocModel {
 
     if (tag === "title") {
       title = el.text;
+      titleId = el.getAttribute("id") ?? "";
       continue;
     }
 
@@ -288,6 +297,7 @@ export function parseContent(content: string, docId: string): DocModel {
     if (node) nodes.push(node);
   }
 
+  const docId = titleId || fallbackDocId;
   return {
     docId,
     feishuDocToken: docId,

@@ -15,6 +15,13 @@ describe("parseContent", () => {
     expect(doc.title).toBe("feishu-docs fixture 测试文档");
   });
 
+  it("derives docId from <title id>, not the fallback param", () => {
+    // 传一个错误的 fallback：parser 必须从 content 的 <title id> 取真值
+    const doc = parseContent(content, "WRONG_FALLBACK");
+    expect(doc.docId).toBe(docId);
+    expect(doc.feishuDocToken).toBe(docId);
+  });
+
   it("root has multiple nodes (title excluded)", () => {
     const doc = parseContent(content, docId);
     expect(doc.root.length).toBeGreaterThan(0);
