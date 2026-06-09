@@ -41,8 +41,9 @@ def sweep_setup(repo: Path, tmp: Path, plugins: set, claude_bin: str) -> Path:
     每次 sweep 的 CLAUDE_CONFIG_DIR 都是 fresh mktemp 副本，marketplace add 不存在跨 sweep 幂等性问题。
     """
     golden = tmp / "golden"
-    shutil.copytree(repo / "tests/fixtures/kb", golden / "kb")
-    shutil.copytree(repo / "tests/fixtures/claude-config", golden / "claude-config")
+    for fx in sorted((repo / "tests/fixtures").iterdir()):
+        if fx.is_dir():
+            shutil.copytree(fx, golden / fx.name)
     env = {**os.environ, "CLAUDE_CONFIG_DIR": str(golden / "claude-config")}
 
     def cc(*args):
