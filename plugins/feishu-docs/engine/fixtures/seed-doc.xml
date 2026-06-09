@@ -1,0 +1,42 @@
+<title>feishu-docs fixture 测试文档</title>
+
+<h1>一级标题</h1>
+
+<p>普通段落，含<b>加粗</b>、<em>斜体</em>、<span text-color="green">绿色文本</span>和<code>行内代码</code>。</p>
+
+<h2>二级标题</h2>
+
+<callout emoji="💡" background-color="light-yellow" border-color="yellow">
+  <p>这是一个高亮框 callout，用来测试容器型 block 的解析。</p>
+</callout>
+
+<checkbox done="true">已完成的待办项</checkbox>
+<checkbox done="false">未完成的待办项</checkbox>
+
+<ul>
+  <li>无序列表第一项</li>
+  <li>无序列表第二项</li>
+</ul>
+
+<ol>
+  <li seq="auto">有序列表第一项</li>
+  <li seq="auto">有序列表第二项</li>
+</ol>
+
+<table>
+  <thead><tr><th background-color="light-gray">列 A</th><th background-color="light-gray">列 B</th></tr></thead>
+  <tbody>
+    <tr><td>单元格 A1</td><td>单元格 B1</td></tr>
+    <tr><td>单元格 A2</td><td>单元格 B2</td></tr>
+  </tbody>
+</table>
+
+<pre lang="typescript" caption="代码块示例"><code>export const hello = (name: string) =&gt; `hi ${name}`;</code></pre>
+
+<p><latex>E = mc^2</latex></p>
+
+<blockquote>这是一段引用文本，用来测试 blockquote。</blockquote>
+
+<hr/>
+
+<sheet type="blank"></sheet>
