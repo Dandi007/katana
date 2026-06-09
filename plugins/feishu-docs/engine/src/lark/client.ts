@@ -1,11 +1,17 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 export type Runner = (args: string[]) => Promise<string>;
 export interface FetchedDoc { content: string; documentId: string; revisionId: number; }
 
+const execFileAsync = promisify(execFile);
+
+// 用 node:child_process（node 与 bun 都支持），不用 Bun.spawn——
+// 引擎以 `bun build --target node` 分发给 node≥18 运行，Bun 全局在 node 下不存在。
+// execFile 在非零退出时自动 reject；maxBuffer 调大以容纳大文档 content。
 const defaultRunner: Runner = async (args) => {
-  const proc = Bun.spawn(["lark-cli", ...args], { stdout: "pipe", stderr: "pipe" });
-  const out = await new Response(proc.stdout).text();
-  if ((await proc.exited) !== 0) throw new Error(`lark-cli failed: ${await new Response(proc.stderr).text()}`);
-  return out;
+  const { stdout } = await execFileAsync("lark-cli", args, { maxBuffer: 64 * 1024 * 1024 });
+  return stdout;
 };
 
 export async function fetchDoc(docUrlOrToken: string, run: Runner = defaultRunner): Promise<FetchedDoc> {
