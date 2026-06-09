@@ -9,7 +9,7 @@ const execFileAsync = promisify(execFile);
 // 用 node:child_process（node 与 bun 都支持），不用 Bun.spawn——
 // 引擎以 `bun build --target node` 分发给 node≥18 运行，Bun 全局在 node 下不存在。
 // execFile 在非零退出时自动 reject；maxBuffer 调大以容纳大文档 content。
-const defaultRunner: Runner = async (args) => {
+export const defaultRunner: Runner = async (args) => {
   const { stdout } = await execFileAsync("lark-cli", args, { maxBuffer: 64 * 1024 * 1024 });
   return stdout;
 };

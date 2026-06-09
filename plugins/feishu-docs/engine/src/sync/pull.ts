@@ -1,27 +1,37 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { fetchDoc, type Runner } from "../lark/client";
+import { resolveLocation } from "../lark/locate";
 import { parseContent } from "../parse/docx-to-ast";
 import { renderMd } from "../render/ast-to-md";
+import { renderFrontmatter } from "../render/frontmatter";
 import { docFilenames } from "../store/layout";
 import { upsertEntry } from "../store/index-file";
 
-export interface PullOpts { root: string; docUrl: string; relPath: string; }
+export interface PullOpts { root: string; docUrl: string; }
 
-export async function pull(opts: PullOpts, run?: Runner) {
+export type PullResult =
+  | { skipped: true; reason: string }
+  | { skipped: false; astPath: string; mdPath: string; docId: string };
+
+export async function pull(opts: PullOpts, run?: Runner): Promise<PullResult> {
+  // 先解析飞书位置（也得到 obj_type）：非 docx（file/sheet/bitable/mindnote…）优雅跳过
+  const location = await resolveLocation(opts.docUrl, run);
+  if (location.objType && location.objType !== "docx") {
+    return { skipped: true, reason: `unsupported obj_type "${location.objType}"` };
+  }
+
   const fetched = await fetchDoc(opts.docUrl, run);
   const doc = parseContent(fetched.content, fetched.documentId);
+  doc.location = location;
+
+  // 平铺：直接落在 feishu_docs_root 下，不建子目录——layout 信息进 frontmatter（链接图）
   const { md, ast } = docFilenames(doc.title, doc.docId);
-
-  // relPath may be "" (root-level); join("", "x") → "x" — correct.
-  const astPath = join(opts.relPath, ast);
-  const mdPath = join(opts.relPath, md);
-
-  await mkdir(join(opts.root, opts.relPath || "."), { recursive: true });
-  await writeFile(join(opts.root, astPath), JSON.stringify(doc, null, 2) + "\n");
-  await writeFile(join(opts.root, mdPath), renderMd(doc.root));
+  await mkdir(opts.root, { recursive: true });
+  await writeFile(join(opts.root, ast), JSON.stringify(doc, null, 2) + "\n");
+  await writeFile(join(opts.root, md), renderFrontmatter(doc) + renderMd(doc.root));
   await upsertEntry(join(opts.root, ".index.json"),
-    { docId: doc.docId, path: astPath, title: doc.title, feishuDocToken: doc.feishuDocToken });
+    { docId: doc.docId, path: ast, title: doc.title, feishuDocToken: doc.feishuDocToken });
 
-  return { astPath, mdPath };
+  return { skipped: false, astPath: ast, mdPath: md, docId: doc.docId };
 }

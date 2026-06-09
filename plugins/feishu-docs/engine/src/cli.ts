@@ -11,11 +11,11 @@ if (cmd === "pull") {
   const root = flag("root") ?? process.env.KATANA_FEISHU_DOCS_ROOT ?? "docs/feishu";
   const docUrl = flag("doc");
   if (!docUrl) { console.error("missing --doc"); process.exit(2); }
-  const relPath = flag("path") ?? "";
-  pull({ root, docUrl, relPath })
+  // 文档平铺存在 root 下；飞书 layout 写进 frontmatter（无 --path 子目录）
+  pull({ root, docUrl })
     .then((r) => console.log(JSON.stringify(r)))
     .catch((e) => { console.error(e?.message ?? e); process.exit(1); });
 } else {
-  console.error("usage: feishu-docs pull --doc <url> [--path <rel>] [--root <dir>]");
+  console.error("usage: feishu-docs pull --doc <url> [--root <dir>]");
   process.exit(2);
 }
