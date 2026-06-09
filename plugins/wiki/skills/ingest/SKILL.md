@@ -76,6 +76,8 @@ merge candidates and skips). Do not eyeball it.
 Assemble the full package before touching disk:
 - **New-page drafts** — each following the zone's page template + required
   frontmatter (§3), `sources:` populated per `references/provenance.md`.
+  当 §3 声明了 per-page summary 字段（如 `摘要`），draft 的 frontmatter
+  必须含一行该摘要：一句话、≤~40 字、描述本页讲什么 + 核心结论，从本页内容生成。
 - **Existing-page diffs** — including the **reciprocal back-links** on every page a
   new page references (schema §3 rule — do this, don't skip it). When new content
   disagrees with an existing page, annotate both sides with the same `> [!conflict]`
