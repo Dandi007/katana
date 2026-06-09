@@ -1,0 +1,16 @@
+{
+  "name": "feishu-docs-engine",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "bun test",
+    "build": "bun build src/cli.ts --target node --outfile dist/cli.js"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "dependencies": {
+    "node-html-parser": "^7.1.0"
+  }
+}

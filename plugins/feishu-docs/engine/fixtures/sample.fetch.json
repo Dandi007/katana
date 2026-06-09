@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "document": {
+      "content": "<title id=\"PYxgdqFCioL2zYxD5YvcGUllnyd\">feishu-docs fixture 测试文档</title><h1 id=\"doxcncCJp0VRDPhnJsZvmFuGIxc\">一级标题</h1><p id=\"doxcn693JohzZCIYExBvBizv1Th\">普通段落，含<b>加粗</b>、<em>斜体</em>、<span text-color=\"rgb(46,161,33)\">绿色文本</span>和<code>行内代码</code>。</p><h2 id=\"doxcnrh2ixIXGvkROrdegJljezb\">二级标题</h2><callout id=\"doxcnFwbDrRbqmg3cf6FazHWexd\" background-color=\"rgb(254,255,240)\" border-color=\"rgb(255,242,88)\" emoji=\"💡\"><p id=\"doxcnl7ZkrJewZJz0w4jz5yadkC\">这是一个高亮框 callout，用来测试容器型 block 的解析。</p></callout><checkbox id=\"doxcnN3ZT7PJRDnO5wI6tyBdgle\" done=\"true\">已完成的待办项</checkbox><checkbox id=\"doxcn4YnKexa9KsTCUwi8HuLORe\" done=\"false\">未完成的待办项</checkbox><ul><li id=\"doxcnjzkqtv89wjqI7qN273Oegc\">无序列表第一项</li><li id=\"doxcnMCuLcMFH5kJE6h53nnOdId\">无序列表第二项</li></ul><ol><li id=\"doxcnKM0yf6tCmQTOBpzmC3vfeb\" seq=\"1\">有序列表第一项</li><li id=\"doxcnRzoZUWP3yjRUur4hxN66Fd\">有序列表第二项</li></ol><table id=\"doxcnfRzIZRoQ9wdCtl7nzLm8Ph\"><colgroup><col width=\"165\"/><col width=\"165\"/></colgroup><thead><tr><th background-color=\"rgb(242,243,245)\" vertical-align=\"top\"><p id=\"doxcntLFnK9t7XqRUJnJCp8R79e\">列 A</p></th><th background-color=\"rgb(242,243,245)\" vertical-align=\"top\"><p id=\"doxcnFwBfTnHZjWwZ5HG11vGMzc\">列 B</p></th></tr></thead><tbody><tr><td vertical-align=\"top\"><p id=\"doxcnw5TvIPeTg5Ki5Uc3FUS3Gb\">单元格 A1</p></td><td vertical-align=\"top\"><p id=\"doxcn3KfLJGjByn45QLPT2plYxh\">单元格 B1</p></td></tr><tr><td vertical-align=\"top\"><p id=\"doxcnVaMuVp7zaF3raV1wwHlZWc\">单元格 A2</p></td><td vertical-align=\"top\"><p id=\"doxcnq7qCosC5g1kVFdYbzVgk6A\">单元格 B2</p></td></tr></tbody></table><pre id=\"doxcnU4o3eQL86LvhMmUTfaBD6d\" caption=\"代码块示例\" lang=\"typescript\"><code>export const hello = (name: string) =&gt; `hi ${name}`;</code></pre><p id=\"doxcnLaTCzW1UnsolYQiU0zuqYf\"><latex>E = mc^2</latex></p><blockquote id=\"doxcnhGpkvBypm3DYjLBiW09qbh\"><p id=\"doxcnA6GD4PeRX0zaiubtRDXP3c\">这是一段引用文本，用来测试 blockquote。</p></blockquote><hr id=\"doxcnTQBqkktTjUw0N5hKCUDddf\"/><sheet id=\"doxcnpASwNbMed0CR7FSj7tYKKc\" sheet-id=\"WtPoQl\" token=\"K2KMs79kwhnh9ItlMfZcncxMnuh\"></sheet>",
+      "document_id": "PYxgdqFCioL2zYxD5YvcGUllnyd",
+      "revision_id": 3
+    },
+    "log_id": "20260609154937031CA2575CCE7050DF13"
+  }
+}

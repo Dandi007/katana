@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Source shared config parser
+source "${SCRIPT_DIR}/katana-config.sh"
+
+# feishu_docs_root: 显式声明才激活（默认 "docs/feishu" → 仅当路径存在时注入，否则静默退出）
+FEISHU_DOCS_ROOT="$(katana_config_get "feishu_docs_root" "docs/feishu" "KATANA_FEISHU_DOCS_ROOT")"
+
+# 安全校验：拒绝路径穿越与 shell 危险字符（locale-safe case 匹配，与 work-folder 对齐）
+case "$FEISHU_DOCS_ROOT" in
+    *".."* | *'`'* | *'$'* | *';'* | *'&'* | *'|'* | *'<'* | *'>'* \
+    | *'('* | *')'* | *'{'* | *'}'* | *'['* | *']'* | *'*'* | *'?'* \
+    | *'!'* | *'~'* | *'"'* | *"'"* | *'\'* | *$'\n'* | *$'\t'*)
+        echo "Error: feishu_docs_root contains invalid characters or path traversal: $FEISHU_DOCS_ROOT" >&2
+        exit 1
+        ;;
+esac
+
+# 相对路径相对 CLAUDE_PROJECT_DIR 解析；~ 展开（仅 ~ 或 ~/ 前缀）
+case "$FEISHU_DOCS_ROOT" in
+    "~") FEISHU_DOCS_ROOT="$HOME" ;;
+    "~/"*) FEISHU_DOCS_ROOT="${HOME}${FEISHU_DOCS_ROOT#\~}" ;;
+esac
+case "$FEISHU_DOCS_ROOT" in
+    /*) : ;;
+    *) FEISHU_DOCS_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}/${FEISHU_DOCS_ROOT}" ;;
+esac
+
+# 未配置（路径不存在）→ 静默退出，零打扰
+[ -d "$FEISHU_DOCS_ROOT" ] || exit 0
+
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"; s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+CONTENT="## Feishu Docs Mirror
+
+Feishu doc mirrors live at: \`${FEISHU_DOCS_ROOT}\`
+
+Layout per document:
+  \`<feishu_docs_root>/<relPath>/<title>-<docId>.md\`        — read-only Markdown render
+  \`<feishu_docs_root>/<relPath>/<title>-<docId>.ast.json\`  — block-tree AST (SSoT for programmatic edits)
+  \`<feishu_docs_root>/<relPath>/.index.json\`               — doc-id canonical index
+
+Rules:
+- AST (\`.ast.json\`) is the source of truth; Markdown is a derived read-only render — never edit \`.md\` directly.
+- Pull a doc: \`node dist/cli.js pull --doc <url> [--path <relPath>] [--root <feishu_docs_root>]\`
+  (build once: \`cd \${CLAUDE_PLUGIN_ROOT}/engine && bun install && bun build src/cli.ts --target node --outfile dist/cli.js\`)
+- Only \`pull\` (P0) is implemented; push/sync come later.
+- Credentials are managed by lark-cli (keychain) — never stored in .katana or git."
+
+printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
+    "$(escape_for_json "$CONTENT")"

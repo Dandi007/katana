@@ -24,6 +24,11 @@
       "plugin": "wiki",
       "script": "hooks/session-start",
       "matcher": "startup|clear|compact"
+    },
+    {
+      "plugin": "feishu-docs",
+      "script": "hooks/session-start",
+      "matcher": "startup|clear|compact"
     }
   ],
   "postToolUse": [
