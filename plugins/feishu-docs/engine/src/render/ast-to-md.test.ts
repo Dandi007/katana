@@ -32,3 +32,10 @@ test("容器(callout)渲染其子块", () => {
   const md = renderMd([node({ type: "callout", children: [node({ text: [{ text: "inner", marks: [] }] })] })]);
   expect(md).toContain("inner");
 });
+
+test("pre 渲染成 fenced code block，<br/> 转换行，# 行不再是 H1", () => {
+  const md = renderMd([node({ type: "pre", props: { lang: "bash" }, text: [{ text: "# 注释<br/>echo hi", marks: [] }] })]);
+  expect(md).toContain("```bash\n");
+  expect(md).toContain("# 注释\necho hi");
+  expect(md.trimEnd().endsWith("```")).toBe(true);
+});

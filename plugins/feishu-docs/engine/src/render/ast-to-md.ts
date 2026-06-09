@@ -23,6 +23,12 @@ function block(n: AstNode): string {
   if (lvl) return `${"#".repeat(Math.min(lvl + 1, 6))} ${inline(n.text)}`;
   if (["sheet", "bitable", "whiteboard"].includes(n.type))
     return `<!-- ${n.type} token=${n.props.token ?? ""} (只读视图，详见飞书) -->`;
+  if (n.type === "pre") {
+    // 代码块渲染成 fenced block：① 正常显示；② 防止代码里以 # 开头的行被 lint 当成标题（MD025）
+    const lang = typeof n.props.lang === "string" ? n.props.lang : "";
+    const code = n.text.map((r) => r.text).join("").replace(/<br\s*\/?>/gi, "\n");
+    return "```" + lang + "\n" + code + "\n```";
+  }
   const self = inline(n.text);
   const kids = n.children.map(block).join("\n\n");
   return [self, kids].filter(Boolean).join("\n\n");
