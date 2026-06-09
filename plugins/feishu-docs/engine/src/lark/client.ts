@@ -21,3 +21,11 @@ export async function fetchDoc(docUrlOrToken: string, run: Runner = defaultRunne
   const d = env.data.document;
   return { content: d.content, documentId: d.document_id, revisionId: d.revision_id };
 }
+
+// 飞书官方 Markdown 导出，作为只读 .md 视图（结构远好于手写渲染：正经代码围栏/表格/列表）。
+export async function fetchMarkdown(docUrlOrToken: string, run: Runner = defaultRunner): Promise<string> {
+  const out = await run(["docs", "+fetch", "--api-version", "v2", "--doc-format", "markdown", "--doc", docUrlOrToken]);
+  const env = JSON.parse(out);
+  if (!env.ok) throw new Error(`md fetch not ok: ${out.slice(0, 200)}`);
+  return env.data.document.content ?? "";
+}

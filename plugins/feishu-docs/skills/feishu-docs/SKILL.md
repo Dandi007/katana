@@ -7,9 +7,12 @@ description: Pull a Feishu DocX document into the local mirror as a block-tree A
 
 Pull a Feishu DocX document into the local mirror. The engine produces two artefacts per document, stored **flat** under `feishu_docs_root`:
 
-- `<feishu_docs_root>/<title>-<docId>.ast.json` — block-tree AST, **SSoT** for programmatic edits
-- `<feishu_docs_root>/<title>-<docId>.md` — read-only Markdown render (never edit directly)
+- `<feishu_docs_root>/<title>-<docId>.ast.json` — block-tree AST (from DocxXML, with block ids), **SSoT** for programmatic edits
+- `<feishu_docs_root>/<title>-<docId>.md` — read-only view: **Feishu's official Markdown export** + our frontmatter on top (never edit directly)
 - `<feishu_docs_root>/.index.json` — doc-id canonical index (used for dedup / re-pull)
+- `<feishu_docs_root>/.markdownlint.json` — relaxes markdownlint rules that imported rich content legitimately trips (MD013/MD033/MD025/…); written once, not overwritten
+
+The `.md` view comes from `lark-cli docs +fetch --doc-format markdown` (official Feishu exporter — proper code fences / tables / lists), tidied (collapse blank lines, strip trailing spaces). The AST is a **separate** fetch (DocxXML with `--detail with-ids`), so a pull makes **two** fetch calls per document. The two are independent faithful snapshots; the read-only `.md` need not be byte-identical to the AST.
 
 Only `pull` (P0) is implemented. Push/sync come later.
 
