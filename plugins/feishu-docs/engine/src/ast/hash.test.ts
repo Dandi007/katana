@@ -20,3 +20,10 @@ test("children 顺序参与 hash", () => {
   const c1 = base({ id: "c1" }), c2 = base({ id: "c2", text: [{ text: "x", marks: [] }] });
   expect(nodeHash(base({ children: [c1, c2] }))).not.toBe(nodeHash(base({ children: [c2, c1] })));
 });
+test("props key 插入顺序不影响 hash（程序化构造稳定性）", () => {
+  expect(nodeHash(base({ props: { a: "1", b: "2" } }))).toBe(nodeHash(base({ props: { b: "2", a: "1" } })));
+});
+test("attrs key 插入顺序不影响 hash", () => {
+  expect(nodeHash(base({ text: [{ text: "x", marks: [], attrs: { href: "h", title: "t" } }] })))
+    .toBe(nodeHash(base({ text: [{ text: "x", marks: [], attrs: { title: "t", href: "h" } }] })));
+});
