@@ -9,5 +9,8 @@
   },
   "devDependencies": {
     "@types/bun": "latest"
+  },
+  "dependencies": {
+    "node-html-parser": "^7.1.0"
   }
 }
