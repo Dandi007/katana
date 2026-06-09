@@ -64,6 +64,8 @@ relative path instead.
 - **Missing required frontmatter** — per schema §3 (e.g. `created`, `sources`,
   `tags`), iterate the `find` enumerator and `grep -L '^created:'` each page
   (repeat per field).
+  当 §3 声明了 per-page **summary 字段**（一行自描述摘要，如本库的 `摘要`）时，
+  缺它的页同样计入本检查 —— 它是 backfill-class finding（修复见 §4），不是单纯报告项。
 - **Index/MOC consistency** — pages listed in `index.md` with no file, and
   existing pages absent from any index/MOC (diff index links against the page list).
 - **Naming violations** — pages breaking the zone naming rule in schema §2.
@@ -113,9 +115,36 @@ Per finding, propose a fix and route it through the zone's write policy (schema 
 - **autonomous** zone → apply the fix directly.
 - **propose** zone → present each fix via AskUserQuestion and confirm before writing.
 
-**Lint may apply only:** conflict/stale annotations, broken-link fixes, and index
-entry back-fills. Anything else — building a page, merging pages, rewriting
-content — is **handed to `/wiki:ingest`** or listed as a human to-do. Never do it here.
+**Lint may apply only:** conflict/stale annotations, broken-link fixes, index
+entry back-fills, **and summary-field backfill** (filling a missing
+schema-declared per-page summary line). Anything else — building a page, merging
+pages, rewriting content — is **handed to `/wiki:ingest`** or listed as a human
+to-do. Never do it here.
+
+### Summary-field backfill（schema-declared summary 字段专属）
+
+A schema-declared per-page **summary** field (one line, self-describing, e.g.
+`摘要`) is **derived-from-self metadata** — a compression of content already on
+the page, not new knowledge. The model-collapse defense (raw-immutability /
+no-re-ingesting-synthesis) does not apply, and the field never touches the body.
+So lint MAY generate and write it, governed as follows instead of per-fix propose:
+
+1. **Generate from the page itself** — read the full page, write one line (≤~40
+   chars per schema §3): what the page is about + its core definition/claim.
+   Never invent beyond the page; never copy a whole paragraph.
+2. **Insert into frontmatter only** — add the summary line (e.g. `摘要:`) to the
+   page's frontmatter block. **Never edit the body** (the body bytes must stay
+   identical). Skip pages that already have a non-empty summary.
+3. **Batch governance — sampling QC, then autonomous batch** (**this overrides the
+   propose-zone per-fix AskUserQuestion rule above, for this backfill type only**):
+   when backfilling many pages (e.g. a first full-library run), generate a **random sample of N=10**
+   first and show them for human QC of quality. On approval, **write all remaining
+   pages autonomously — do NOT AskUserQuestion per page** (that does not scale to
+   hundreds). A wrong summary is cheap to regenerate (rerun lint). In
+   non-interactive mode, only run the batch if the prompt pre-authorizes it.
+4. **Scale via Workflow when large:** for a big backfill, fan out summarizers
+   (one agent reads one page → returns its summary line); apply the returned lines.
+   raw / inbox zones are exempt.
 
 **Non-interactive (`claude -p`):** same as ingest — in a propose zone, apply a fix
 only if the prompt pre-authorizes it; otherwise the report is the endpoint. Append
