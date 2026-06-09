@@ -28,3 +28,22 @@ test("upsertEntry 二次 upsert 更新而非重复", async () => {
   expect(Object.keys(idx.entries)).toHaveLength(1);
   expect(idx.entries["docxAbc"].path).toBe("v2.md");
 });
+
+test("upsert 不同 docId 保留已有条目", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "feishu-idx-"));
+  const path = join(dir, ".index.json");
+  await upsertEntry(path, { docId: "A", path: "a.md", title: "A", feishuDocToken: "tA" });
+  await upsertEntry(path, { docId: "B", path: "b.md", title: "B", feishuDocToken: "tB" });
+  const idx = await loadIndex(path);
+  expect(Object.keys(idx.entries).sort()).toEqual(["A", "B"]);
+  expect(idx.entries["A"].path).toBe("a.md");
+  expect(idx.entries["B"].path).toBe("b.md");
+});
+
+test("loadIndex 遇损坏 JSON 抛错而非静默吞（防数据丢失）", async () => {
+  const { writeFile } = await import("node:fs/promises");
+  const dir = await mkdtemp(join(tmpdir(), "feishu-idx-"));
+  const path = join(dir, ".index.json");
+  await writeFile(path, "{ not valid json");
+  await expect(loadIndex(path)).rejects.toThrow();
+});
