@@ -31,6 +31,10 @@ Then run the eight steps in order.
 Read `<wiki_root>/WIKI.md` — it is the contract, not optional.
 - Determine the target **zone** from **§2** (path, purpose, naming).
 - Pull that zone's **write policy**, **page template**, and **naming rule** (§2).
+  If the schema **dispatches templates by a frontmatter field** (e.g. a `type`/`类型`
+  field — one zone holding several document genres), resolve the specific template
+  via that field instead of assuming one template per zone, and follow the schema's
+  declared dispatch rule.
 - A source may span zones: zone is decided per knowledge unit (in §4), not per
   source. When a unit fits two zones, prefer the more restrictive write policy
   (propose over autonomous).
@@ -74,8 +78,9 @@ merge candidates and skips). Do not eyeball it.
 ## 5. Build the proposal package
 
 Assemble the full package before touching disk:
-- **New-page drafts** — each following the zone's page template + required
-  frontmatter (§3), `sources:` populated per `references/provenance.md`.
+- **New-page drafts** — each following the zone's page template (or, when the
+  schema dispatches templates by a frontmatter field, the template that field
+  selects) + required frontmatter (§3), `sources:` populated per `references/provenance.md`.
   当 §3 声明了 per-page summary 字段（如 `摘要`），draft 的 frontmatter
   必须含一行该摘要：一句话、≤~40 字、描述本页讲什么 + 核心结论，从本页内容生成。
 - **Existing-page diffs** — including the **reciprocal back-links** on every page a

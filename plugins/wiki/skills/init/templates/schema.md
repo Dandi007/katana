@@ -19,6 +19,7 @@ Zones are defined in §2.
 
 - **Purpose** ∈ `thinking` (exploratory, your reasoning) \| `executive` (durable, cited fact).
 - **Write policy** ∈ `propose` (human gate: ingest drafts, human approves) \| `autonomous` (ingest writes directly). Default `propose`.
+- **Page template** is normally one template per zone. When a single zone holds **multiple document genres** (e.g. atomic note vs source-analysis vs architecture), the template may instead be **dispatched by a frontmatter field** (e.g. a `type`/`类型` field): declare the dispatch rule and the per-type skeletons in a dedicated section (e.g. a §3a), then point this column at it. Ingest resolves the template via that field rather than one-per-zone. The dispatch *mechanism* is generic; the genres and their skeletons stay library-specific — they live here in the schema, never in plugin skills.
 
 ## 3. Page Conventions
 
