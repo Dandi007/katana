@@ -5,7 +5,7 @@ import os, shutil, subprocess, time
 
 from .schema import Contract
 from .asserts import Ctx, run_asserts
-from .claude_cli import run_claude, ClaudeTimeout
+from .claude_cli import run_claude, run_claude_session, ClaudeTimeout
 
 KNOWN_REQUIRE_KINDS = {"env", "dir", "cmd", "proc-free", "exclusive"}
 
@@ -61,10 +61,18 @@ def _attempt(contract: Contract, golden: Path, case_dir: Path,
     kb_cwd = case_dir / contract.cwd
     log = case_dir / "case.log"
     env = {**base_env, "CLAUDE_CONFIG_DIR": str(case_dir / "claude-config")}
-    res = run_claude(prompt=contract.prompt, cwd=kb_cwd, log_path=log,
-                     model=contract.model, permission_mode=contract.permission_mode,
-                     allowed_tools=contract.allowed_tools, timeout=contract.timeout,
-                     env=env, claude_bin=claude_bin)
+    if contract.turns:
+        res = run_claude_session(
+            turns=contract.turns, cwd=kb_cwd, log_path=log,
+            model=contract.model, permission_mode=contract.permission_mode,
+            allowed_tools=contract.allowed_tools, timeout=contract.timeout,
+            env=env, claude_bin=claude_bin)
+    else:
+        res = run_claude(
+            prompt=contract.prompt, cwd=kb_cwd, log_path=log,
+            model=contract.model, permission_mode=contract.permission_mode,
+            allowed_tools=contract.allowed_tools, timeout=contract.timeout,
+            env=env, claude_bin=claude_bin)
     ctx = Ctx(cwd=kb_cwd, stdout=res.stdout, case_log=log,
               contract_dir=contract.path.parent)
     return run_asserts(contract.asserts, ctx), ctx
