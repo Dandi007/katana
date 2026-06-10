@@ -5,7 +5,7 @@
 """
 from dataclasses import dataclass
 from pathlib import Path
-import os, signal, subprocess
+import json, os, signal, subprocess
 
 class ClaudeTimeout(Exception):
     pass
@@ -37,3 +37,50 @@ def run_claude(*, prompt: str, cwd: Path, log_path: Path, model: str,
         raise ClaudeTimeout(f"timeout {timeout}s")
     Path(log_path).write_text(out, encoding="utf-8")
     return ClaudeResult(exit_code=proc.returncode, stdout=out)
+
+
+def _parse_session(out: str):
+    """从 --output-format json 输出取 (session_id, result 文本)；非 JSON 回退整段。"""
+    try:
+        obj = json.loads(out)
+    except json.JSONDecodeError:
+        return None, out
+    return obj.get("session_id"), obj.get("result", "")
+
+
+def run_claude_session(*, turns: list, cwd: Path, log_path: Path, model: str,
+                       permission_mode: str, allowed_tools: list, timeout: int,
+                       env: dict, claude_bin: str | None = None) -> ClaudeResult:
+    """多轮：同一 session/cwd 顺序续跑，work folder 跨轮累积。
+    turn1 取 session_id；turn2..N 带 --resume <session_id>。任一轮非零退出即中止。"""
+    binary = claude_bin or os.environ.get("CLAUDE_BIN", "claude")
+    full_env = {**os.environ, **env}
+    session_id, texts, exit_code = None, [], 0
+    for i, turn in enumerate(turns):
+        cmd = [binary, "-p", "--model", model,
+               "--permission-mode", permission_mode, "--output-format", "json"]
+        if session_id:
+            cmd += ["--resume", session_id]
+        if allowed_tools:
+            cmd += ["--allowedTools", ",".join(allowed_tools)]
+        proc = subprocess.Popen(cmd, cwd=str(cwd), env=full_env,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
+        try:
+            out, _ = proc.communicate(input=turn, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait()
+            if proc.stdout: proc.stdout.close()
+            if proc.stdin: proc.stdin.close()
+            raise ClaudeTimeout(f"timeout {timeout}s on turn {i + 1}")
+        sid, text = _parse_session(out)
+        session_id = session_id or sid
+        texts.append(text)
+        if proc.returncode != 0:
+            exit_code = proc.returncode
+            break
+    combined = "\n".join(texts)
+    Path(log_path).write_text(combined, encoding="utf-8")
+    return ClaudeResult(exit_code=exit_code, stdout=combined)
