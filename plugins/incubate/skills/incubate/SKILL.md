@@ -38,7 +38,7 @@ Incubator/YYYY/MM/<topic-slug>/
 4. 向用户汇报孵化台路径。
 
 ### gather — 资料探索 / 「找找相关的」
-1. 复用检索 skill 拉相关资料：本地走 `search-note` / `explore-work-record`；外部源**必须走 `/retrieval:*`**（拿 fallback 链 + 可信度标注），不 ad-hoc curl/WebFetch。
+1. 复用检索：本地走 `/retrieval:search-note` / `explore-work-record`，外部源（网页/推文/repo/飞书等）**必须走 `/retrieval:*`**（拿 fallback 链 + 可信度标注），不 ad-hoc curl/WebFetch。
 2. 每条资料 append 进 `findings.md`：`来源链接 + 1-3 句核心点提炼 + 可信度`。
 3. 关联到的工作文档/笔记记进 `context.md`（路径 + `[[wikilink]]`）。
 
