@@ -49,3 +49,22 @@ def test_session_timeout_raises(tmp_path, monkeypatch):
             turns=["x", "y"], cwd=tmp_path, log_path=tmp_path / "l",
             model="m", permission_mode="acceptEdits", allowed_tools=[],
             timeout=1, env={}, claude_bin=SHIM)
+
+
+def test_session_raises_when_no_session_id_multi_turn(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_STDOUT", "ok")
+    monkeypatch.setenv("FAKE_CLAUDE_BADJSON", "1")  # turn1 输出非 JSON → 拿不到 session_id
+    with pytest.raises(RuntimeError, match="session_id"):
+        run_claude_session(
+            turns=["a", "b"], cwd=tmp_path, log_path=tmp_path / "l",
+            model="m", permission_mode="acceptEdits", allowed_tools=[],
+            timeout=30, env={}, claude_bin=SHIM)
+
+def test_session_single_turn_list_tolerates_no_session_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_STDOUT", "ok")
+    monkeypatch.setenv("FAKE_CLAUDE_BADJSON", "1")
+    r = run_claude_session(
+        turns=["only"], cwd=tmp_path, log_path=tmp_path / "l",
+        model="m", permission_mode="acceptEdits", allowed_tools=[],
+        timeout=30, env={}, claude_bin=SHIM)
+    assert r.exit_code == 0  # 单轮不需要 resume，非 JSON 也不报错

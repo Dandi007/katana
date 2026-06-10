@@ -26,7 +26,7 @@ if [ -n "${FAKE_CLAUDE_APPEND:-}" ]; then
 fi
 text="${FAKE_CLAUDE_STDOUT:-fake output}"
 [ -n "$resume" ] && text="$text resumed:$resume"
-if [ "$json" = "1" ]; then
+if [ "$json" = "1" ] && [ -z "${FAKE_CLAUDE_BADJSON:-}" ]; then
   printf '{"session_id":"s1","result":"%s"}\n' "$text"
 else
   printf '%s\n' "$text"

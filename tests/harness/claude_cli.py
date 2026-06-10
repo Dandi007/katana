@@ -77,6 +77,10 @@ def run_claude_session(*, turns: list, cwd: Path, log_path: Path, model: str,
             raise ClaudeTimeout(f"timeout {timeout}s on turn {i + 1}")
         sid, text = _parse_session(out)
         session_id = session_id or sid
+        if i == 0 and len(turns) > 1 and session_id is None:
+            raise RuntimeError(
+                "run_claude_session: turn 1 produced no session_id (non-JSON output?); "
+                "cannot --resume subsequent turns")
         texts.append(text)
         if proc.returncode != 0:
             exit_code = proc.returncode
