@@ -15,6 +15,15 @@ const MAX_WIDTH = (Number.isInteger(A.maxWidth) && A.maxWidth > 0) ? A.maxWidth 
 const MAX_DEPTH = 3      // 单条线索最大深度（形状护栏）
 const SAFETY_CAP = 50    // runaway backstop，正常碰不到；命中即 log 告警不静默截断
 
+// 三档 agent 模型（deep_research_models 可配；启动前由主 agent 按 topic 意图定好，workflow 内每轮不变）
+// 非法/缺省回退默认（防御式）：worker 量大成本敏感→sonnet；triage 判收敛+选 frontier、synth 写终稿→opus
+const VALID_MODELS = new Set(['opus', 'sonnet', 'haiku', 'fable'])
+const M = (A.models && typeof A.models === 'object' && !Array.isArray(A.models)) ? A.models : {}
+const pickModel = (v, d) => (typeof v === 'string' && VALID_MODELS.has(v)) ? v : d
+const WORKER_MODEL = pickModel(M.worker, 'sonnet')
+const TRIAGE_MODEL = pickModel(M.triage, 'opus')
+const SYNTH_MODEL = pickModel(M.synth, 'opus')
+
 const norm = c => (c.text || '').trim().toLowerCase()
 const coverage = L1 => L1
   .flatMap(f => (f.findings || []).map(x => `- [${f.clue_id}][${x.source_type}] ${x.title}`))
@@ -145,6 +154,7 @@ while (frontier.length) {             // 唯一"自然"停止：没线索可探�
       agent(workerPrompt(clue, round), {
         phase: 'Explore',
         schema: FINDING_SCHEMA,
+        model: WORKER_MODEL,            // 检索档（默认 sonnet，deep_research_models 可配）
         agentType: 'general-purpose',   // worker 既要检索又要写 L2 文件；Explore 只读不能 Write
         label: `explore:r${round}-${clue.id}`,
       })
@@ -159,7 +169,7 @@ while (frontier.length) {             // 唯一"自然"停止：没线索可探�
   fresh.forEach(c => seen.add(norm(c)))
 
   // 🎨 主判断节点：triage agent 判断「是否收敛/该停」+ 从 fresh 选下一轮 frontier
-  const picked = await agent(triagePrompt(fresh, round), { phase: 'Triage', schema: TRIAGE_SCHEMA })
+  const picked = await agent(triagePrompt(fresh, round), { phase: 'Triage', schema: TRIAGE_SCHEMA, model: TRIAGE_MODEL })
   // triage agent 已在其任务内重写 clue_board.md 快照（脚本无 FS 权限）
 
   if (picked.converged) break         // 停止 = 判断驱动，绝不因成本/轮数停
@@ -170,4 +180,4 @@ while (frontier.length) {             // 唯一"自然"停止：没线索可探�
 }
 
 phase('Synthesize')
-return await agent(synthesisPrompt(), { phase: 'Synthesize' })
+return await agent(synthesisPrompt(), { phase: 'Synthesize', model: SYNTH_MODEL })

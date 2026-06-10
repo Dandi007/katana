@@ -36,6 +36,23 @@ deep_research_sources=feishu:/retrieval:feishu,gitlab:/retrieval:gitlab,linear:/
 
 `deep_research_max_width`：每轮并行探索的线索数上限。优先级：env `DEEP_RESEARCH_MAX_WIDTH` → `.katana` → 默认 10。同时刻真实并发受 Workflow harness `min(16, CPU核数-2)` 约束，超出排队执行不丢失。
 
+### 模型档位（可选）
+
+`deep_research_models`：三类 agent 节点各自跑哪个模型档。格式同 `deep_research_sources`，逗号分隔 `name:model`（按第一个冒号切分），model 取值 `opus`/`sonnet`/`haiku`/`fable`：
+
+```
+deep_research_models=worker:sonnet,triage:opus,synth:opus
+```
+
+| 节点 | 默认 | 作用 | 为什么这个档 |
+|------|------|------|------------|
+| `worker` | `sonnet` | 检索 + 写 L2 原文，量大、并行、成本敏感 | 检索为主，sonnet 够用且便宜；可按 topic 意图上下调（见 Stage A） |
+| `triage` | `opus` | 判断收敛 + 选下一轮 frontier | 判断质量直接决定停不停、追什么，给最强档 |
+| `synth` | `opus` | 合并去重 + 写终稿 report | 综合叙事质量最重，给最强档 |
+
+- 优先级：env `DEEP_RESEARCH_MODELS` → `.katana` → 默认。缺省或非法值由 workflow 逐档回退到上表默认。
+- **档位在启动 workflow 前定好**（Stage A 主 agent 那一次），workflow 内每轮不变——模型在 `agent()` spawn 时即绑定，被 spawn 的 worker 无法自己改。
+
 ## 调用
 ```
 /deep-research <问题或线索>
@@ -47,7 +64,8 @@ deep_research_sources=feishu:/retrieval:feishu,gitlab:/retrieval:gitlab,linear:/
 1. `date "+%Y-%m-%d %H:%M"` 确认时间。
 2. 解析输入 → 生成可读自然语言主题名（空格分隔，如「PPO vs SAC 对比」）。
 3. 确定知识库根：按优先级读取——环境变量 `DEEP_RESEARCH_KB_DIR` → 项目根 `.katana` 文件的 `deep_research_kb_dir` 值 → 当前目录。先读 `$KB/CLAUDE.md` 或 `$KB/AGENTS.md`（如存在）了解库结构与检索约定；建目录 `$KB/DeepThought/<主题名>/` 与 `$KB/DeepThought/<主题名>/findings/`。
-   同时按同优先级读取 `deep_research_sources` / `deep_research_max_width`（env → `.katana` → 默认），解析出命名源映射 `{name: entry}` 与宽度值。
+   同时按同优先级读取 `deep_research_sources` / `deep_research_max_width` / `deep_research_models`（env → `.katana` → 默认），解析出命名源映射 `{name: entry}`、宽度值与三档模型 `{worker, triage, synth}`。
+   **worker 档按 topic 意图定**（这是「按意图选模型」的唯一时机，启动后不可变）：在解析出的默认基础上判断——纯事实扫库 / 信息聚合类（多数线索是 Grep/Read/简单网页抓取）→ 下调 `worker:haiku` 省成本；技术深挖 / 需要读代码、推理因果、辨析冲突证据的硬研究 → 上调 `worker:opus` 保质量；拿不准就用默认 `sonnet`。triage/synth 一般保持 `opus`，除非用户另有指定。
 4. 把输入拆成 3-6 条初始线索，每条形如
    `{ id:"c0", text:"...", local:<bool>, suggested_sources:[...], depth:0 }`。
    suggested_sources 三类可选：①KB 内子目录（此时 local=true）②`web` ③已声明的命名源名（如 `feishu`/`gitlab`/`reddit`/`code`，按线索性质判断——「XX 的群里讨论」→feishu、「XX 的 MR/issue」→gitlab/linear）；②③均 local=false。worker 解析时，每个命名源名（包括 `web`）映射到 `deep_research_sources` 中的对应 entry，即调用 `/retrieval:<name>`——retrieval plugin 自带 fallback 梯度与可信度，worker 无需自行处理降级。
@@ -60,6 +78,7 @@ Workflow({
   scriptPath: "<本 skill 的 base directory>/workflow.js",  // Skill 加载时给出 base directory，填绝对路径
   args: { topic: "<原问题>", topicDir: "DeepThought/<主题名>", skillDir: "<本 skill 的 base directory 绝对路径>",
           sources: { ...阶段A解析的命名源映射，无则传 {} }, maxWidth: <阶段A解析的宽度，未配置则省略>,
+          models: { worker: "<档>", triage: "<档>", synth: "<档>" },  // 阶段A定好的三档，缺省档省略由 workflow 回退默认
           initialClues: [ ...上面拆的线索 ] }
 })
 ```
