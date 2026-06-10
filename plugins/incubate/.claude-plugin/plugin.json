@@ -1,0 +1,7 @@
+{
+  "name": "incubate",
+  "description": "想法孵化台 — 围绕一件具体的事情持续沉淀想法、评论与灵感，整理成日后 propose/设计文档的输入；复用 work-folder 控制面文件，五 mode（init/gather/capture/synthesize/graduate）",
+  "version": "0.1.0",
+  "author": { "name": "Dandi007" },
+  "license": "MIT"
+}

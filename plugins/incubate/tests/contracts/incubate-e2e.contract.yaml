@@ -1,0 +1,18 @@
+skill: incubate:incubate
+preconditions:
+  requires: [cmd:claude]
+input:
+  cwd: kb
+  turns:
+    - "用 incubate 开一个孵化台，主题：Task ID 采集任务管理系统，维度 work"
+    - "gather：在知识库里把和 Task ID 采集相关的工作文档找来，逐条提炼核心点写进 findings"
+    - "capture 我的想法：采集端应该先打通最小链路，先保实时性，不要一开始就追求 schema 完美"
+    - "capture：这个系统的核心矛盾是实时性 vs 完整性，元数据可以后补"
+    - "synthesize：把上面的资料和我的想法揉成一份能拿去 propose 的材料，写进 spec"
+    - "graduate：把状态置为已毕业"
+run:
+  timeout: 1800
+assert:
+  - file_exists: "{cwd}/Incubator/*/*/*/README.md"
+  - file_exists: "{cwd}/Incubator/*/*/*/spec.md"
+  - script: "incubate-e2e.verify.sh"

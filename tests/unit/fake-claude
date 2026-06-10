@@ -1,14 +1,34 @@
 #!/usr/bin/env bash
-# Test shim. 行为由 env 控制：
-#   FAKE_CLAUDE_STDOUT  输出文本；FAKE_CLAUDE_WRITE  "relpath:content" 在 cwd 写文件
-#   FAKE_CLAUDE_EXIT    退出码（默认 0）；FAKE_CLAUDE_SLEEP  延迟秒
-# 子命令（plugin/...）一律 echo 后成功返回，供 sweep-setup 单测。
+# Test shim. env 控制行为：
+#   FAKE_CLAUDE_STDOUT  输出文本；FAKE_CLAUDE_WRITE "relpath:content" 在 cwd 写文件
+#   FAKE_CLAUDE_APPEND  relpath：把本轮 stdin prompt 追加一行（多轮累积验证用）
+#   FAKE_CLAUDE_EXIT    退出码（默认 0）；FAKE_CLAUDE_SLEEP 延迟秒
+# 识别 --output-format json（吐 {session_id,result}）与 --resume <id>。
+# 子命令（plugin/...）一律 echo 后成功返回。
 if [ "$1" != "-p" ]; then echo "fake-claude: $*"; exit 0; fi
-cat >/dev/null   # 消费 stdin prompt
+json=0; resume=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --output-format) [ "${args[$((i+1))]:-}" = "json" ] && json=1 ;;
+    --resume) resume="${args[$((i+1))]:-}" ;;
+  esac
+done
+prompt="$(cat)"   # 消费 stdin prompt
 [ -n "${FAKE_CLAUDE_SLEEP:-}" ] && sleep "$FAKE_CLAUDE_SLEEP"
 if [ -n "${FAKE_CLAUDE_WRITE:-}" ]; then
   rel="${FAKE_CLAUDE_WRITE%%:*}"; content="${FAKE_CLAUDE_WRITE#*:}"
   mkdir -p "$(dirname "$rel")"; printf '%s' "$content" > "$rel"
 fi
-printf '%s\n' "${FAKE_CLAUDE_STDOUT:-fake output}"
+if [ -n "${FAKE_CLAUDE_APPEND:-}" ]; then
+  mkdir -p "$(dirname "$FAKE_CLAUDE_APPEND")"
+  printf '%s\n' "$prompt" >> "$FAKE_CLAUDE_APPEND"
+fi
+text="${FAKE_CLAUDE_STDOUT:-fake output}"
+[ -n "$resume" ] && text="$text resumed:$resume"
+if [ "$json" = "1" ] && [ -z "${FAKE_CLAUDE_BADJSON:-}" ]; then
+  printf '{"session_id":"s1","result":"%s"}\n' "$text"
+else
+  printf '%s\n' "$text"
+fi
 exit "${FAKE_CLAUDE_EXIT:-0}"

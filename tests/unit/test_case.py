@@ -68,3 +68,13 @@ def test_unknown_requires_kind_raises(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="envv"):
         check_requires(["envv:TYPO"])
+
+def test_run_case_multi_turn(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_STDOUT", "all OK")
+    monkeypatch.setenv("FAKE_CLAUDE_APPEND", "turns.log")  # 相对路径 → 落在 kb cwd
+    c = make_contract(
+        tmp_path, prompt="", turns=["x", "y"],
+        asserts=[{"file_grep": {"path": "{cwd}/turns.log", "pattern": "y"}}])
+    r = run_case(c, golden(tmp_path), tmp_path / "work", claude_bin=SHIM, base_env={})
+    assert r.status == "PASS"
+    assert (tmp_path / "work" / "q" / "kb" / "turns.log").read_text().splitlines() == ["x", "y"]
