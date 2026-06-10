@@ -37,11 +37,11 @@ def load_contract(path: Path) -> Contract:
     turns = inp.get("turns")
     prompt = inp.get("prompt")
     if turns is not None:
-        if (not isinstance(turns, list) or not turns
-                or not all(isinstance(t, str) and t for t in turns)):
-            raise ContractError(f"{path}: input.turns must be a non-empty list of non-empty strings")
         if prompt:
             raise ContractError(f"{path}: input has both prompt and turns; choose one")
+        if (not isinstance(turns, list) or not turns
+                or not all(isinstance(t, str) and t.strip() for t in turns)):
+            raise ContractError(f"{path}: input.turns must be a non-empty list of non-empty strings")
     elif not prompt:
         raise ContractError(f"{path}: missing input.prompt")
     asserts = raw.get("assert") or []  # YAML key 是保留字 assert，dataclass field 用 asserts
