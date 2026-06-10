@@ -67,6 +67,13 @@
       "category": "productivity",
       "source": "./plugins/feishu-docs",
       "homepage": "https://github.com/Dandi007/katana"
+    },
+    {
+      "name": "incubate",
+      "description": "Idea incubator — accrete ideas/commentary/inspiration around one concrete topic into output-ready material for a later propose/design doc; reuses work-folder control files, five modes",
+      "category": "productivity",
+      "source": "./plugins/incubate",
+      "homepage": "https://github.com/Dandi007/katana"
     }
   ]
 }
