@@ -88,3 +88,38 @@ def test_verdict_missing_rubric_rejected(tmp_path):
     """)
     with pytest.raises(ContractError, match="rubric"):
         load_contract(p)
+
+
+def test_turns_contract_parsed(tmp_path):
+    p = write(tmp_path, """\
+        skill: incubate:incubate
+        input:
+          turns:
+            - "开个孵化台"
+            - "capture 我的想法"
+        assert:
+          - file_exists: "{cwd}/Incubator"
+    """)
+    c = load_contract(p)
+    assert c.turns == ["开个孵化台", "capture 我的想法"]
+    assert c.prompt == ""
+
+def test_turns_and_prompt_both_rejected(tmp_path):
+    p = write(tmp_path, """\
+        skill: a:b
+        input:
+          prompt: hi
+          turns: ["x"]
+        assert: [{stdout_grep: x}]
+    """)
+    with pytest.raises(ContractError, match="prompt.*turns|turns.*prompt"):
+        load_contract(p)
+
+def test_empty_turns_rejected(tmp_path):
+    p = write(tmp_path, """\
+        skill: a:b
+        input: {turns: []}
+        assert: [{stdout_grep: x}]
+    """)
+    with pytest.raises(ContractError, match="turns"):
+        load_contract(p)

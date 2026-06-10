@@ -19,6 +19,7 @@ class Contract:
     path: Path
     case_id: str
     cwd: str = "kb"
+    turns: list = field(default_factory=list)
     requires: list = field(default_factory=list)
     model: str = "lingzhi/claude-opus-4-8"
     permission_mode: str = "acceptEdits"
@@ -33,7 +34,15 @@ def load_contract(path: Path) -> Contract:
     if not isinstance(raw, dict) or not raw.get("skill"):
         raise ContractError(f"{path}: missing required key 'skill'")
     inp = raw.get("input") or {}
-    if not inp.get("prompt"):
+    turns = inp.get("turns")
+    prompt = inp.get("prompt")
+    if turns is not None:
+        if (not isinstance(turns, list) or not turns
+                or not all(isinstance(t, str) and t for t in turns)):
+            raise ContractError(f"{path}: input.turns must be a non-empty list of non-empty strings")
+        if prompt:
+            raise ContractError(f"{path}: input has both prompt and turns; choose one")
+    elif not prompt:
         raise ContractError(f"{path}: missing input.prompt")
     asserts = raw.get("assert") or []  # YAML key 是保留字 assert，dataclass field 用 asserts
     verdict = raw.get("verdict")
@@ -53,9 +62,10 @@ def load_contract(path: Path) -> Contract:
     if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
         raise ContractError(f"{path}: run.allowed_tools must be a list of strings")
     return Contract(
-        skill=raw["skill"], prompt=inp["prompt"], path=Path(path),
+        skill=raw["skill"], prompt=prompt or "", path=Path(path),
         case_id=Path(path).name.removesuffix(".contract.yaml"),
-        cwd=inp.get("cwd", "kb"), requires=pre.get("requires", []) or [],
+        cwd=inp.get("cwd", "kb"), turns=turns or [],
+        requires=pre.get("requires", []) or [],
         model=run.get("model", "lingzhi/claude-opus-4-8"),
         permission_mode=run.get("permission_mode", "acceptEdits"),
         allowed_tools=tools,
