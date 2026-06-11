@@ -1,13 +1,16 @@
 export const meta = {
   name: 'deep-research',
   description: 'BFS clue-driven multi-source research → cited report (judgment-driven stop)',
-  phases: [{ title: 'Explore' }, { title: 'Triage' }, { title: 'Synthesize' }],
+  phases: [{ title: 'Setup' }, { title: 'Explore' }, { title: 'Triage' }, { title: 'Synthesize' }],
 }
 
-// args = { topic, topicDir, skillDir, sources, maxWidth, initialClues: [{ id, text, local, suggested_sources, depth }] }
-// ⚠️ spike 实测：args 到脚本是 JSON 字符串，必须 parse（防御式兼容对象/字符串）
-const A = typeof args === 'string' ? JSON.parse(args) : args
-const { topic, topicDir, initialClues, skillDir } = A
+// args = { topic, topicDir, kbDir, skillDir, sources, maxWidth, initialClues, models }
+// Robust: handles structured object, valid JSON string, or raw topic string (Stage A bypassed)
+let A
+try { A = typeof args === 'string' ? JSON.parse(args) : (args || {}) }
+catch { A = { topic: typeof args === 'string' ? args : '' } }
+
+const { skillDir } = A
 const SOURCES = (A.sources && typeof A.sources === 'object' && !Array.isArray(A.sources)) ? A.sources : {}  // 命名源 { name: entry }；entry=入口文档路径(相对KB根)或裸命令名
 const TPL = skillDir ? `${skillDir}/templates` : 'templates'  // 模板目录：未传 skillDir 时退回 CWD 相对路径
 
@@ -23,6 +26,18 @@ const pickModel = (v, d) => (typeof v === 'string' && VALID_MODELS.has(v)) ? v :
 const WORKER_MODEL = pickModel(M.worker, 'sonnet')
 const TRIAGE_MODEL = pickModel(M.triage, 'opus')
 const SYNTH_MODEL = pickModel(M.synth, 'opus')
+
+// KB root — from Stage A (reads .katana); fallback '.' = project CWD
+const KB_DIR = (typeof A.kbDir === 'string' && A.kbDir.trim()) ? A.kbDir.trim() : '.'
+
+// topic — from structured args, or raw string input when Stage A was bypassed
+const topic = (typeof A.topic === 'string' && A.topic.trim()) ? A.topic.trim()
+            : (typeof args === 'string' ? args.trim() : 'Unknown Topic')
+
+// topicDir — from structured args, or auto-derived from topic + KB_DIR
+const _dirName = topic.replace(/[/\\:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim().slice(0, 80)
+const topicDir = (typeof A.topicDir === 'string' && A.topicDir.trim()) ? A.topicDir.trim()
+               : `${KB_DIR}/DeepThought/${_dirName}`
 
 const norm = c => (c.text || '').trim().toLowerCase()
 const coverage = L1 => L1
@@ -139,6 +154,31 @@ MUST: 每个论断可回溯到 sources.md / L2 原文。MUST NOT: 编造来源�
 
 返回一段 Executive Summary + 3-5 条 Key Takeaways（给对话收尾阶段展示用）。`
 }
+
+// Setup phase: always ensure topicDir/findings exists; generate initialClues when Stage A was bypassed
+const SETUP_SCHEMA = {
+  type: 'object', required: ['initialClues'],
+  properties: { initialClues: { type: 'array', minItems: 1, items: { type: 'object',
+    required: ['id', 'text', 'local', 'suggested_sources', 'depth'],
+    properties: {
+      id: { type: 'string' }, text: { type: 'string' }, local: { type: 'boolean' },
+      suggested_sources: { type: 'array', items: { type: 'string' } }, depth: { type: 'number' },
+    } } } },
+}
+
+const _needsClues = !Array.isArray(A.initialClues) || !A.initialClues.length
+if (_needsClues) log(`Stage A not provided — setup agent will create dirs and split clues`)
+phase('Setup')
+const _setup = await agent(
+  `1. 用 Bash 运行 \`mkdir -p "${topicDir}/findings"\`（幂等，目录已存在无害）。\n` +
+  (_needsClues
+    ? `2. 把研究主题 "${topic}" 拆成 3-6 条初始搜索线索，格式：{ id:"c0", text:"...", local:false, suggested_sources:["web"], depth:0 }。\n` +
+      `   local=true 仅当线索主要靠本地知识库而非 web 回答。\n` +
+      `返回 SETUP_SCHEMA。`
+    : `返回 SETUP_SCHEMA，initialClues 照搬：${JSON.stringify(A.initialClues)}`),
+  { phase: 'Setup', schema: SETUP_SCHEMA, label: _needsClues ? 'setup:mkdir+clues' : 'setup:mkdir' }
+)
+const initialClues = _needsClues ? _setup.initialClues : A.initialClues
 
 const seen = new Set(initialClues.map(norm))
 let frontier = initialClues, round = 0
