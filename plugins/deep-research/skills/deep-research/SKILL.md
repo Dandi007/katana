@@ -76,10 +76,12 @@ deep_research_models=worker:sonnet,triage:opus,synth:opus
 ```
 Workflow({
   scriptPath: "<本 skill 的 base directory>/workflow.js",  // Skill 加载时给出 base directory，填绝对路径
-  args: { topic: "<原问题>", topicDir: "DeepThought/<主题名>", skillDir: "<本 skill 的 base directory 绝对路径>",
+  args: { topic: "<原问题>", topicDir: "<KB根绝对路径>/DeepThought/<主题名>", kbDir: "<KB根绝对路径>",
+          skillDir: "<本 skill 的 base directory 绝对路径>",
           sources: { ...阶段A解析的命名源映射，无则传 {} }, maxWidth: <阶段A解析的宽度，未配置则省略>,
           models: { worker: "<档>", triage: "<档>", synth: "<档>" },  // 阶段A定好的三档，缺省档省略由 workflow 回退默认
           initialClues: [ ...上面拆的线索 ] }
+  // ⚠️ topicDir / kbDir 必须是绝对路径；workflow subagent 的 CWD 不保证等于项目根
 })
 ```
 （本 skill 指令即 Workflow 的合法 opt-in。）Workflow 会一轮轮 fan-out worker、triage 判断收敛、最后 synthesis 写产物。期间可 `/workflows` 看进度、随时 kill。
