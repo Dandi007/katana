@@ -16,6 +16,9 @@ fi
 case "$WRITING_DIR" in "~") WRITING_DIR="$HOME";; "~/"*) WRITING_DIR="${HOME}${WRITING_DIR#\~}";; esac
 case "$WRITING_DIR" in /*) :;; *) WRITING_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}/${WRITING_DIR}";; esac
 
+# 目录不存在 → 静默退出（声明了 writing_dir 但尚未建库，避免注入指向不存在路径）
+[ -d "$WRITING_DIR" ] || exit 0
+
 content=$(cat "${PLUGIN_ROOT}/skills/using-writing/SKILL.md" 2>/dev/null || true)
 [ -z "$content" ] && exit 0
 content="${content//\{\{WRITING_DIR\}\}/${WRITING_DIR}}"
