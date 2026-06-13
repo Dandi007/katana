@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/katana-config.sh"
+
+# writing_dir：显式声明才激活（默认空 → 静默退出，零打扰）
+WRITING_DIR="$(katana_config_get "writing_dir" "" "KATANA_WRITING_DIR")"
+[ -z "$WRITING_DIR" ] && exit 0
+
+# 安全校验：拒绝路径穿越与非法字符
+if [[ ! "$WRITING_DIR" =~ ^[a-zA-Z0-9/_.一-鿿~\ \-]+$ ]] || [[ "$WRITING_DIR" == *".."* ]]; then
+    echo "Error: writing_dir invalid: $WRITING_DIR" >&2; exit 1
+fi
+# ~ 展开 + 相对 CLAUDE_PROJECT_DIR 解析
+case "$WRITING_DIR" in "~") WRITING_DIR="$HOME";; "~/"*) WRITING_DIR="${HOME}${WRITING_DIR#\~}";; esac
+case "$WRITING_DIR" in /*) :;; *) WRITING_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}/${WRITING_DIR}";; esac
+
+content=$(cat "${PLUGIN_ROOT}/skills/using-writing/SKILL.md" 2>/dev/null || true)
+[ -z "$content" ] && exit 0
+content="${content//\{\{WRITING_DIR\}\}/${WRITING_DIR}}"
+
+escape_for_json() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"; s="${s//$'\t'/\\t}"; printf '%s' "$s"; }
+printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$(escape_for_json "$content")"
