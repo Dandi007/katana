@@ -74,6 +74,13 @@
       "category": "productivity",
       "source": "./plugins/incubate",
       "homepage": "https://github.com/Dandi007/katana"
+    },
+    {
+      "name": "writing",
+      "description": "Document writing + readability review engine — write gate (read project patterns/opinions, fixed self-check), readability-check (machine + cold-read subagent, feedback evolution), bluf structure SSoT; project-specific templates/opinions externalized via .katana writing_dir",
+      "category": "productivity",
+      "source": "./plugins/writing",
+      "homepage": "https://github.com/Dandi007/katana"
     }
   ]
 }
