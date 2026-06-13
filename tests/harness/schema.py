@@ -24,6 +24,7 @@ class Contract:
     model: str = "lingzhi/claude-opus-4-8"
     permission_mode: str = "acceptEdits"
     allowed_tools: list = field(default_factory=lambda: list(DEFAULT_TOOLS))
+    no_tools: bool = False
     timeout: int = 600
     asserts: list = field(default_factory=list)
     verdict: dict | None = None
@@ -69,6 +70,7 @@ def load_contract(path: Path) -> Contract:
         model=run.get("model") or os.environ.get("KATANA_CONTRACT_MODEL") or "lingzhi/claude-opus-4-8",
         permission_mode=run.get("permission_mode", "acceptEdits"),
         allowed_tools=tools,
+        no_tools=bool(run.get("no_tools", False)),
         timeout=int(run.get("timeout", 600)),
         asserts=asserts, verdict=verdict,
     )
