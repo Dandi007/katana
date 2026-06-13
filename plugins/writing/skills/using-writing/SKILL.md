@@ -9,7 +9,7 @@ description: Hook-injected convention layer for the writing plugin. Active when 
 
 子目录说明：
 - `{{WRITING_DIR}}/patterns/` — 按文档类型组织的写审两张脸 SSoT（每个 `<type>.md` 同时记录写法规范与审阅标准）
-- `{{WRITING_DIR}}/improvements/` — 意见演进卡池（每张卡含 `状态: active|archived`）
+- `{{WRITING_DIR}}/improvements/` — 意见演进卡池（每张卡含 `状态: active|superseded`，检索时只读 active）
 - `{{WRITING_DIR}}/staging/` — 原始反馈 inbox（immutable，进化前的暂存区）
 
 ## 路由表
