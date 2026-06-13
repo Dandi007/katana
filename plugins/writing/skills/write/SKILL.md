@@ -85,7 +85,7 @@ description: 统一文档写作入口。当用户想要写 spec、方案、会�
 - **BLUF 结构**：遵守 `writing:bluf` 的 L0-L3 四层信息架构，先定 L0（一句话结论），再列 L1（3-5 bullet），再展开 L2 正文
 - **读者主线优先**：证据密集型文档必须先写"读者下一步该如何判断/行动"的主线，再把 source table、session id、search trace、blocked log、自检结果等研究过程信息下沉到附录或生成记录；正文不能按调查顺序或证据收集顺序展开
 - 按文档类型组织骨架，而不是直接输出一大段泛化文本
-- **per-kind template（写的脸）**：识别具体 kind 后，若当前项目 writing_dir 下的 `template/<kind>.md` 存在，**先 emit 它的 `## Layout` 字面骨架，再按 `## 写作 guide` 逐节填充，并删除内嵌「怎么填」微提示**——产出结构由 template 保证，不靠每次临场发挥。随后读 `patterns/<type>.md` 的「适用判定/反模式」做校准。**无 template 命中** → 回退读 `patterns/<type>.md` 内残留的写法骨架 / `references/_generic.md`，并 offer：用 `/readability-check distill <type> <语料...>` 起一份 template。template 文件规格见 `writing:readability-check` 的 `references/template-spec.md`。该写的脸的评判镜像（审的脸）在同 type 的 pattern，由 `writing:readability-check` 消费；结构/写法反馈经 `/readability-check evolve` 分诊固化回 template，写审同步收敛。已固化：`atomic-note`/`tech-spec`/`work-brief`（pattern 层）
+- **per-kind template（写的脸）**：识别具体 kind 后，若当前项目 writing_dir 下的 `template/<kind>.md` 存在，**先 emit 它的 `## Layout` 字面骨架，再按 `## 写作 guide` 逐节填充，并删除内嵌「怎么填」微提示**——产出结构由 template 保证，不靠每次临场发挥。随后读 `patterns/<type>.md` 的「适用判定/反模式」做校准。**无 template 命中** → 回退读 `patterns/<type>.md` 内残留的写法骨架（无 pattern 则按 bluf L0–L3 通用结构起草），并 offer：用 `/readability-check distill <type> <语料...>` 起一份 template。template 文件规格见 `writing:readability-check` 的 `references/template-spec.md`。该写的脸的评判镜像（审的脸）在同 type 的 pattern，由 `writing:readability-check` 消费；结构/写法反馈经 `/readability-check evolve` 分诊固化回 template，写审同步收敛。已固化：`atomic-note`/`tech-spec`/`work-brief`（pattern 层）
 - 保持事实、待确认信息、AI 推断边界清晰
 - 避免空话、套话、重复表达和无信息密度段落
 - 若目录规范或专用 skill 对结构有额外要求，正文必须遵守

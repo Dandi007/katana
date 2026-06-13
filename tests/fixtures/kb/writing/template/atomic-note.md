@@ -4,8 +4,7 @@
 
 ```markdown
 ---
-source_type: <human|llm|...>
-credibility: <high|medium|low>
+source: <raw/... 或外部 URL>
 ---
 
 # <一句话断言/定义，不是话题词>   <!-- L0：首句即定义 -->
@@ -23,7 +22,7 @@ credibility: <high|medium|low>
 
 ## 写作 guide
 
-- frontmatter 对齐根 `WIKI.md` 原子笔记 schema，不在此重定义。
+- frontmatter 对齐本 KB 的 `WIKI.md`（每页含 `source:` 指向 raw/ 或外部 URL），不在此重定义。
 - 标题是断言句；首句定义先行（L0），场景后置。
 - 脱离当前项目/主机/日期仍成立——价值在概念本身。
 - 事实性内容必留 `# References`，分层（官方一手/二手/归纳）。

@@ -22,8 +22,8 @@ def run_claude(*, prompt: str, cwd: Path, log_path: Path, model: str,
     cmd = [claude_bin or os.environ.get("CLAUDE_BIN", "claude"), "-p",
            "--model", model, "--permission-mode", permission_mode]
     if no_tools:
-        # 描述类契约：禁文件/执行工具防 agentic 长循环，保留 Skill 工具以加载被测 skill
-        cmd += ["--disallowedTools", "Bash,Edit,Write,Read,Grep,Glob,Task,Agent,WebFetch,WebSearch,NotebookEdit"]
+        # 描述类契约：allowlist 只放 Skill（加载被测 skill），其余工具全禁 → 防 agentic 长循环
+        cmd += ["--tools", "Skill"]
     elif allowed_tools:
         cmd += ["--allowedTools", ",".join(allowed_tools)]
     full_env = {**os.environ, **env}
@@ -67,8 +67,8 @@ def run_claude_session(*, turns: list, cwd: Path, log_path: Path, model: str,
         if session_id:
             cmd += ["--resume", session_id]
         if no_tools:
-            # 描述类契约：禁文件/执行工具防 agentic 长循环，保留 Skill 工具以加载被测 skill
-            cmd += ["--disallowedTools", "Bash,Edit,Write,Read,Grep,Glob,Task,Agent,WebFetch,WebSearch,NotebookEdit"]
+            # 描述类契约：allowlist 只放 Skill（加载被测 skill），其余工具全禁 → 防 agentic 长循环
+            cmd += ["--tools", "Skill"]
         elif allowed_tools:
             cmd += ["--allowedTools", ",".join(allowed_tools)]
         proc = subprocess.Popen(cmd, cwd=str(cwd), env=full_env,

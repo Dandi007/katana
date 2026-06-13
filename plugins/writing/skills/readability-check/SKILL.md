@@ -85,7 +85,8 @@ argument-hint: "[file_path ...] | evolve [type] | distill <type> <语料...>"
 
 1. 读被检文档；逐个 pattern 跑「适用判定」+ 文件路径/frontmatter 特征匹配。
 2. 命中 → 该 type；多命中取最具体；不命中 → `_generic`。
-3. 载入该 type 的尺子：
+3. **定 kind（供结构机检）**：一个 type 可对应多个 `template/<kind>.md`。按被检文档的路径/frontmatter/标题特征确定具体 kind，结构符合性机检对照该 kind 的 `## Layout`；定不了具体 kind 或该 type 无 template → 跳过结构机检，只跑 pattern checklist，不硬套错骨架。
+4. 载入该 type 的尺子：
    - 当前项目 writing_dir 下的 patterns/<type>.md（审的脸 checklist + 反模式）
    - 当前项目 writing_dir 下的 improvements/*.md 中 `状态: active` 且 `文档类型` 匹配的卡（演进规则）
    - `writing:bluf` 的该类型 L0 适配 + Tier1/2/3 反模式
