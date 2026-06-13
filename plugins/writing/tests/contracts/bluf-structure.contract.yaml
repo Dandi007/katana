@@ -1,0 +1,7 @@
+skill: writing:bluf
+input:
+  prompt: "按 bluf 的信息架构：一份文档的 L0 应该写什么、必须是什么句式？L1 是什么？"
+  cwd: kb
+assert:
+  - stdout_grep: "L0"
+  - stdout_grep: "L1"

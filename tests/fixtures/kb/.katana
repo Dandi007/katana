@@ -1,3 +1,4 @@
 wiki_root=.
 retrieval_sources=web,search-note
 deep_research_max_width=4
+writing_dir=writing
