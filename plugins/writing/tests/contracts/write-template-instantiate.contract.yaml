@@ -7,3 +7,6 @@ assert:
   - stdout_grep: "Layout"
   - stdout_grep: "回退"
   - stdout_grep: "distill"
+
+run:
+  no_tools: true

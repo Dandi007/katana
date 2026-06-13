@@ -6,3 +6,6 @@ assert:
   - stdout_grep: "writing:"
   - stdout_grep: "subagent"
   - stdout_grep: "patterns"
+
+run:
+  no_tools: true

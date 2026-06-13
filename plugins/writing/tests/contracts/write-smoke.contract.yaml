@@ -5,3 +5,6 @@ input:
 assert:
   - stdout_grep: "patterns"
   - stdout_grep: "自检"
+
+run:
+  no_tools: true
