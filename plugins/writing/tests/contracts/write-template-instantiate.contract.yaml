@@ -1,0 +1,12 @@
+skill: writing:write
+input:
+  prompt: "项目 writing_dir 的 template/ 下已有 atomic-note.md。我要写一篇原子笔记，按这个 skill，命中 kind 后你会怎么用 template 来搭骨架？产出结构由谁保证？没有对应 template 时怎么办？"
+  cwd: kb
+assert:
+  - stdout_grep: "template"
+  - stdout_grep: "Layout"
+  - stdout_grep: "回退"
+  - stdout_grep: "distill"
+
+run:
+  no_tools: true

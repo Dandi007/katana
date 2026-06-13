@@ -17,10 +17,14 @@ class ClaudeResult:
 
 def run_claude(*, prompt: str, cwd: Path, log_path: Path, model: str,
                permission_mode: str, allowed_tools: list, timeout: int,
-               env: dict, claude_bin: str | None = None) -> ClaudeResult:
+               env: dict, claude_bin: str | None = None,
+               no_tools: bool = False) -> ClaudeResult:
     cmd = [claude_bin or os.environ.get("CLAUDE_BIN", "claude"), "-p",
            "--model", model, "--permission-mode", permission_mode]
-    if allowed_tools:
+    if no_tools:
+        # 描述类契约：allowlist 只放 Skill（加载被测 skill），其余工具全禁 → 防 agentic 长循环
+        cmd += ["--tools", "Skill"]
+    elif allowed_tools:
         cmd += ["--allowedTools", ",".join(allowed_tools)]
     full_env = {**os.environ, **env}
     proc = subprocess.Popen(cmd, cwd=str(cwd), env=full_env,
@@ -50,7 +54,8 @@ def _parse_session(out: str):
 
 def run_claude_session(*, turns: list, cwd: Path, log_path: Path, model: str,
                        permission_mode: str, allowed_tools: list, timeout: int,
-                       env: dict, claude_bin: str | None = None) -> ClaudeResult:
+                       env: dict, claude_bin: str | None = None,
+                       no_tools: bool = False) -> ClaudeResult:
     """多轮：同一 session/cwd 顺序续跑，work folder 跨轮累积。
     turn1 取 session_id；turn2..N 带 --resume <session_id>。任一轮非零退出即中止。"""
     binary = claude_bin or os.environ.get("CLAUDE_BIN", "claude")
@@ -61,7 +66,10 @@ def run_claude_session(*, turns: list, cwd: Path, log_path: Path, model: str,
                "--permission-mode", permission_mode, "--output-format", "json"]
         if session_id:
             cmd += ["--resume", session_id]
-        if allowed_tools:
+        if no_tools:
+            # 描述类契约：allowlist 只放 Skill（加载被测 skill），其余工具全禁 → 防 agentic 长循环
+            cmd += ["--tools", "Skill"]
+        elif allowed_tools:
             cmd += ["--allowedTools", ",".join(allowed_tools)]
         proc = subprocess.Popen(cmd, cwd=str(cwd), env=full_env,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,

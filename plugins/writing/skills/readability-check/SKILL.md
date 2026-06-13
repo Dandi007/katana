@@ -2,7 +2,7 @@
 name: readability-check
 description: 文档可读性自检——按文档类型固化 pattern，用「机检 + 冷读 subagent」混合引擎做行号级可读性 review，并把你的反馈沉淀回共享 pattern 自我进化。当用户想检查一份文档好不好读、能不能独立看懂、是否符合该类型的写作规范，或想把 review 意见沉淀成长期规则时使用。不用于事实核对（verify）、论证质疑（critical-review）、去 AI 味（humanizer-zh）。
 user-invocable: true
-argument-hint: "[file_path ...] | evolve [type]"
+argument-hint: "[file_path ...] | evolve [type] | distill <type> <语料...>"
 ---
 
 # Readability Check — 文档可读性自检
@@ -50,6 +50,8 @@ argument-hint: "[file_path ...] | evolve [type]"
 | `tech-spec` | 技术设计/spec、SPEC-NNN、work folder `spec.md` | 当前项目 writing_dir 下的 patterns/tech-spec.md |
 | `work-brief` | 工作汇报 / One Page / 周报 / 状态报告，`智元工作/` 下 | 当前项目 writing_dir 下的 patterns/work-brief.md |
 
+> 上述为 pattern（审的脸）。对应的 template（写的脸 = Layout + 写作 guide）若已 distill 出，机检会校验产出与其 `## Layout` 的结构符合性；未 distill 的类型只跑 pattern checklist。
+
 不命中任一类型 → 走 `references/_generic.md` 兜底（cold-read 自包含性 + bluf 结构），检完 offer：是否为这类文档起一份新 pattern。
 
 ## 路由
@@ -58,7 +60,22 @@ argument-hint: "[file_path ...] | evolve [type]"
 |---|---|
 | `/readability-check <file...>` 检查文档 | 「检查流程」 |
 | `/readability-check evolve [type]` 固化反馈 | 「进化流程」 |
+| `/readability-check distill <type> <语料...>` 从语料冷启动 template+pattern | 「Distill 流程」 |
 | 检查中/后用户给可读性意见 | 即时采集进当前项目 writing_dir 下的 staging/inbox.md |
+
+---
+
+## Distill 流程（抽离 = 冷启动）
+
+把一类文档的现有好语料冷启动成首套「写的脸 + 审的脸」。详细蒸馏指引见 `references/distill-prompt.md`。
+
+1. 收集 type + N 篇该类型现有好文档（语料）。
+2. 按 `references/distill-prompt.md` 蒸馏：共性结构 → 当前项目 writing_dir 下的 `template/<kind>.md` 的 `## Layout`；写法 → `## 写作 guide`；评判维度 → `patterns/<type>.md`。
+3. 外部已有 schema 的类型，Layout 对齐 + link，不重定义。
+4. **人工 gate**：首稿先呈 diff，经用户**确认**后才落盘（防 model-collapse）。
+5. 落盘后立即对写（template）、审（pattern）两侧生效。
+
+> distill 是冷启动；日常持续优化走「进化流程」的 evolve 分诊。
 
 ---
 
@@ -68,7 +85,8 @@ argument-hint: "[file_path ...] | evolve [type]"
 
 1. 读被检文档；逐个 pattern 跑「适用判定」+ 文件路径/frontmatter 特征匹配。
 2. 命中 → 该 type；多命中取最具体；不命中 → `_generic`。
-3. 载入该 type 的尺子：
+3. **定 kind（供结构机检）**：一个 type 可对应多个 `template/<kind>.md`。按被检文档的路径/frontmatter/标题特征确定具体 kind，结构符合性机检对照该 kind 的 `## Layout`；定不了具体 kind 或该 type 无 template → 跳过结构机检，只跑 pattern checklist，不硬套错骨架。
+4. 载入该 type 的尺子：
    - 当前项目 writing_dir 下的 patterns/<type>.md（审的脸 checklist + 反模式）
    - 当前项目 writing_dir 下的 improvements/*.md 中 `状态: active` 且 `文档类型` 匹配的卡（演进规则）
    - `writing:bluf` 的该类型 L0 适配 + Tier1/2/3 反模式
@@ -83,6 +101,7 @@ argument-hint: "[file_path ...] | evolve [type]"
 - 该 type 必含/必缺 section、frontmatter 字段、References 是否齐全
 - BLUF：L0 是否存在且为 assertion（首句是断言不是铺垫）
 - bluf Tier1 banned phrases（hedging / 空洞连接词 / meta-commentary）
+- **结构符合性**：产出是否符合当前项目 writing_dir 下的 `template/<kind>.md` 的 `## Layout`（必含节 / frontmatter key / 顺序）；缺节/缺字段/乱序逐条报行号。**无对应 template 则跳过此项**，不报缺失。
 
 产出：行号级问题（规则来源 + 行号 + 现状 + 建议）。
 
@@ -152,9 +171,18 @@ raw 层 immutable，当场不动 pattern。
 
 1. 读当前项目 writing_dir 下的 staging/inbox.md 中 `status: pending` 条目（可按 type 过滤）。
 2. 把零散意见提炼成**具体可执行**的 rule：明确 `[机检]` 还是 `[冷读]`、适用范围、例外。
-3. promote 进共享池（**永远经用户确认后才写** → 防 model-collapse）：
-   - 命中已有 pattern → 提议 diff 到当前项目 writing_dir 下的 patterns/<type>.md 的 checklist / 反模式；同时按需在当前项目 writing_dir 下的 improvements/ 新增一张 `来源: review` 的演进卡（沿用 `writing:write` 的 `templates/improvement-card.md` 格式）。
-   - 无对应 type → 新建 patterns/<新type>.md + 首张演进卡。
+3. **分诊后 promote**（永远经用户确认才写 → 防 model-collapse）。先判反馈性质，再落对应文件：
+
+   | 反馈性质 | 落到 |
+   |---|---|
+   | 结构（缺节 / 缺 frontmatter key / 顺序错） | 当前项目 writing_dir 下的 `template/<kind>.md` 的 `## Layout` |
+   | 写法（这节怎么填得更好） | 当前项目 writing_dir 下的 `template/<kind>.md` 的 `## 写作 guide` |
+   | 评判 / 反模式 / 适用判定 | 当前项目 writing_dir 下的 `patterns/<type>.md` 的 checklist/反模式 + 在 improvements/ 新增一张 `来源: review` 演进卡（沿用 `writing:write` 的 `templates/improvement-card.md` 格式） |
+
+   **写法反馈进 template 的 `## 写作 guide`，不进 patterns**——pattern 只收「怎么判」（评判 / 反模式 / 适用判定）；写的脸（结构 + 写法）已整体迁出到 template，不要再把「怎么写」塞回 pattern。
+
+   - 该 type 尚无 template → 结构/写法反馈触发 distill（见「Distill 流程」）起首稿，而非塞进 pattern。
+   - 该 type 尚无 pattern → 新建 `patterns/<新type>.md` + 首张演进卡。
 4. 用户确认 → 写入；对应 inbox 条目改 `status: compiled`。
 5. 因落共享池：该 rule 立刻对**写、审两侧同时生效**。
 
@@ -167,7 +195,7 @@ raw 层 immutable，当场不动 pattern。
 3. 输出**精确到行号/章节**，不给"建议改清楚些"这种空话。
 4. 进化**永远人工 gate**：raw immutable，compiled 经确认。
 5. **只管可读性**，事实/论证/AI 味跨界问题指路到对应 skill，不越界。
-6. 固化产物**归一到共享池**（writing_dir/patterns + improvements），不在本 skill 自建平行库。
+6. 固化产物**归一到共享池**（writing_dir 下 `template/`=结构/写法、`patterns/`+`improvements/`=评判），不在本 skill 自建平行库。
 
 ## 常见坑
 

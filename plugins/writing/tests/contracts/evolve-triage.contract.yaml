@@ -1,0 +1,12 @@
+skill: writing:readability-check
+input:
+  prompt: "用 evolve 固化反馈时，一条「这类文档缺少某章节」的结构反馈、一条「这一节该怎么写得更好」的写法反馈、一条「评判标准」的反馈，分别落到哪个文件？"
+  cwd: kb
+assert:
+  - stdout_grep: "Layout"
+  - stdout_grep: "guide"
+  - stdout_grep: "pattern"
+
+run:
+  model: lingzhi/claude-opus-4-8
+  no_tools: true
