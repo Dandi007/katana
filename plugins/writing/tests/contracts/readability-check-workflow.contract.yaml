@@ -1,0 +1,7 @@
+skill: writing:readability-check
+input:
+  prompt: "用 readability-check 检查一份文档时分哪几趟检查？冷读这一趟必须用什么来执行、为什么主 agent 不能自己冷读？"
+  cwd: kb
+assert:
+  - stdout_grep: "冷读"
+  - stdout_grep: "subagent"
