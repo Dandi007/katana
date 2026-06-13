@@ -144,7 +144,7 @@ def main():
             rubric=repo / "tests/judge/overall-rubric.md",
             report_md=render_report(results, branch=branch, sha=sha,
                                     jobs=args.jobs, total_s=time.monotonic() - t0),
-            artifact_index=index, model="lingzhi/claude-opus-4-8",
+            artifact_index=index, model=os.environ.get("KATANA_CONTRACT_MODEL") or "lingzhi/claude-opus-4-8",
             work_dir=tmp, claude_bin=claude_bin, base_env=base_env)
 
     md = render_report(results, branch=branch, sha=sha, jobs=args.jobs,

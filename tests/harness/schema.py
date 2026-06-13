@@ -1,7 +1,7 @@
 """Contract loading & validation. One case per file: <case-id>.contract.yaml"""
 from dataclasses import dataclass, field
 from pathlib import Path
-import yaml
+import os, yaml
 
 ASSERT_TYPES = {"file_exists", "file_absent", "file_grep", "stdout_grep",
                 "size_min", "json_path", "script"}
@@ -66,7 +66,7 @@ def load_contract(path: Path) -> Contract:
         case_id=Path(path).name.removesuffix(".contract.yaml"),
         cwd=inp.get("cwd", "kb"), turns=turns or [],
         requires=pre.get("requires", []) or [],
-        model=run.get("model", "lingzhi/claude-opus-4-8"),
+        model=run.get("model") or os.environ.get("KATANA_CONTRACT_MODEL") or "lingzhi/claude-opus-4-8",
         permission_mode=run.get("permission_mode", "acceptEdits"),
         allowed_tools=tools,
         timeout=int(run.get("timeout", 600)),
