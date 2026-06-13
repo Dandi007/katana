@@ -56,8 +56,8 @@ describe('KatanaParity adapter', () => {
       }
     });
 
-    // Should spawn session-start hooks for all 6 plugins
-    expect(mockSpawn).toHaveBeenCalledTimes(6);
+    // Should spawn session-start hooks for all 7 plugins
+    expect(mockSpawn).toHaveBeenCalledTimes(7);
 
     // Verify first call is for guide plugin
     const firstCall = mockSpawn.mock.calls[0];
@@ -271,8 +271,8 @@ describe('KatanaParity adapter', () => {
       }
     });
 
-    // Should only spawn 4 hooks (guide, memory, work-folder, feishu-docs), not 6
-    expect(mockSpawn).toHaveBeenCalledTimes(4);
+    // Should only spawn 5 hooks (guide, memory, work-folder, feishu-docs, writing), not 7
+    expect(mockSpawn).toHaveBeenCalledTimes(5);
 
     delete process.env.KATANA_DISABLED_PLUGINS;
   });
