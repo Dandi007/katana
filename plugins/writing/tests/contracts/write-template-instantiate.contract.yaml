@@ -6,3 +6,4 @@ assert:
   - stdout_grep: "template"
   - stdout_grep: "Layout"
   - stdout_grep: "回退"
+  - stdout_grep: "distill"
