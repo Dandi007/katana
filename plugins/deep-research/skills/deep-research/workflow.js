@@ -265,7 +265,4 @@ await agent(harvesterPrompt(), {
 // harvest agent 已写 findings/index.md
 
 phase('Synthesize')
-async function _synthesize() {
-  return await agent(synthesisPrompt(), { phase: 'Synthesize', model: SYNTH_MODEL })
-}
-await _synthesize()
+return await agent(synthesisPrompt(), { phase: 'Synthesize', model: SYNTH_MODEL })
