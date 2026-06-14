@@ -1,7 +1,7 @@
 {
   "name": "deep-research",
   "description": "Deep research over your local knowledge base (DEEP_RESEARCH_KB_DIR), the web, and any named sources declared in config — multi-round Workflow orchestration, judgment-driven stop, cited report",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "author": {
     "name": "Dandi007"
   },
