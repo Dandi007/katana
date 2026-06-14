@@ -98,7 +98,9 @@ const childArgs = {
     note_b: "$KB/note_b.md",
   },
   maxWidth: 1,
-  models: { worker: "haiku", triage: "sonnet", synth: "haiku", harvest: "haiku" },
+  // worker/harvest 轻量任务用 haiku；synth 要走完 5 步(读 index→选择性读 L2→sources→topics→report)
+  // 写出终稿 report.md，haiku 易在 report 前停笔，给 sonnet 保证端到端跑完
+  models: { worker: "haiku", triage: "sonnet", synth: "sonnet", harvest: "haiku" },
   initialClues: [
     { id: "c0", text: "[$NONCE] Read $KB/note_a.md 和 $KB/note_b.md，列出影响萃取的关键因素", local: true,
       suggested_sources: ["note_a", "note_b"], depth: 0 }
@@ -133,6 +135,10 @@ DRIVER_JS
   grep -qi "reports\|source\|credibility" "$TOPIC_DIR/findings/index.md" 2>/dev/null
   result "P5-d: index.md 含索引内容(reports/source/credibility)" "$?"
 
+  # P5-e: synth 走完全流程产出终稿 report.md（端到端最终交付物，证 synth 顶层 return 链路通）
+  test -f "$TOPIC_DIR/report.md" && [ "$(wc -c < "$TOPIC_DIR/report.md")" -ge 500 ]
+  result "P5-e: report.md 产出且非空(≥500B)" "$?"
+
   # R1: agent-*.jsonl trace 中 nonce 命中 worker + synth
   python3 - "$CFG" "$NONCE" <<'PY'
 import sys, glob, os
@@ -145,11 +151,13 @@ for f in glob.glob(os.path.join(cfg, "**", "agent-*.jsonl"), recursive=True):
         continue
     if nonce not in t:
         continue
+    # 按互斥唯一签名分类。不可用 "harvest" 宽松小写子串——worker trace 偶含该词会被误判成
+    # harvest（实测 bug）。synth=探索已收敛 / harvest=汇编索引 / worker=收集证据，三者互不重叠。
     if "探索已收敛" in t:
         seen["synth"] += 1
-    elif "汇编索引" in t or "harvest" in t.lower():
+    elif "汇编索引" in t:
         seen["harvest"] += 1
-    elif "针对線索" in t or "针对线索" in t:
+    elif "收集证据" in t:
         seen["worker"] += 1
 fail = 0
 # worker + synth 缺失 → 硬失败；harvest 单独跑 nonce 可能不入 prompt → 降级 WARN
