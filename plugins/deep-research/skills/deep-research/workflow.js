@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deep-research',
   description: 'BFS clue-driven multi-source research → cited report (judgment-driven stop)',
-  phases: [{ title: 'Setup' }, { title: 'Explore' }, { title: 'Triage' }, { title: 'Synthesize' }],
+  phases: [{ title: 'Setup' }, { title: 'Explore' }, { title: 'Triage' }, { title: 'Harvest' }, { title: 'Synthesize' }],
 }
 
 // args = { topic, topicDir, kbDir, skillDir, sources, maxWidth, initialClues, models }
@@ -18,14 +18,15 @@ const MAX_WIDTH = (Number.isInteger(A.maxWidth) && A.maxWidth > 0) ? A.maxWidth 
 const MAX_DEPTH = 3      // 单条线索最大深度（形状护栏）
 const SAFETY_CAP = 50    // runaway backstop，正常碰不到；命中即 log 告警不静默截断
 
-// 三档 agent 模型（deep_research_models 可配；启动前由主 agent 按 topic 意图定好，workflow 内每轮不变）
-// 非法/缺省回退默认（防御式）：worker 量大成本敏感→sonnet；triage 判收敛+选 frontier、synth 写终稿→opus
+// 四档 agent 模型（deep_research_models 可配；启动前由主 agent 按 topic 意图定好，workflow 内每轮不变）
+// 非法/缺省回退默认（防御式）：worker 量大成本敏感→sonnet；harvest haiku（扫文件轻量）；triage 判收敛+选 frontier、synth 写终稿→opus
 const VALID_MODELS = new Set(['opus', 'sonnet', 'haiku', 'fable'])
 const M = (A.models && typeof A.models === 'object' && !Array.isArray(A.models)) ? A.models : {}
 const pickModel = (v, d) => (typeof v === 'string' && VALID_MODELS.has(v)) ? v : d
 const WORKER_MODEL = pickModel(M.worker, 'sonnet')
 const TRIAGE_MODEL = pickModel(M.triage, 'opus')
 const SYNTH_MODEL = pickModel(M.synth, 'opus')
+const HARVEST_MODEL = pickModel(M.harvest, 'haiku')
 
 // KB root — from Stage A (reads .katana); fallback '.' = project CWD
 const KB_DIR = (typeof A.kbDir === 'string' && A.kbDir.trim()) ? A.kbDir.trim() : '.'
@@ -40,23 +41,30 @@ const topicDir = (typeof A.topicDir === 'string' && A.topicDir.trim()) ? A.topic
                : `${KB_DIR}/DeepThought/${_dirName}`
 
 const norm = c => (c.text || '').trim().toLowerCase()
+
+// coverage() 重写：从 reports[] 聚合 [clue][source] digest (credibility)，信息密度高于 title-only
 const coverage = L1 => L1
-  .flatMap(f => (f.findings || []).map(x => `- [${f.clue_id}][${x.source_type}] ${x.title}`))
+  .flatMap(f => (f.reports || []).map(r => `- [${f.clue_id}][${r.source}] ${r.digest} (${r.credibility})`))
   .join('\n')
   .slice(0, 4000)   // 给 triage 的「已覆盖」摘要，控制长度
 
+// 回传契约：改为 reports[]（每源一张 header 卡）替代扁平 findings + 单 l2_file
 const FINDING_SCHEMA = {
   type: 'object',
-  required: ['clue_id', 'status', 'findings', 'signals', 'new_clues', 'l2_file'],
+  required: ['clue_id', 'status', 'reports', 'signals', 'new_clues'],
   properties: {
     clue_id: { type: 'string' },
     status: { type: 'string', enum: ['completed', 'partial', 'blocked'] },
-    findings: { type: 'array', items: { type: 'object',
-      required: ['title', 'anchor', 'source_type', 'summary', 'credibility'],
+    reports: { type: 'array', items: { type: 'object',
+      required: ['source', 'anchor', 'credibility', 'digest', 'l2_file'],
       properties: {
-        title: { type: 'string' }, anchor: { type: 'string' }, source_type: { type: 'string' },
-        summary: { type: 'string' },
+        title: { type: 'string' },
+        source: { type: 'string' },
+        anchor: { type: 'string' },
         credibility: { type: 'string', enum: ['high', 'medium', 'low', 'conflicted'] },
+        digest: { type: 'string' },
+        entities: { type: 'array', items: { type: 'string' } },
+        l2_file: { type: 'string' },
       } } },
     signals: { type: 'object',
       required: ['hit_original_keyword', 'high_density_source', 'time_author_aligned'],
@@ -72,7 +80,6 @@ const FINDING_SCHEMA = {
         suggested_sources: { type: 'array', items: { type: 'string' } },
         depth: { type: 'number' },
       } } },
-    l2_file: { type: 'string' },
     blocked: { type: 'array', items: { type: 'object',
       properties: { source: { type: 'string' }, reason: { type: 'string' } } } },
   },
@@ -101,20 +108,28 @@ function sourceHints() {
   if (!names.length) return ''
   return `
 - 命名源（KB config 声明的平台源）：${names.map(n => `${n} → ${SOURCES[n]}`).join(' ； ')}
+  · retrieval 收口：外部源（web/平台）优先经 /retrieval:<source>（retrieval plugin 已装时），
+    无则 fallback 到 WebSearch/WebFetch / 平台 CLI；本地优先 KB 约定 /retrieval:search-note|code。
   · entry 是文档路径 → 先 Read 它（相对当前工作目录，即 KB 根；同目录如有 errors.md 一并先读避坑），按其指引做只读检索；entry 是裸命令名 → 直接用该 CLI 的只读子命令。
   · 入口不可用 / 无凭证 / 0 命中 → 用 blocked 字段如实上报（source+reason），不得编造。
   · 平台源 finding 的 anchor 用消息/文档/issue/MR 的 URL 或唯一标识；source_type 填 "platform:<源名>"。`
 }
 
 function workerPrompt(clue, round) {
-  return `TASK: 针对线索 "${clue.text}" 收集证据。建议起点 source: ${(clue.suggested_sources || []).join(', ') || '自行判断'}。
+  const suggestedSrcs = (clue.suggested_sources || [])
+  return `TASK: 针对线索 "${clue.text}" 收集证据。建议起点 source: ${suggestedSrcs.join(', ') || '自行判断'}。
 
 MUST DO:
-- 本地线索：优先遵循知识库 CLAUDE.md/AGENTS.md 声明的检索约定；无约定时用 Grep/Glob/Read 直接检索。web 线索：用 WebSearch/WebFetch。${sourceHints()}
-- 把【L2 原文】写入文件 "${topicDir}/findings/r${round}-c${clue.id}.md"，严格按 "${TPL}/finding.md" 模板：
-  · L2 只摘与线索相关的段落，逐字保留，每段必带 anchor（URL/路径/file:line）；不相关的不塞、不整页 dump。
-- 返回结构化结果（FINDING_SCHEMA）：clue_id="${clue.id}"；findings（每条含 anchor+summary+credibility）；
-  signals 三个布尔据事实诚实上报；new_clues（3-8 条，depth=${round}）；l2_file 填上面的路径。
+- 外部源（web/平台）优先经 /retrieval:<source>（retrieval plugin 已装时），无则 fallback 到 WebSearch/WebFetch / 平台 CLI。本地优先遵循知识库 CLAUDE.md/AGENTS.md 声明的检索约定 /retrieval:search-note|code，无约定时用 Grep/Glob/Read 直接检索。${sourceHints()}
+- 按线索的 suggested_sources，每个源单独探索并写一个 per-source 文件：
+  · 文件路径格式："${topicDir}/findings/r${round}-c${clue.id}__<源名>.md"（双下划线 __ 分隔源名）
+  · 每文件严格按 "${TPL}/finding.md" 模板，frontmatter 填 source/anchor/credibility/digest/entities；
+    body 是该源的 L1 表 + L2 逐字摘录（只摘与线索相关段落，每段必带 anchor）。
+- 返回结构化结果（FINDING_SCHEMA）：
+  · clue_id="${clue.id}"
+  · reports[]：每个探索过的源一条，含 source/anchor/credibility/digest/l2_file（l2_file=上面写的路径）
+  · signals 三个布尔据事实诚实上报
+  · new_clues（3-8 条，depth=${round}）
 
 MUST NOT:
 - 不写结论、不跨源综合；不修改 findings/ 以外任何文件；不做任何 mutation（不发消息/不回复群聊/不开或评论 issue·MR/不 push——平台源一律只读）。`
@@ -141,14 +156,34 @@ ${JSON.stringify(fresh, null, 2)}
 返回 TRIAGE_SCHEMA。`
 }
 
+function harvesterPrompt() {
+  return `TASK: 汇编索引 — 扫描所有 per-source finding 文件，提取 frontmatter，生成索引表写入 index.md。
+
+1. 用 Bash/awk/grep 扫描 "${topicDir}/findings/" 下所有 *.md 文件的 frontmatter（--- 到 --- 之间）。
+2. 提取每个文件的：clue_id / round / source / anchor / credibility / digest / 文件路径。
+3. 把结果汇编为 Markdown 表格，写入 "${topicDir}/findings/index.md"：
+   格式示例：
+   \`\`\`
+   # findings/index.md — harvest 索引
+
+   | clue_id | round | source | credibility | digest | path |
+   |---------|-------|--------|-------------|--------|------|
+   | c0 | 1 | web | high | ... | findings/r1-c0__web.md |
+   \`\`\`
+4. 在文件末尾追加 harvest 元数据行（文件数、时间戳）。
+
+MUST NOT: 不修改除 index.md 以外的任何文件。`
+}
+
 function synthesisPrompt() {
   return `探索已收敛。研究主问题："${topic}"。素材目录："${topicDir}"。
 
 按顺序生成最终产物（全部写入 ${topicDir}/）：
-1) 读 ${topicDir}/findings/*.md 的【L2 原文】（这是真原始素材，必须读，别只凭记忆）。
-2) sources.md：按 "${TPL}/sources.md" 模板合并去重，保留 anchor + credibility。
-3) topics.md：按 "${TPL}/topics.md" 聚类为 3-7 个自包含主题，标 [^N] 引用 sources。
-4) report.md：按 "${TPL}/report.md" 连贯叙事，note-seed 用 > [!note-seed] 标记，末尾附探索轨迹摘要；回填 sources.md 的 Used In 列。
+1) 先 Read "${topicDir}/findings/index.md"（harvest 阶段已汇编的索引表），按 credibility/relevance 选择性读取高价值源的 L2 正文（不必盲读全部文件）。
+2) 根据 index.md 索引，有选择地 Read 高 credibility 或与主问题最相关的 findings/*.md L2 原文（先高后低，跳过 low+不相关的，节省 context）。
+3) sources.md：按 "${TPL}/sources.md" 模板合并去重，保留 anchor + credibility。
+4) topics.md：按 "${TPL}/topics.md" 聚类为 3-7 个自包含主题，标 [^N] 引用 sources。
+5) report.md：按 "${TPL}/report.md" 连贯叙事，note-seed 用 > [!note-seed] 标记，末尾附探索轨迹摘要；回填 sources.md 的 Used In 列。
 
 MUST: 每个论断可回溯到 sources.md / L2 原文。MUST NOT: 编造来源、做任何 mutation。
 
@@ -201,7 +236,7 @@ while (frontier.length) {             // 唯一"自然"停止：没线索可探�
     )
   )).filter(Boolean)
   L1.push(...found)
-  // worker 已把 L2 原文+锚点 写进 findings/r{round}-c{id}.md（脚本不读）
+  // worker 已把 L2 原文+锚点 写进 per-source 文件 findings/r{round}-c{id}__<source>.md
 
   // 🔒 dedup 新线索（纯代码）
   const fresh = found.flatMap(f => f.new_clues || [])
@@ -218,6 +253,16 @@ while (frontier.length) {             // 唯一"自然"停止：没线索可探�
     .filter(c => (c.depth ?? round) <= MAX_DEPTH)
     .slice(0, MAX_WIDTH)
 }
+
+// Harvest phase: 汇编索引 — 扫 findings/*.md frontmatter → index.md
+phase('Harvest')
+await agent(harvesterPrompt(), {
+  phase: 'Harvest',
+  model: HARVEST_MODEL,
+  agentType: 'general-purpose',   // 需要跑 Bash + Write
+  label: 'harvest:index',
+})
+// harvest agent 已写 findings/index.md
 
 phase('Synthesize')
 return await agent(synthesisPrompt(), { phase: 'Synthesize', model: SYNTH_MODEL })

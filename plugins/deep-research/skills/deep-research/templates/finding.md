@@ -1,6 +1,11 @@
 ---
 clue_id: <c0>
 round: <1>
+source: <源名，如 web / feishu / gitlab / local_text / platform:xxx>
+anchor: <URL/路径/file:line — 该源的主锚点>
+credibility: high | medium | low | conflicted
+digest: "<一句话摘要，本源对线索的核心贡献>"
+entities: []                   # 关键实体列表（可选）
 clue: "<线索描述>"
 status: completed | partial | blocked
 signals:                       # L1 证据信号，喂给 triage（事实层，非分数）
