@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deep-research',
   description: 'BFS clue-driven multi-source research → cited report (judgment-driven stop)',
-  phases: [{ title: 'Setup' }, { title: 'Explore' }, { title: 'Harvest' }, { title: 'Triage' }, { title: 'Synthesize' }],
+  phases: [{ title: 'Setup' }, { title: 'Explore' }, { title: 'Triage' }, { title: 'Harvest' }, { title: 'Synthesize' }],
 }
 
 // args = { topic, topicDir, kbDir, skillDir, sources, maxWidth, initialClues, models }
@@ -265,4 +265,7 @@ await agent(harvesterPrompt(), {
 // harvest agent 已写 findings/index.md
 
 phase('Synthesize')
-export const result = await agent(synthesisPrompt(), { phase: 'Synthesize', model: SYNTH_MODEL })
+async function _synthesize() {
+  return await agent(synthesisPrompt(), { phase: 'Synthesize', model: SYNTH_MODEL })
+}
+await _synthesize()

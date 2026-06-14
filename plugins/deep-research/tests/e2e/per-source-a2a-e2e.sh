@@ -69,31 +69,42 @@ else
   TOPIC_DIR="$KB/DeepThought/$NONCE"
   mkdir -p "$TOPIC_DIR/findings"
 
-  # 最小 KB：一条本地笔记（web + local 两源）
-  cat > "$KB/note.md" <<'NOTE'
-# 手冲咖啡萃取要点
+  # 最小离线 KB：两条本地笔记（确定性双源，不依赖 web，离线即可证多源拆分）
+  mkdir -p "$KB"
+  cat > "$KB/note_a.md" <<'NOTE'
+# 手冲咖啡萃取要点 A
 - 水温 90-96°C 影响萃取率
 - 研磨度越细萃取越快
 - 粉水比常用 1:15
 NOTE
+  cat > "$KB/note_b.md" <<'NOTE'
+# 手冲咖啡萃取要点 B
+- 闷蒸时间 30-40 秒，释放 CO2
+- 总冲泡时间约 2.5-3 分钟
+- 新鲜豆风味更佳
+NOTE
 
-  # driver workflow：注入精确 args，两个 suggested_sources → 期望产出两个 per-source 文件
+  # driver workflow：注入精确 args，两个本地源 → 期望产出 ≥2 个 per-source 文件（离线确定性）
+  # 使用 return await workflow(...) 与已验证的 model-routing-e2e.sh 同款 idiom
   DRIVER="$WORK/driver.mjs"
   cat > "$DRIVER" <<DRIVER_JS
 export const meta = { name: 'dr-persource-e2e-driver', description: 'per-source a2a e2e driver', phases: [{ title: 'Run' }] }
 const childArgs = {
-  topic: "[$NONCE] 总结这条本地笔记影响手冲咖啡萃取的要点",
+  topic: "[$NONCE] 总结这两条本地笔记关于手冲咖啡萃取的要点",
   topicDir: "$TOPIC_DIR",
   skillDir: "$SKILL_DIR",
-  sources: {},
+  sources: {
+    note_a: "$KB/note_a.md",
+    note_b: "$KB/note_b.md",
+  },
   maxWidth: 1,
   models: { worker: "haiku", triage: "sonnet", synth: "haiku", harvest: "haiku" },
   initialClues: [
-    { id: "c0", text: "[$NONCE] Read $KB/note.md 列出影响萃取的 3 个因素", local: true,
-      suggested_sources: ["local_text", "web"], depth: 0 }
+    { id: "c0", text: "[$NONCE] Read $KB/note_a.md 和 $KB/note_b.md，列出影响萃取的关键因素", local: true,
+      suggested_sources: ["note_a", "note_b"], depth: 0 }
   ],
 }
-export const result = await workflow({ scriptPath: "$WORKFLOW_JS" }, childArgs)
+return await workflow({ scriptPath: "$WORKFLOW_JS" }, childArgs)
 DRIVER_JS
 
   echo "nonce:   $NONCE"
@@ -109,10 +120,10 @@ DRIVER_JS
   [ "$CL_EXIT" -eq 0 ]
   result "P5-a: claude -p 正常退出(exit=$CL_EXIT)" "$?"
 
-  # P5-b: per-source 文件存在（含 __ 分隔符）
+  # P5-b: per-source 文件存在（含 __ 分隔符，≥2 个确认多源拆分）
   PS_COUNT="$(find "$TOPIC_DIR/findings" -name 'r*-c*__*.md' 2>/dev/null | wc -l | tr -d ' ')"
-  [ "$PS_COUNT" -ge 1 ]
-  result "P5-b: per-source 文件存在(含 __, 实际: $PS_COUNT)" "$?"
+  [ "$PS_COUNT" -ge 2 ]
+  result "P5-b: per-source 文件存在(含 __, ≥2 源拆分，实际: $PS_COUNT)" "$?"
 
   # P5-c: index.md 存在
   test -f "$TOPIC_DIR/findings/index.md"
@@ -141,9 +152,14 @@ for f in glob.glob(os.path.join(cfg, "**", "agent-*.jsonl"), recursive=True):
     elif "针对線索" in t or "针对线索" in t:
         seen["worker"] += 1
 fail = 0
+# worker + synth 缺失 → 硬失败；harvest 单独跑 nonce 可能不入 prompt → 降级 WARN
 for cls, count in seen.items():
     if count == 0:
-        print(f"WARN R1-{cls}: 无 trace（可能 nonce 未写入 agent log）")
+        if cls == "harvest":
+            print(f"WARN R1-{cls}: 无 trace（harvester nonce 可能不入 agent log，可接受）")
+        else:
+            print(f"FAIL R1-{cls}: 无 trace（worker/synth 必须命中 nonce）")
+            fail = 1
     else:
         print(f"OK   R1-{cls}: {count}x trace")
 sys.exit(fail)
