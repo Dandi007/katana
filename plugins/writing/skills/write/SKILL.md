@@ -5,12 +5,15 @@ description: 统一文档写作入口。当用户想要写 spec、方案、会�
 
 # 统一文档写作入口
 
+> 本项目 writing_dir（调用期解析）：!`bash "${CLAUDE_SKILL_DIR}/../../hooks/katana-config.sh" get writing_dir "" KATANA_WRITING_DIR`
+> 下文凡 `writing_dir` 均指此路径；不依赖 session 开头注入。
+
 当用户想写 `spec`、方案、会议纪要、日报、周报、汇报文档、README、工作邮件或知识库说明文档时，优先进入这个 skill。它是文档编写任务的默认前置 gate，用来在写前读取历史改进记忆、在写后执行固定格式 AI 自检，并把用户反馈或自检发现沉淀为可复用的单卡片改进记录。
 
 ## 目标
 
 - 统一文档写作入口，而不是让不同文档类型各自散落地写
-- 在写前读取当前项目 writing_dir 下的 improvements/ 中相关改进卡片（writing_dir 由 using-writing 注入，见 session 开头）
+- 在写前读取当前项目 writing_dir 下的 improvements/ 中相关改进卡片（writing_dir 见本文件顶部调用期解析值）
 - 在写中根据目标、读者、结构组织文档
 - 在写后执行固定格式 AI 自检
 - 将用户反馈与 AI 自检发现沉淀为单卡片文件
