@@ -8,9 +8,9 @@
 1. **读全部语料**，逐篇拆出：frontmatter key 集合、H1/H2 标题序列、各节实际承载什么、L0 落点。
 2. **蒸馏 Layout**：取语料里**稳定复现**的节与字段为骨架；偶发节标可选。顺序取多数派。
 3. **蒸馏写作 guide**：把语料里写得好的共性（怎么开头、怎么分层、写偏的反例）提炼成 prompt 式指引。
-4. **蒸馏 pattern**（审的脸）：把「好/不好」的判断维度落成机检项 + 冷读项 + 反模式。
+4. **蒸馏 pattern**（审的脸）：把「好/不好」的判断维度落成机检项 + 冷读项 + 反模式；按 `references/pattern-spec.md` 的固定骨架成形，写的脸节只留一行指针、不抄 Layout。
 5. **对齐外部 schema**：若该 type 有外部 SSoT（`WIKI.md`/SPEC-NNN），Layout 的 frontmatter/结构对齐并 link，不重定义。
-6. 产物按 `references/template-spec.md` 的规格成形。
+6. 产物成形：`template/<kind>.md` 按 `references/template-spec.md`，`patterns/<type>.md` 按 `references/pattern-spec.md`。
 
 ## 硬规则
 

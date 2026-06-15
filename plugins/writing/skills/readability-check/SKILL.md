@@ -182,7 +182,7 @@ raw 层 immutable，当场不动 pattern。
    **写法反馈进 template 的 `## 写作 guide`，不进 patterns**——pattern 只收「怎么判」（评判 / 反模式 / 适用判定）；写的脸（结构 + 写法）已整体迁出到 template，不要再把「怎么写」塞回 pattern。
 
    - 该 type 尚无 template → 结构/写法反馈触发 distill（见「Distill 流程」）起首稿，而非塞进 pattern。
-   - 该 type 尚无 pattern → 新建 `patterns/<新type>.md` + 首张演进卡。
+   - 该 type 尚无 pattern → 新建 `patterns/<新type>.md`（结构遵 `references/pattern-spec.md`）+ 首张演进卡。
 4. 用户确认 → 写入；对应 inbox 条目改 `status: compiled`。
 5. 因落共享池：该 rule 立刻对**写、审两侧同时生效**。
 
@@ -207,6 +207,8 @@ raw 层 immutable，当场不动 pattern。
 - `references/cold-read-prompts/single-doc-prompt.md` — 单文档冷读 subagent prompt 模板
 - `references/cold-read-prompts/cross-consistency-prompt.md` — 多文档交叉一致性 prompt 模板
 - `references/_generic.md` — 无类型兜底维度
+- `references/template-spec.md` — 写的脸（`template/<kind>.md`）文件规格
+- `references/pattern-spec.md` — 审的脸（`patterns/<type>.md`）文件规格（固定骨架 + 写的脸节恒为指针）
 - 当前项目 writing_dir 下的 patterns/ — 共享 per-type pattern（写审两张脸 SSoT）
 - 当前项目 writing_dir 下的 improvements/ — per-type 演进卡池
 - `writing:bluf` — L0–L3 结构 + AI 反模式（写审共享）
