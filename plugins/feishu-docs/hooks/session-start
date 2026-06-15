@@ -39,21 +39,7 @@ escape_for_json() {
     printf '%s' "$s"
 }
 
-CONTENT="## Feishu Docs Mirror
-
-Feishu doc mirrors live at: \`${FEISHU_DOCS_ROOT}\`
-
-Layout per document:
-  \`<feishu_docs_root>/<relPath>/<title>-<docId>.md\`        — read-only Markdown render
-  \`<feishu_docs_root>/<relPath>/<title>-<docId>.ast.json\`  — block-tree AST (SSoT for programmatic edits)
-  \`<feishu_docs_root>/<relPath>/.index.json\`               — doc-id canonical index
-
-Rules:
-- AST (\`.ast.json\`) is the source of truth; Markdown is a derived read-only render — never edit \`.md\` directly.
-- Pull a doc: \`node dist/cli.js pull --doc <url> [--path <relPath>] [--root <feishu_docs_root>]\`
-  (build once: \`cd \${CLAUDE_PLUGIN_ROOT}/engine && bun install && bun build src/cli.ts --target node --outfile dist/cli.js\`)
-- Only \`pull\` (P0) is implemented; push/sync come later.
-- Credentials are managed by lark-cli (keychain) — never stored in .katana or git."
+CONTENT="本项目飞书镜像在 \`${FEISHU_DOCS_ROOT}\`（每文档 \`.md\` 只读渲染 + \`.ast.json\` 为 SSoT，勿直接编辑 \`.md\`）。pull / 编辑 / 同步走 \`/feishu-docs\`（凭证由 lark-cli keychain 管理，勿入 .katana 或 git）；layout、CLI 用法、build 步骤随该 skill 调用载入。"
 
 printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
     "$(escape_for_json "$CONTENT")"
