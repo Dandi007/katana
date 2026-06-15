@@ -8,8 +8,8 @@
 # where the first nsys ARGV files belong to the System section (already sorted),
 # the rest to the Project section. Pass 0 files for an empty section.
 #
-# Output parity target: plugins/memory/src/main.rs (serde_yaml + serde_json).
-# Card schema is the stable format written by the memory:remember skill:
+# Output golden: tests/fixtures/expected.json (Rust src/main.rs retired; awk is
+# now the SSoT). Card schema is the stable format written by memory:remember:
 #   name / description / status (optional) / metadata.type (optional),
 # each a single-line plain scalar. Cards with status other than "active"
 # (when present) are excluded; cards missing name or description are skipped.
@@ -146,11 +146,9 @@ END {
     sysd = (sysdir != "") ? sysdir : "(not set)"
     projd = (projdir != "") ? projdir : "(not set)"
 
-    ac = "<memory-index>\n" content "\n\nTotal: " total " cards (" nsysrec " system + " nprojrec " project)\n" \
-         "System memory dir: " sysd "\nProject memory dir: " projd "\n</memory-index>\n\n" \
-         "When you need the full content of a memory card, read the file directly from the memory/ directory. " \
-         "The index above only contains L1 descriptions — the full fact, evidence, and verification steps are in the card file itself.\n" \
-         "System memory dir: " sysd "\nProject memory dir: " projd
+    ac = "<memory-index>\n" content "\n\n" \
+         "Total: " total " cards (" nsysrec " system + " nprojrec " project) · 索引仅 L1 描述，需全文(事实/证据/验证步骤)直接读对应卡文件\n" \
+         "dirs: system=" sysd " · project=" projd "\n</memory-index>"
 
     printf "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"%s\"}}\n", jesc(ac)
 }

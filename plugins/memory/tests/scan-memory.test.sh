@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Byte-parity regression test for the pure-awk memory scanner.
 #
-# expected.json is a frozen golden captured from the original Rust
-# `claude-memory-scan` binary (serde_yaml + serde_json). The shell scanner
-# MUST reproduce it byte-for-byte on the fixture corpus, which covers:
+# expected.json is a frozen golden for the awk scanner (originally captured
+# from the retired Rust `claude-memory-scan` binary; footer format revised
+# 2026-06-15 to drop the duplicated dir lines + verbose paragraph — card
+# rows unchanged). The scanner MUST reproduce it byte-for-byte on the fixture
+# corpus, which covers:
 # untyped/typed grouping, type sorting, status filtering, inline-comment
 # stripping, quoted scalars, and skipped (missing-name / no-frontmatter) cards.
 set -euo pipefail

@@ -37,3 +37,13 @@ katana_config_get() {
     # Priority 3: default
     printf '%s' "$default"
 }
+
+# CLI mode: when executed directly (not sourced), dispatch subcommands so skill
+# bodies can fetch config at invoke-time via  !`.../katana-config.sh get <key>`
+# (Claude Code dynamic context injection). Sourced use (session-start) is unaffected.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    case "${1:-}" in
+        get) shift; katana_config_get "$@" ;;
+        *) echo "usage: katana-config.sh get <key> [default] [env_var]" >&2; exit 2 ;;
+    esac
+fi

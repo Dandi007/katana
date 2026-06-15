@@ -23,7 +23,7 @@ Work folder 路径可通过以下方式覆盖（优先级从高到低）：
 
 ## 核心原则
 
-1. **checkpoint 是搬运层，不是定义层**——artifact 的语义、格式、优先级由 work-folder 约定定义（SessionStart hook 注入）；checkpoint 只负责把 session 状态 dump 进 work folder、或从 work folder 加载回 session
+1. **checkpoint 是搬运层，不是定义层**——artifact 的语义、格式、优先级定义见 `references/artifact-formats.md`（本 skill 调用时载入；session 常驻只留一句话锚点）；checkpoint 只负责把 session 状态 dump 进 work folder、或从 work folder 加载回 session
 2. **协同已有 artifact**——如果 work folder 已有 spec.md / plan.md 等文件，不覆盖、不冲突，只追加/更新
 3. **Resume 必须验证**——加载状态后不能盲目继续，必须检查环境是否与存档一致
 
@@ -53,7 +53,7 @@ Work folder 路径可通过以下方式覆盖（优先级从高到低）：
 | context.md | **必须更新**——覆盖写入环境快照（快照，不是日志）|
 | CLAUDE.md / AGENTS.md | **必须生成**——Resume Guide，供新 session 快速恢复上下文 |
 
-每个 artifact 的具体格式和字段定义，遵循 work-folder 约定（SessionStart hook 注入的 rules）。checkpoint 不重复定义这些格式。文件不存在时主动创建，不要因为"当前还没有"就跳过。
+每个 artifact 的具体格式和字段定义见 `references/artifact-formats.md`（与本 skill 同目录，调用时载入）。checkpoint 不重复定义这些格式。文件不存在时主动创建，不要因为"当前还没有"就跳过。
 
 ### Step 3: 输出 Checkpoint 摘要
 
