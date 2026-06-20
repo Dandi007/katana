@@ -34,20 +34,23 @@ description: 本地知识库检索源（只读）。原子笔记/Index/工作记
 
 ## 检索
 
-用 `query_lancedb.py --mode auto`：索引可用走 vector，不可用自动降级 keyword。脚本自身处理 vector→keyword 降级，无需外部 grep tier。
+优先打本机 **vault-search 服务**（常驻 svc，含 vector+keyword RRF 混合检索，质量优于裸 `query_lancedb.py`）；服务不可达时回落 CLI `query_lancedb.py`。search-note 搜**全量语料**（含 `memory/`，与 Perlite 的 `exclude:[memory]` 不同——本地 agent 用，无暴露顾虑）。
 
-索引位于 `~/.cache/agent-knowledge/Zettelkasten/lancedb/`（不在 iCloud 内）。
+服务/索引引擎归 `Dandi007/agent-knowledge`；索引 `~/.cache/agent-knowledge/Zettelkasten/lancedb/`（不在 iCloud 内），由 `vault-indexer` svc 每晚增量保鲜。
 
 ```bash
-# 语义检索（脚本内部 --mode auto：索引可用走 vector，不可用自动降级 keyword）
-PY="$(katana_config_get search_note_python "python3" "")"
-PY="${PY/#\~/$HOME}"   # .katana 里的 ~ 不会被自动展开，须手动展（同 twitter profile / wiki hook 套路）
-"$PY" "${CLAUDE_PLUGIN_ROOT}/skills/search-note/scripts/query_lancedb.py" "查询词" --mode auto --top-k 10
-```
-
-embedding 端点从 `.katana` 读取：
-```bash
-EMBED_URL="$(katana_config_get search_note_embedding_url "" "")"
+# 主路：vault-search 服务（POST /search → {results:[{path,score,title,snippet}], mode}）
+resp="$(curl -s -m 8 -X POST http://127.0.0.1:18082/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"查询词","top_k":10}')"
+if [ -n "$resp" ] && printf '%s' "$resp" | grep -q '"results"'; then
+  printf '%s\n' "$resp"
+else
+  # 回落：CLI（服务没起时不致命）。--source markdown 防 opencode 会话污染。
+  PY="$(katana_config_get search_note_python "python3" "")"
+  PY="${PY/#\~/$HOME}"   # .katana 里的 ~ 不会被自动展开，须手动展
+  "$PY" "${CLAUDE_PLUGIN_ROOT}/skills/search-note/scripts/query_lancedb.py" "查询词" --mode auto --top-k 10 --source markdown
+fi
 ```
 
 ## 只读约束
