@@ -8,7 +8,7 @@
 import argparse, concurrent.futures, json, os, re, subprocess, sys
 from pathlib import Path
 
-DEFAULT_PROFILE = os.path.expanduser("~/.config/agent-shell/profile.zsh")
+DEFAULT_PROFILE = os.environ.get("JURY_PROFILE") or os.path.expanduser("~/.config/agent-shell/profile.zsh")
 DEFAULT_ROSTER = [
     {"name": "opus", "setter": "set_claude_native_opus", "model": "opus"},
     {"name": "gpt", "setter": "set_claude_ccswitch_gpt", "model": ""},
