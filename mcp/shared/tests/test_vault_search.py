@@ -1,6 +1,5 @@
 import json
 import httpx
-import pytest
 from katana_kb_mcp_shared import vault_search as vs
 
 

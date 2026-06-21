@@ -19,6 +19,9 @@ class SearchResponse:
     mode: str
 
 
+_RESULT_FIELDS = ("path", "score", "title", "snippet")
+
+
 def search(
     query: str,
     *,
@@ -49,6 +52,9 @@ def search(
             c.close()
 
     return SearchResponse(
-        results=[SearchResult(**r) for r in data.get("results", [])],
+        results=[
+            SearchResult(**{k: r[k] for k in _RESULT_FIELDS if k in r})
+            for r in data.get("results", [])
+        ],
         mode=data.get("mode", ""),
     )
