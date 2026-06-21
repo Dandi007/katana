@@ -1,4 +1,4 @@
-import json, os, sys
+import json, os, sys, subprocess
 from pathlib import Path
 import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -93,3 +93,65 @@ def test_fanout_marks_unparseable_vote(tmp_path):
     opus_meta = next(m for m in meta if m["name"] == "opus")
     assert opus_meta["vote_parsed"] is False
     assert opus_meta["exit"] == 0
+
+
+# ── 0.2 新增测试 ──────────────────────────────────────────────────────────────
+
+def test_fanout_prepends_spec(tmp_path, monkeypatch):
+    """spec 非空时，fanout 应在传给 run_model 的 prompt 前置评审目标头。
+    用 monkeypatch 捕获 run_model 实际收到的 prompt 参数，验证前缀与 spec 内容均存在。
+    """
+    captured_prompts = []
+
+    def fake_run_model(member, prompt, *args, **kwargs):
+        captured_prompts.append(prompt)
+        # 返回最小合法结构，让 fanout 能完成 tally/写文件
+        return {
+            "name": member["name"], "setter": member["setter"],
+            "base_url_used": "", "model_string": "",
+            "exit": 0, "trace_path": "",
+            "vote": {"items": [{"q": "q1", "answer": "yes", "evidence": "e"}]},
+            "prose": "ok",
+        }
+
+    monkeypatch.setattr(panel, "run_model", fake_run_model)
+    out = tmp_path / "out"; out.mkdir()
+    spec_text = "接口必须返回 200 且 body 含 status 字段"
+    roster = [{"name": "opus", "setter": "set_claude_native_opus", "model": "opus"}]
+    panel.fanout("请评审以下 diff", out, roster, 60, _profile(tmp_path),
+                 spec=spec_text)
+
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert prompt.startswith("## 评审目标（spec）"), "prompt 应以 spec 头开头"
+    assert spec_text in prompt, "prompt 应包含 spec 原文"
+    assert "请评审以下 diff" in prompt, "原始 prompt 内容不应丢失"
+
+
+def test_run_model_uses_target_cwd(tmp_path, monkeypatch):
+    """target_dir 给定时，subprocess.run 应以 target_dir 作为 cwd。
+    用 monkeypatch 捕获 subprocess.run 的 cwd 关键字参数验证。
+    """
+    captured_kwargs = {}
+
+    def fake_subprocess_run(cmd, **kwargs):
+        captured_kwargs.update(kwargs)
+        # 返回最小 CompletedProcess，让 run_model 能解析后续逻辑
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0,
+            stdout='{"type":"result","result":"```json\\n{\\"items\\":[{\\"q\\":\\"q1\\",\\"answer\\":\\"yes\\",\\"evidence\\":\\"e\\"}]}\\n```"}\n',
+            stderr="__JURY_ENV__ base= model=",
+        )
+
+    monkeypatch.setattr(panel.subprocess, "run", fake_subprocess_run)
+    out = tmp_path / "out"; out.mkdir()
+    target = str(tmp_path / "repo")
+    Path(target).mkdir()
+
+    member = {"name": "opus", "setter": "set_claude_native_opus", "model": "opus"}
+    panel.run_model(member, "review this", out, timeout=60,
+                    profile=_profile(tmp_path), target_dir=target)
+
+    assert captured_kwargs.get("cwd") == target, (
+        f"subprocess.run 应以 target_dir={target!r} 作为 cwd，实际 cwd={captured_kwargs.get('cwd')!r}"
+    )
