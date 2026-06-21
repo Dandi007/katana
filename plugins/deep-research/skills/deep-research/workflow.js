@@ -28,17 +28,22 @@ const TRIAGE_MODEL = pickModel(M.triage, 'opus')
 const SYNTH_MODEL = pickModel(M.synth, 'opus')
 const HARVEST_MODEL = pickModel(M.harvest, 'haiku')
 
-// KB root — from Stage A (reads .katana); fallback '.' = project CWD
-const KB_DIR = (typeof A.kbDir === 'string' && A.kbDir.trim()) ? A.kbDir.trim() : '.'
+// KB root — from Stage A, which resolves an ABSOLUTE kbDir against the katana
+// KB-root anchor (env > .katana value > dir-of-.katana > CLAUDE_PROJECT_DIR > pwd).
+// When Stage A is bypassed (raw string input, no A.kbDir), the Setup agent below
+// resolves the same way inline (G12.2: absolute, not JS-expanded env / cwd).
+// '.' here is only the pre-resolution placeholder; overridden post-Setup via _setup.kbDir.
+let KB_DIR = (typeof A.kbDir === 'string' && A.kbDir.trim()) ? A.kbDir.trim() : '.'
 
 // topic — from structured args, or raw string input when Stage A was bypassed
 const topic = (typeof A.topic === 'string' && A.topic.trim()) ? A.topic.trim()
             : (typeof args === 'string' ? args.trim() : 'Unknown Topic')
 
-// topicDir — from structured args, or auto-derived from topic + KB_DIR
+// topicDir — from structured args, or auto-derived from topic + KB_DIR.
+// `let` so the bypass path can recompute it once KB_DIR is resolved post-Setup.
 const _dirName = topic.replace(/[/\\:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim().slice(0, 80)
-const topicDir = (typeof A.topicDir === 'string' && A.topicDir.trim()) ? A.topicDir.trim()
-               : `${KB_DIR}/DeepThought/${_dirName}`
+const _topicDirGiven = (typeof A.topicDir === 'string' && A.topicDir.trim()) ? A.topicDir.trim() : ''
+let topicDir = _topicDirGiven || `${KB_DIR}/DeepThought/${_dirName}`
 
 const norm = c => (c.text || '').trim().toLowerCase()
 
@@ -193,7 +198,9 @@ MUST: 每个论断可回溯到 sources.md / L2 原文。MUST NOT: 编造来源�
 // Setup phase: always ensure topicDir/findings exists; generate initialClues when Stage A was bypassed
 const SETUP_SCHEMA = {
   type: 'object', required: ['initialClues'],
-  properties: { initialClues: { type: 'array', minItems: 1, items: { type: 'object',
+  properties: {
+    kbDir: { type: 'string' },   // absolute KB root resolved inline vs katana KB-root anchor (bypass path)
+    initialClues: { type: 'array', minItems: 1, items: { type: 'object',
     required: ['id', 'text', 'local', 'suggested_sources', 'depth'],
     properties: {
       id: { type: 'string' }, text: { type: 'string' }, local: { type: 'boolean' },
@@ -202,10 +209,35 @@ const SETUP_SCHEMA = {
 }
 
 const _needsClues = !Array.isArray(A.initialClues) || !A.initialClues.length
+// Stage A bypassed when no absolute kbDir was passed: Setup agent resolves the
+// KB root inline against the katana KB-root anchor (G12.2: absolute, not cwd),
+// then mkdir the resolved dir.
+const _needsKb = !(typeof A.kbDir === 'string' && A.kbDir.trim())
 if (_needsClues) log(`Stage A not provided — setup agent will create dirs and split clues`)
+if (_needsKb) log(`No absolute kbDir passed — setup agent will resolve KB root inline against katana KB-root anchor`)
 phase('Setup')
+
+const _mkdirStep = _needsKb
+  ? `1. 用 Bash 就地解析 KB 根（基准 katana KB-root 语义，绝对路径，非 cwd）并建目录。\n` +
+    `   deep-research 插件不自带 katana-config 帮手，故内联解析：\n` +
+    `   \`\`\`bash\n` +
+    `   KATANA=""\n` +
+    `   if [ -n "\${KATANA_CONFIG_FILE:-}" ]; then KATANA="$KATANA_CONFIG_FILE"\n` +
+    `   elif [ -n "\${CLAUDE_PROJECT_DIR:-}" ] && [ -f "$CLAUDE_PROJECT_DIR/.katana" ]; then KATANA="$CLAUDE_PROJECT_DIR/.katana"\n` +
+    `   elif [ -f "$HOME/.katana" ]; then KATANA="$HOME/.katana"; fi\n` +
+    `   KBVAL="\${DEEP_RESEARCH_KB_DIR:-}"\n` +
+    `   if [ -z "$KBVAL" ] && [ -n "$KATANA" ]; then KBVAL="$(awk -F= '$1=="deep_research_kb_dir"{v=substr($0,length($1)+2);sub(/#.*/,"",v);gsub(/^[[:space:]]+|[[:space:]]+$/,"",v);print v;exit}' "$KATANA")"; fi\n` +
+    `   if [ -n "$KATANA" ]; then KBROOT="$(cd "$(dirname "$KATANA")" && pwd)"; else KBROOT="\${CLAUDE_PROJECT_DIR:-$(pwd)}"; fi\n` +
+    `   case "$KBVAL" in ""|".") KB="$KBROOT";; "~") KB="$HOME";; "~/"*) KB="$HOME/\${KBVAL#~/}";; /*) KB="$KBVAL";; *) KB="$KBROOT/$KBVAL";; esac\n` +
+    `   TOPIC_DIR="${_topicDirGiven ? _topicDirGiven : '$KB/DeepThought/' + _dirName}"\n` +
+    `   mkdir -p "$TOPIC_DIR/findings"\n` +
+    `   echo "$KB"   # 回填 SETUP_SCHEMA.kbDir（绝对 KB 根）\n` +
+    `   \`\`\`\n` +
+    `   把上面 echo 出的绝对 KB 根填进返回的 kbDir 字段。\n`
+  : `1. 用 Bash 运行 \`mkdir -p "${topicDir}/findings"\`（幂等，目录已存在无害）。\n`
+
 const _setup = await agent(
-  `1. 用 Bash 运行 \`mkdir -p "${topicDir}/findings"\`（幂等，目录已存在无害）。\n` +
+  _mkdirStep +
   (_needsClues
     ? `2. 把研究主题 "${topic}" 拆成 3-6 条初始搜索线索，格式：{ id:"c0", text:"...", local:false, suggested_sources:["web"], depth:0 }。\n` +
       `   local=true 仅当线索主要靠本地知识库而非 web 回答。\n` +
@@ -214,6 +246,12 @@ const _setup = await agent(
   { phase: 'Setup', schema: SETUP_SCHEMA, label: _needsClues ? 'setup:mkdir+clues' : 'setup:mkdir' }
 )
 const initialClues = _needsClues ? _setup.initialClues : A.initialClues
+
+// Adopt the resolved absolute KB root from Setup (bypass path) and recompute topicDir.
+if (_needsKb && _setup && typeof _setup.kbDir === 'string' && _setup.kbDir.trim()) {
+  KB_DIR = _setup.kbDir.trim()
+  if (!_topicDirGiven) topicDir = `${KB_DIR}/DeepThought/${_dirName}`
+}
 
 const seen = new Set(initialClues.map(norm))
 let frontier = initialClues, round = 0

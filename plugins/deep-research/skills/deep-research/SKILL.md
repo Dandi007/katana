@@ -14,10 +14,10 @@ description: 大规模多源探索并生成研究综述。本地知识库（环�
 | 优先级 | 配置方式 | 示例 |
 |--------|---------|------|
 | 1 | 环境变量 `DEEP_RESEARCH_KB_DIR` | `export DEEP_RESEARCH_KB_DIR=/path/to/kb` |
-| 2 | 项目根目录 `.katana` 文件 | `deep_research_kb_dir=.` |
-| 3 | 默认值 | 当前工作目录 |
+| 2 | `.katana` 文件 | `deep_research_kb_dir=.` |
+| 3 | 默认值 | katana KB-root 锚点（`.katana` 所在目录 > `CLAUDE_PROJECT_DIR` > pwd） |
 
-如果项目 `.katana` 文件或环境变量指定了路径，以那个为准，忽略默认值。
+所有取值（含默认与相对值）解析成绝对路径，基准是 KB-root 锚点而非 cwd（解析逻辑见 Stage A 第 3 步的内联 bash）。若 `.katana` 文件或环境变量指定了路径，以那个为准，忽略默认值。
 
 ### 命名源（平台源，可选）
 
@@ -64,7 +64,31 @@ deep_research_models=worker:sonnet,triage:opus,synth:opus,harvest:haiku
 ### A. 对话预备阶段（主 agent，轻）
 1. `date "+%Y-%m-%d %H:%M"` 确认时间。
 2. 解析输入 → 生成可读自然语言主题名（空格分隔，如「PPO vs SAC 对比」）。
-3. 确定知识库根：按优先级读取——环境变量 `DEEP_RESEARCH_KB_DIR` → 项目根 `.katana` 文件的 `deep_research_kb_dir` 值 → 当前目录。先读 `$KB/CLAUDE.md` 或 `$KB/AGENTS.md`（如存在）了解库结构与检索约定；建目录 `$KB/DeepThought/<主题名>/` 与 `$KB/DeepThought/<主题名>/findings/`。
+3. 确定知识库根（**结果必须是绝对路径**，G12.2 不靠下游展开 env）。deep-research 插件不自带 katana-config 帮手，故在此就地解析（语义对齐 katana KB-root 锚点：env > `.katana` 配置值 > `.katana` 所在目录 > `CLAUDE_PROJECT_DIR` > pwd），基准是 KB-root 而非 cwd：
+
+   ```bash
+   # a) 找被采用的 .katana：KATANA_CONFIG_FILE > $CLAUDE_PROJECT_DIR/.katana > ~/.katana
+   KATANA=""
+   if [ -n "${KATANA_CONFIG_FILE:-}" ]; then KATANA="$KATANA_CONFIG_FILE"
+   elif [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -f "$CLAUDE_PROJECT_DIR/.katana" ]; then KATANA="$CLAUDE_PROJECT_DIR/.katana"
+   elif [ -f "$HOME/.katana" ]; then KATANA="$HOME/.katana"; fi
+   # b) 读 deep_research_kb_dir（env 优先；否则从 .katana 取值）
+   KBVAL="${DEEP_RESEARCH_KB_DIR:-}"
+   if [ -z "$KBVAL" ] && [ -n "$KATANA" ]; then
+     KBVAL="$(awk -F= '$1=="deep_research_kb_dir"{v=substr($0,length($1)+2);sub(/#.*/,"",v);gsub(/^[[:space:]]+|[[:space:]]+$/,"",v);print v;exit}' "$KATANA")"
+   fi
+   # c) KB-root 兜底：.katana 所在目录 > CLAUDE_PROJECT_DIR > pwd
+   if [ -n "$KATANA" ]; then KBROOT="$(cd "$(dirname "$KATANA")" && pwd)"; else KBROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"; fi
+   # d) 把 KBVAL 解析成绝对：空/`.` → KBROOT；~ → $HOME；/* → 原样；否则 join KBROOT
+   case "$KBVAL" in
+     ""|".") KB="$KBROOT";;
+     "~") KB="$HOME";; "~/"*) KB="$HOME/${KBVAL#\~/}";;
+     /*) KB="$KBVAL";; *) KB="$KBROOT/$KBVAL";;
+   esac
+   echo "$KB"   # 绝对 KB 根，作为下面 Workflow args.kbDir
+   ```
+
+   先读 `$KB/CLAUDE.md` 或 `$KB/AGENTS.md`（如存在）了解库结构与检索约定；建目录 `$KB/DeepThought/<主题名>/` 与 `$KB/DeepThought/<主题名>/findings/`。
    同时按同优先级读取 `deep_research_sources` / `deep_research_max_width` / `deep_research_models`（env → `.katana` → 默认），解析出命名源映射 `{name: entry}`、宽度值与三档模型 `{worker, triage, synth}`。
    **worker 档按 topic 意图定**（这是「按意图选模型」的唯一时机，启动后不可变）：在解析出的默认基础上判断——纯事实扫库 / 信息聚合类（多数线索是 Grep/Read/简单网页抓取）→ 下调 `worker:haiku` 省成本；技术深挖 / 需要读代码、推理因果、辨析冲突证据的硬研究 → 上调 `worker:opus` 保质量；拿不准就用默认 `sonnet`。triage/synth 一般保持 `opus`，除非用户另有指定。
 4. 把输入拆成 3-6 条初始线索，每条形如
