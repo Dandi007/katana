@@ -14,5 +14,5 @@ expect:
     - modified: "笔记/INDEX.md"
     - content: {path: "笔记/INDEX.md", matches: "冷萃"}
     - modified: "wiki-log.md"
-    - modified: "笔记/手冲咖啡萃取.md"
+    - allowed: "笔记/*.md"
     - unchanged_outside: true

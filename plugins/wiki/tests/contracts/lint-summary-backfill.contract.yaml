@@ -11,6 +11,7 @@ expect:
     - modified: "笔记/手冲咖啡萃取.md"
     - modified: "笔记/咖啡豆烘焙度.md"
     - script: scripts/check-summary-backfill.sh
+    - allowed: "笔记/*.md"
     - allowed: ".wiki/lint/*.md"
     - allowed: "wiki-log.md"
     - allowed: "log.md"

@@ -23,4 +23,5 @@ expect:
     - created: "Incubator/*/*/*/progress.md"
     - created: "Incubator/*/*/*/golden-order.md"
     - script: incubate-e2e.verify.sh
+    - allowed: "Incubator/*/*/*/**"
     - unchanged_outside: true

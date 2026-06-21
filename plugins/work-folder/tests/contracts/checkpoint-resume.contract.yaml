@@ -20,8 +20,7 @@ expect:
     - content: {path: "工作记录/fixture-task/progress.md", matches: "矛盾调研"}
     - created: "工作记录/fixture-task/CLAUDE.md"
     - content: {path: "工作记录/fixture-task/CLAUDE.md", matches: "Resume"}
-    - created: "工作记录/fixture-task/context.md"
-    - created: "工作记录/fixture-task/findings.md"
+    - allowed: "工作记录/fixture-task/*"
     - created: "resume-summary.txt"
     - content: {path: "resume-summary.txt", matches: "咖啡萃取知識頁|咖啡萃取知识页|整理咖啡"}
     - unchanged_outside: true

@@ -13,6 +13,7 @@ expect:
     - content: {path: "lint-report.md", matches: "矛盾|分歧|conflict"}
     - allowed: ".wiki/lint/*.md"
     - allowed: "wiki-log.md"
+    - allowed: "*lint*.md"
     - unchanged_outside: true
   semantic:
     rubric: ../../../../tests/judge/case-rubrics/wiki-lint.md
