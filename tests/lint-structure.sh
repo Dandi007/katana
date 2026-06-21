@@ -22,8 +22,27 @@ for s in $SKILLS; do
   err "skill $s has no contract and no exemption"
 done
 
-# 3) 契约 schema 全量校验
+# 3) 契约 schema 全量校验（40 契约全 valid）
 uv run "$HERE/runner.py" --validate-only --repo "$REPO" || err "contract schema validation failed"
+
+# 3b) stdout_grep 类型 0 命中（G2 闸门）：仓内不得出现 stdout_grep assert
+SG=$(grep -rn "stdout_grep" "$REPO/plugins" "$REPO/tests" 2>/dev/null \
+  | grep -v "Binary" \
+  | grep -v "lint-structure\.sh" \
+  | grep -v "__pycache__" \
+  | grep -v "\.pyc" \
+  | grep -v "test_schema\.py" \
+  | grep -v "asserts\.py" \
+  | grep -v "tests/reports/" \
+  | grep -v "\.md:" \
+  || true)
+[ -z "$SG" ] || err "stdout_grep found (G2): $SG"
+
+# 3c) KB_DIR 在契约 verify/script shell 中 0 命中（旧 harness env 名，已迁 CWD）
+# 只扫 tests/contracts/*.sh（harness script 逃逸口），不扫 skill 实现/文档
+KD=$(find "$REPO/plugins" -path "*/tests/contracts/*.sh" \
+  | xargs grep -ln "KB_DIR" 2>/dev/null || true)
+[ -z "$KD" ] || err "KB_DIR found in contract scripts (use CWD instead): $KD"
 
 # 4) plugin.json ↔ marketplace.json 一致性
 python3 - "$REPO" <<'PY' || FAIL=1

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify that a NEW memory card containing "92" was written to $KB_DIR/memory/,
+# Verify that a NEW memory card containing "92" was written to $CWD/memory/,
 # excluding the two pre-existing fixture cards.
 set -euo pipefail
 

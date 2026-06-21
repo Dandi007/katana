@@ -1,5 +1,7 @@
 """Test sweep report rendering."""
-from harness.case import CaseResult
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from runner import CaseResult
 from harness.report import render_report
 
 
