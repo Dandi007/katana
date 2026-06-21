@@ -73,3 +73,33 @@ def test_validate_page_aggregates_all_errors():
     errs = inv.validate_page(fm, "正文无 wikilink")
     # 至少同时报：创建日期/tags/类型非法/孤岛/摘要 等多条
     assert len(errs) >= 4
+
+
+def test_credibility_invalid_value():
+    fm = _valid_fm(); fm["source_type"] = "mixed"; fm["credibility"] = "verylow"
+    assert any("credibility" in e for e in inv.check_frontmatter(fm))
+
+
+def test_source_type_invalid_value():
+    fm = _valid_fm(); fm["source_type"] = "robot"; fm["credibility"] = "high"
+    assert any("source_type" in e for e in inv.check_frontmatter(fm))
+
+
+def test_strict_sources_required_even_with_references():
+    fm = {"创建日期": "2026-06-22 10:00", "tags": ["x"], "类型": "卡片", "摘要": "x"}
+    # require_sources=True（默认）：有 # References 但无 sources 仍被拒
+    errs = inv.validate_page(fm, "正文 [[p]]\n# References\n- y")
+    assert any("frontmatter sources" in e for e in errs)
+
+
+def test_summary_non_str():
+    fm = _valid_fm(); fm["摘要"] = 123
+    assert any("摘要" in e for e in inv.check_summary(fm))
+
+
+def test_code_type_pair_missing_one_no_double_report():
+    # 只填 source_type，未填 credibility：只应报"成对"，不应再报 CODE_TYPES"硬要求 source_type+credibility"
+    fm = {"创建日期": "2026-06-22 10:00", "tags": ["x"], "类型": "架构", "摘要": "x", "source_type": "mixed", "sources": ["a"]}
+    errs = inv.check_frontmatter(fm)
+    assert any("成对" in e for e in errs)
+    assert not any("硬要求 source_type+credibility" in e for e in errs)

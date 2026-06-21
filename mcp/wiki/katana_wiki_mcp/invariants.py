@@ -67,8 +67,8 @@ def check_frontmatter(fm: dict) -> list[str]:
                     f"credibility 非法: {cr_val}（须 ∈ high/medium/low）"
                 )
 
-    # CODE_TYPES 硬必填 source_type + credibility
-    if page_type in CODE_TYPES and not (has_st and has_cr):
+    # CODE_TYPES 硬必填 source_type + credibility（两者都缺才报此专属错；缺一由成对校验覆盖）
+    if page_type in CODE_TYPES and not has_st and not has_cr:
         errors.append(f"{page_type} 硬要求 source_type+credibility")
 
     return errors
@@ -167,16 +167,11 @@ def validate_page(
         # require_sources=False：宽松，允许仅 # References
         errors.extend(check_provenance(fm, body))
     else:
-        # require_sources=True & 非 CODE_TYPES：sources 必填
+        # require_sources=True & 非 CODE_TYPES：硬要 frontmatter sources（# References 不够）
         sources = fm.get("sources")
         has_sources = isinstance(sources, list) and len(sources) > 0
         if not has_sources:
-            # 也检查是否完全没有 provenance（sources 缺且无 References）
-            has_references = bool(_REFERENCES_RE.search(body))
-            if not has_references:
-                errors.append("缺 provenance：需 frontmatter sources 或正文 # References")
-            else:
-                errors.append("缺 provenance：需 frontmatter sources 或正文 # References")
+            errors.append("缺 frontmatter sources（ingest 模式要求；# References 不够）")
 
     # 4. 摘要（可选）
     if require_summary:
