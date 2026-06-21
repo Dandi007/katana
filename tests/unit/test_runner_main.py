@@ -56,6 +56,14 @@ def test_validate_only(tmp_path):
     assert r.returncode == 0 and "1 contracts valid" in r.stdout
 
 
+def test_resolve_verdict_inputs_case_trace():
+    import runner
+    paths = runner._resolve_verdict_inputs(["{case_trace}", "{cwd}/r.md"],
+                                           Path("/x"), "kb")
+    assert str(paths[0]) == "/x/case.trace.jsonl"
+    assert str(paths[1]) == "/x/kb/r.md"
+
+
 def test_case_filter_no_match_exits_nonzero(tmp_path):
     repo = make_mini_repo(tmp_path)
     r = subprocess.run(

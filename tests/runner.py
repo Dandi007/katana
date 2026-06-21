@@ -58,6 +58,21 @@ def sweep_setup(repo: Path, tmp: Path, plugins: set, claude_bin: str) -> Path:
     return golden
 
 
+def _resolve_verdict_inputs(raw_inputs, case_root, cwd) -> list:
+    """把 verdict.inputs 列表里的占位符替换成真实 Path。
+    支持：{cwd}→<case_root>/<cwd>，{case_log}→<case_root>/case.log，
+         {case_trace}→<case_root>/case.trace.jsonl。
+    """
+    out = []
+    for i in raw_inputs:
+        s = (str(i)
+             .replace("{cwd}", str(Path(case_root) / cwd))
+             .replace("{case_log}", str(Path(case_root) / "case.log"))
+             .replace("{case_trace}", str(Path(case_root) / "case.trace.jsonl")))
+        out.append(Path(s))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true")
@@ -121,9 +136,8 @@ def main():
                 rubric = repo / "tests/judge" / rubric_key
                 # 使用 r.case_dir 确保指向实际 PASS 的 attempt 目录（含重试场景）
                 case_root = Path(r.case_dir)
-                inputs = [Path(str(i).replace("{cwd}", str(case_root / c.cwd))
-                                   .replace("{case_log}", str(case_root / "case.log")))
-                          for i in c.verdict.get("inputs", [])]
+                inputs = _resolve_verdict_inputs(
+                    c.verdict.get("inputs", []), case_root, c.cwd)
                 status, vr = run_case_verdict(rubric=rubric, inputs=inputs,
                                               model=c.model, work_dir=tmp,
                                               claude_bin=claude_bin, base_env=base_env)
