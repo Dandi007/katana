@@ -24,12 +24,16 @@ case "$WF_PATH" in
         ;;
 esac
 
+# Resolve the (validated) relative value to an absolute path under the KB root
+# so the injected guidance points at the real work-folder regardless of cwd.
+WF_ABS="$(katana_resolve_path "$WF_PATH")"
+
 # Read the template and substitute the path
 content=$(cat "${PLUGIN_ROOT}/rules/work-folder.md" 2>/dev/null || true)
 [ -z "$content" ] && exit 0
 
-# Replace the default path in the template with the configured path
-content="${content//docs\/work-records/${WF_PATH}}"
+# Replace the default path in the template with the configured (absolute) path
+content="${content//docs\/work-records/${WF_ABS}}"
 
 escape_for_json() {
     local s="$1"
