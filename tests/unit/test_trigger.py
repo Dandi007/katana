@@ -179,3 +179,43 @@ def test_neither_prompt_nor_turns_raises():
             timeout=60,
             env={},
         )
+
+
+def test_multiturn_trace_accumulates_all_turns(tmp_path):
+    """多轮：case.trace.jsonl 必须包含所有轮的事件，而不仅仅是末轮。
+    fake-claude 每次调用都会吐含 Skill tool_use 的 assistant 事件，
+    断言 turn1 的 Skill 事件没有丢失（skills_loaded 能看到 turn1 的 skill）。
+    """
+    import sys
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+    from harness import trace as trace_mod
+
+    r = trigger.run(
+        turns=["turn-one", "turn-two"],
+        cwd=tmp_path,
+        log_dir=tmp_path,
+        model="m",
+        tools=[],
+        timeout=60,
+        env={},
+        claude_bin=FAKE,
+    )
+
+    # canonical trace 必须存在
+    trace_path = pathlib.Path(r.trace_path)
+    assert trace_path.exists(), "case.trace.jsonl 不存在"
+
+    events = trace_mod.load_trace(trace_path)
+
+    # 两轮各吐 3 行(system+assistant+result)，拼接后至少 6 个事件
+    assert len(events) >= 6, (
+        f"多轮 trace 应包含所有轮事件（至少 6 个），实际只有 {len(events)} 个。"
+        "turn1 的事件可能丢失。"
+    )
+
+    # fake-claude 每轮都会吐 Skill tool_use，skills_loaded 应能看到（来自 turn1）
+    skills = trace_mod.skills_loaded(events)
+    assert len(skills) >= 2, (
+        f"多轮 trace 应含至少 2 条 Skill 事件（每轮各一条），实际: {skills}。"
+        "turn1 的 skill_loaded 事件可能丢失。"
+    )

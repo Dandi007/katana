@@ -169,8 +169,14 @@ def run(
                 exit_code = proc.returncode
                 break
 
-        # 末轮 trace → canonical case.trace.jsonl
-        canonical_trace.write_text(last_out, encoding="utf-8")
+        # 所有轮 stream-json 事件拼接 → canonical case.trace.jsonl
+        # 注：result_text 取各轮文本拼接（含末轮 result）；trace 包含全轮事件，
+        # 这样 load_trace/skills_loaded/tools_used 能看到任意一轮的 skill/tool 事件。
+        all_turns_content = "".join(
+            (log_dir / f"case{i}.trace.jsonl").read_text(encoding="utf-8")
+            for i in range(len(texts))
+        )
+        canonical_trace.write_text(all_turns_content, encoding="utf-8")
         return Result(
             result_text="\n".join(texts),
             trace_path=str(canonical_trace),

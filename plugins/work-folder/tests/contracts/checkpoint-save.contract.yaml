@@ -18,4 +18,6 @@ expect:
     - content: {path: "工作记录/fixture-task/progress.md", matches: "矛盾调研"}
     - created: "工作记录/fixture-task/CLAUDE.md"
     - content: {path: "工作记录/fixture-task/CLAUDE.md", matches: "Resume"}
+    - created: "工作记录/fixture-task/context.md"
+    - created: "工作记录/fixture-task/findings.md"
     - unchanged_outside: true
