@@ -87,7 +87,7 @@ def test_trace_skill_loaded_and_tool_used(tmp_path):
     from harness.asserts import Ctx, run_asserts
     trace_file = tmp_path / "case.trace.jsonl"
     trace_file.write_text('\n'.join([
-        '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"command":"jury:review"}}]}}',
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"jury:review"}}]}}',
         '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"panel.py"}}]}}',
     ]))
     ctx_ = Ctx(cwd=tmp_path, stdout="", case_log=tmp_path / "l", contract_dir=tmp_path,

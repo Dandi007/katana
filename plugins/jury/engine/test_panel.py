@@ -68,20 +68,6 @@ def test_parse_vote_takes_last_items_block():
     """verbose 模型先吐 example json 再吐真投票 → 应取末个含 items 的块。"""
     example_block = '```json\n{"note": "this is an example, not a vote"}\n```'
     real_vote_block = '```json\n{"items": [{"q": "1", "answer": "yes", "evidence": "e"}]}\n```'
-    result_text = json.dumps({
-        "type": "result",
-        "result": f"Here is the format:\n{example_block}\n\nMy actual vote:\n{real_vote_block}\nprose"
-    })
-    # 构造一个完整的 stream-json 行：_parse_vote 期望原始 stream stdout
-    stream_stdout = result_text  # 单行 json，其中 result 字段含两个 fenced 块
-    # 直接造 result_text（_parse_vote 内部从 stream 取 result_text）
-    # 为了直接测 _parse_vote 逻辑，我们模拟 stream stdout 格式
-    stream_stdout = (
-        '{"type":"result","result":"'
-        + f'Here is the format:\\n{example_block}\\n\\nMy actual vote:\\n{real_vote_block}\\nprose"'.replace('"', '\\"').replace('\n', '\\n')
-        + '"}'
-    )
-    # 用更直接方式：构造 stream_stdout 字符串让 _parse_vote 能解析
     result_payload = (
         "Here is the format:\n" + example_block + "\n\nMy actual vote:\n" + real_vote_block + "\nprose"
     )

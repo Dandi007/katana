@@ -5,7 +5,7 @@
 """jury fanout 引擎：同一 prompt 模板并行打 N 个模型，保留分歧 + 投票。
 每模型 = 一次 claude -p，只有 env(由 setter 决定) 与 model 串不同。路由 SSoT
 复用 agent-shell 的 set_claude_* 族，引擎不重建路由表。"""
-import argparse, concurrent.futures, json, os, re, subprocess, sys
+import argparse, concurrent.futures, json, os, re, shlex, subprocess, sys
 from pathlib import Path
 
 DEFAULT_PROFILE = os.environ.get("JURY_PROFILE") or os.path.expanduser("~/.config/agent-shell/profile.zsh")
@@ -44,10 +44,17 @@ def _parse_vote(stream_stdout: str):
 
 def run_model(member: dict, prompt: str, out_dir: Path, timeout: int,
               profile: str = DEFAULT_PROFILE) -> dict:
+    """Run one panel member via claude -p.
+
+    setter must be a shell-safe identifier matching ^set_claude[a-z0-9_]*$;
+    any other value raises ValueError to prevent shell injection.
+    """
     name, setter = member["name"], member["setter"]
-    claude_bin = os.environ.get("JURY_CLAUDE_BIN", "claude")
+    if not re.fullmatch(r"set_claude[a-z0-9_]*", setter):
+        raise ValueError(f"unsafe setter: {setter!r}")
+    claude_bin = shlex.quote(os.environ.get("JURY_CLAUDE_BIN", "claude"))
     trace = Path(out_dir) / f"{name}.trace.jsonl"
-    model_arg = f'--model {member["model"]}' if member.get("model") else ""
+    model_arg = f'--model {shlex.quote(member["model"])}' if member.get("model") else ""
     # 先 source+setter，把 setter 实际产生的 env dump 到 stderr 的 marker 行，
     # 再 exec claude。base_url_used/model_string 读 setter 真实结果，不靠猜。
     inner = (

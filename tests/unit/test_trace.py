@@ -5,7 +5,7 @@ from harness import trace
 
 SAMPLE = '\n'.join([
     '{"type":"system","subtype":"init"}',
-    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"command":"jury:review"}}]}}',
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"jury:review"}}]}}',
     '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"panel.py --out .jury"}}]}}',
     'garbage line that is not json',
     '{"type":"result","subtype":"success","result":"done"}',

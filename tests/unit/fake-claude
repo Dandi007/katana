@@ -33,7 +33,7 @@ text="${FAKE_CLAUDE_STDOUT:-fake output}"
 if [ "$stream_json" = "1" ] && [ -z "${FAKE_CLAUDE_BADJSON:-}" ]; then
   # stream-json モード: system init + assistant tool_use + result 事件
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"s1"}'
-  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"command":"fake-skill"}}]}}'
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"fake-skill"}}]}}'
   # result 事件携带 result 文本（含 resumed 标记，让 _result_text 能正确抽出）
   printf '{"type":"result","subtype":"success","result":"%s","session_id":"s1"}\n' "$text"
 elif [ "$json" = "1" ] && [ -z "${FAKE_CLAUDE_BADJSON:-}" ]; then

@@ -33,7 +33,7 @@ def skills_loaded(events) -> list:
     out = []
     for b in _tool_uses(events):
         if b.get("name") == "Skill":
-            cmd = (b.get("input") or {}).get("command", "")
+            cmd = (b.get("input") or {}).get("skill", "")
             if cmd:
                 out.append(cmd)
     return out
