@@ -1,16 +1,19 @@
 skill: retrieval:gitlab
-preconditions:
+setup:
+  fixture: kb
   requires:
     - "env:KATANA_E2E_NETWORK"
     - "cmd:glab"
-input:
+trigger:
   prompt: |
     用 /retrieval:gitlab 查 Dandi007/katana 项目的存在性与默认分支，
-    给出项目路径回显与来源标注。
-  cwd: kb
-run:
+    给出项目路径回显与来源标注，把结果写到 ./gitlab-project-lookup-result.md。
+  tools: [Read, Grep, Glob, Bash, Write]
   timeout: 300
-  allowed_tools: [Read, Grep, Glob, Bash]
-assert:
-  - stdout_grep: "katana"
-  - stdout_grep: "gitlab|glab|project"
+expect:
+  process:
+    - skill_loaded: retrieval:gitlab
+  filesystem:
+    - created: "gitlab-project-lookup-result.md"
+    - content: {path: "gitlab-project-lookup-result.md", matches: "katana"}
+    - unchanged_outside: true

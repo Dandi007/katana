@@ -1,13 +1,16 @@
 skill: retrieval:using-retrieval
-input:
+setup:
+  fixture: kb
+trigger:
   prompt: |
     根据本 session 已注入的 retrieval 约定，回答事实问题前应该先做什么？
     检索结论要带什么标注？请完整列出相关规则。
-  cwd: kb
-run:
+  tools: [Read]
   timeout: 120
-  allowed_tools: [Read]
-assert:
-  - stdout_grep: "route"
-  - stdout_grep: "credibility|可信度"
-  - stdout_grep: "high|medium|low"
+expect:
+  process:
+    - skill_loaded: retrieval:using-retrieval
+  semantic:
+    rubric: "case-rubrics/using-retrieval-loader.md"
+    inputs:
+      answer: "{result_text}"

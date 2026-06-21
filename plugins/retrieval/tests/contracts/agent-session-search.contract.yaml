@@ -1,15 +1,18 @@
 skill: retrieval:agent-session-search
-preconditions:
+setup:
+  fixture: kb
   requires:
     - "dir:~/.claude/projects"
-input:
+trigger:
   prompt: |
     用 /retrieval:agent-session-search 搜历史会话里关于 mihomo 的讨论，
-    列出最多 3 条命中（session 路径或摘要）。
-  cwd: kb
-run:
+    列出最多 3 条命中（session 路径或摘要），把结果写到 ./agent-session-search-result.md。
+  tools: [Read, Grep, Glob, Bash, Write]
   timeout: 300
-  allowed_tools: [Read, Grep, Glob, Bash]
-assert:
-  - stdout_grep: "mihomo"
-  - stdout_grep: "session|会话"
+expect:
+  process:
+    - skill_loaded: retrieval:agent-session-search
+  filesystem:
+    - created: "agent-session-search-result.md"
+    - content: {path: "agent-session-search-result.md", matches: "mihomo"}
+    - unchanged_outside: true

@@ -1,17 +1,20 @@
 skill: retrieval:github
-preconditions:
+setup:
+  fixture: kb
   requires:
     - "env:KATANA_E2E_NETWORK"
     - "cmd:gh"
-input:
+trigger:
   prompt: |
     用 /retrieval:github 查 Dandi007/katana 仓库的 description 和默认分支，
-    给出来源标注。
-  cwd: kb
-run:
+    给出来源标注，把结果写到 ./github-repo-lookup-result.md。
+  tools: [Read, Grep, Glob, Bash, Write]
   timeout: 300
-  allowed_tools: [Read, Grep, Glob, Bash]
-assert:
-  - stdout_grep: "katana"
-  - stdout_grep: "main"
-  - stdout_grep: "github\\.com|github"
+expect:
+  process:
+    - skill_loaded: retrieval:github
+  filesystem:
+    - created: "github-repo-lookup-result.md"
+    - content: {path: "github-repo-lookup-result.md", matches: "katana"}
+    - content: {path: "github-repo-lookup-result.md", matches: "main"}
+    - unchanged_outside: true

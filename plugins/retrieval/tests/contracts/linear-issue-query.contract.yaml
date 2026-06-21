@@ -1,15 +1,18 @@
 skill: retrieval:linear
-preconditions:
+setup:
+  fixture: kb
   requires:
     - "env:LINEAR_API_KEY"
-input:
+trigger:
   prompt: |
     用 /retrieval:linear 列当前 workspace 最近 1 条 issue 的 identifier（只读），
-    给出来源标注。
-  cwd: kb
-run:
+    给出来源标注，把结果写到 ./linear-issue-query-result.md。
+  tools: [Read, Grep, Glob, Bash, Write]
   timeout: 300
-  allowed_tools: [Read, Grep, Glob, Bash]
-assert:
-  - stdout_grep: "[A-Z]+-[0-9]+"
-  - stdout_grep: "linear|Linear"
+expect:
+  process:
+    - skill_loaded: retrieval:linear
+  filesystem:
+    - created: "linear-issue-query-result.md"
+    - content: {path: "linear-issue-query-result.md", matches: "[A-Z]+-[0-9]+"}
+    - unchanged_outside: true

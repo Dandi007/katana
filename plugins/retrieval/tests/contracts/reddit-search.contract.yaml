@@ -1,16 +1,19 @@
 skill: retrieval:reddit
-preconditions:
+setup:
+  fixture: kb
   requires:
     - "env:KATANA_E2E_NETWORK"
-input:
+trigger:
   prompt: |
     用 /retrieval:reddit 搜索 r/espresso 里关于 temperature 的讨论，
-    列出至少 1 条结果，给出来源链接与可信度。
-  cwd: kb
-run:
+    列出至少 1 条结果，给出来源链接与可信度，把结果写到 ./reddit-search-result.md。
+  tools: [Read, Grep, Glob, Bash, Write]
   timeout: 300
-  allowed_tools: [Read, Grep, Glob, Bash]
-assert:
-  - stdout_grep: "reddit|r/"
-  - stdout_grep: "https?://"
-  - stdout_grep: "high|medium|low"
+expect:
+  process:
+    - skill_loaded: retrieval:reddit
+  filesystem:
+    - created: "reddit-search-result.md"
+    - content: {path: "reddit-search-result.md", matches: "reddit|r/"}
+    - content: {path: "reddit-search-result.md", matches: "https?://"}
+    - unchanged_outside: true

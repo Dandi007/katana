@@ -1,15 +1,19 @@
 skill: retrieval:code
-preconditions:
+setup:
+  fixture: kb
   requires:
     - "dir:/Volumes/Data/code/self/katana"
-input:
+trigger:
   prompt: |
     用 /retrieval:code 在本机 katana 源码（/Volumes/Data/code/self/katana）里查
-    lint-structure.sh 的 G0 覆盖 diff 是怎么实现的，给出文件路径与关键命令。
-  cwd: kb
-run:
+    lint-structure.sh 的 G0 覆盖 diff 是怎么实现的，给出文件路径与关键命令，
+    把结果写到 ./code-local-repo-result.md。
+  tools: [Read, Grep, Glob, Bash, Write]
   timeout: 300
-  allowed_tools: [Read, Grep, Glob, Bash]
-assert:
-  - stdout_grep: "lint-structure.sh"
-  - stdout_grep: "coverage-exemptions|SKILLS|COVERED"
+expect:
+  process:
+    - skill_loaded: retrieval:code
+  filesystem:
+    - created: "code-local-repo-result.md"
+    - content: {path: "code-local-repo-result.md", matches: "lint-structure.sh"}
+    - unchanged_outside: true

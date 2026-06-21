@@ -1,16 +1,19 @@
 skill: retrieval:feishu
-preconditions:
+setup:
+  fixture: kb
   requires:
     - "cmd:lark-cli"
     - "dir:~/.lark-cli"
-input:
+trigger:
   prompt: |
     用 /retrieval:feishu 搜索飞书 wiki 关键词「OKR」（只读搜索，不发消息不创建内容），
-    列出至少 1 条结果，给出来源标注。
-  cwd: kb
-run:
+    列出至少 1 条结果，给出来源标注，把结果写到 ./feishu-doc-search-result.md。
+  tools: [Read, Grep, Glob, Bash, Write]
   timeout: 300
-  allowed_tools: [Read, Grep, Glob, Bash]
-assert:
-  - stdout_grep: "OKR|okr"
-  - stdout_grep: "feishu|lark|飞书"
+expect:
+  process:
+    - skill_loaded: retrieval:feishu
+  filesystem:
+    - created: "feishu-doc-search-result.md"
+    - content: {path: "feishu-doc-search-result.md", matches: "OKR|okr"}
+    - unchanged_outside: true
