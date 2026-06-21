@@ -1,7 +1,7 @@
 {
   "name": "feishu-docs",
   "description": "Mirror Feishu DocX as local block-tree AST (SSoT) + read-only Markdown; one-way pull (P0)",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": { "name": "Dandi007" },
   "license": "MIT"
 }

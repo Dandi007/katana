@@ -1,7 +1,7 @@
 {
   "name": "writing",
   "description": "统一文档写作 + 可读性审视引擎 — writing:write 写入口 gate（写前实例化 template、写后固定格式自检），writing:readability-check 审入口（机检含结构符合性 + 冷读 subagent，distill 冷启动 + evolve 分诊进化），writing:bluf L0-L3 结构 SSoT；写的脸(template=layout+guide)/审的脸(pattern)/意见(improvements)经 .katana 的 writing_dir 外置",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": { "name": "Dandi007" },
   "license": "MIT"
 }
