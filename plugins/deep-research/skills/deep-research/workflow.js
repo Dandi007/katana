@@ -228,7 +228,7 @@ const _mkdirStep = _needsKb
     `   KBVAL="\${DEEP_RESEARCH_KB_DIR:-}"\n` +
     `   if [ -z "$KBVAL" ] && [ -n "$KATANA" ]; then KBVAL="$(awk -F= '$1=="deep_research_kb_dir"{v=substr($0,length($1)+2);sub(/#.*/,"",v);gsub(/^[[:space:]]+|[[:space:]]+$/,"",v);print v;exit}' "$KATANA")"; fi\n` +
     `   if [ -n "$KATANA" ]; then KBROOT="$(cd "$(dirname "$KATANA")" && pwd)"; else KBROOT="\${CLAUDE_PROJECT_DIR:-$(pwd)}"; fi\n` +
-    `   case "$KBVAL" in ""|".") KB="$KBROOT";; "~") KB="$HOME";; "~/"*) KB="$HOME/\${KBVAL#~/}";; /*) KB="$KBVAL";; *) KB="$KBROOT/$KBVAL";; esac\n` +
+    `   case "$KBVAL" in ""|".") KB="$KBROOT";; "~") KB="$HOME";; "~/"*) KB="$HOME/\${KBVAL#\\~/}";; /*) KB="$KBVAL";; *) KB="$KBROOT/$KBVAL";; esac\n` +
     `   TOPIC_DIR="${_topicDirGiven ? _topicDirGiven : '$KB/DeepThought/' + _dirName}"\n` +
     `   mkdir -p "$TOPIC_DIR/findings"\n` +
     `   echo "$KB"   # 回填 SETUP_SCHEMA.kbDir（绝对 KB 根）\n` +
