@@ -10,10 +10,10 @@ from pathlib import Path
 
 DEFAULT_PROFILE = os.environ.get("JURY_PROFILE") or os.path.expanduser("~/.config/agent-shell/profile.zsh")
 DEFAULT_ROSTER = [
-    {"name": "opus", "setter": "set_claude_native_opus", "model": "opus"},
-    {"name": "gpt", "setter": "set_claude_ccswitch_gpt", "model": ""},
-    {"name": "deepseek", "setter": "set_claude_ccswitch_ds", "model": ""},
-    {"name": "qwen", "setter": "set_claude_ccswitch_qwen", "model": ""},
+    {"name": "opus",     "setter": "set_claude_native_opus",   "model": "opus"},
+    {"name": "gpt",      "setter": "set_claude_ccswitch_gpt",  "model": "gpt/gpt-5.5"},
+    {"name": "deepseek", "setter": "set_claude_ccswitch_ds",   "model": "lingzhi/deepseek-v4-pro"},
+    {"name": "qwen",     "setter": "set_claude_ccswitch_qwen", "model": "lingzhi/qwen3.7-max"},
 ]
 
 

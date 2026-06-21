@@ -1,0 +1,10 @@
+# 测试模型配置。setter 仅供 env（base_url/betas/auth），model 一律显式（G5）。
+semantic_judge: single        # single | jury
+roles:
+  default-judge: {setter: set_claude_ccswitch_claude, model: lingzhi/claude-opus-4-8}
+  contract:      {setter: set_claude_ccswitch_claude, model: lingzhi/claude-opus-4-8}
+jury-roster:
+  - {name: opus,     setter: set_claude_native_opus,  model: opus}
+  - {name: gpt,      setter: set_claude_ccswitch_gpt,  model: gpt/gpt-5.5}
+  - {name: deepseek, setter: set_claude_ccswitch_ds,   model: lingzhi/deepseek-v4-pro}
+  - {name: qwen,     setter: set_claude_ccswitch_qwen, model: lingzhi/qwen3.7-max}
