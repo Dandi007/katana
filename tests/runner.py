@@ -3,27 +3,291 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""katana contract regression runner. 用法见 tests/run-contracts.sh --help"""
-import argparse, json, os, shutil, socket, subprocess, sys, tempfile, time
+"""katana contract regression runner v2。六步编排：隔离→快照→触发→delta→三轴→verdict。"""
+import argparse, os, shutil, subprocess, sys, tempfile, time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness.schema import discover_contracts
-from harness.case import run_case
+from harness.schema import discover_contracts, Contract
+from harness.isolate import case_clone, case_env, build_base_env, golden_setup
+from harness.snapshot import snapshot, delta
+from harness.trigger import run as trigger_run, ClaudeTimeout
+from harness.expect_process import check_process
+from harness.expect_fs import check_fs
+from harness.judge import get_judge
 from harness.scheduler import schedule
 from harness.report import render_report
-from harness.judge import run_case_verdict, run_overall_backstop
-
-CCS_HOST, CCS_PORT = "127.0.0.1", 15721
 
 
-def ccs_online() -> bool:
-    try:
-        with socket.create_connection((CCS_HOST, CCS_PORT), timeout=2):
-            return True
-    except OSError:
-        return False
+# ──────────────────────────────────────────────────
+# CaseResult（v2 三轴）
+# ──────────────────────────────────────────────────
 
+@dataclass
+class CaseResult:
+    case_id: str
+    skill: str
+    status: str                  # PASS / FAIL / NEEDS-REVIEW / ERROR / SKIP
+    attempts: int = 0
+    duration_s: float = 0.0
+    model: str = ""
+    attribution: str = ""        # env / prompt / model / unknown（FAIL 时填）
+    detail: str = ""
+    kept_dir: str = ""
+    case_dir: str = ""           # 实际产物目录（PASS 时为成功 attempt 的目录）
+    # 三轴结果详情：{"process": [...], "filesystem": [...], "semantic": {...}}
+    axis_detail: dict = field(default_factory=dict)
+    # 向后兼容旧 report 字段
+    verdict_result: dict | None = None
+
+
+# ──────────────────────────────────────────────────
+# 占位符解析
+# ──────────────────────────────────────────────────
+
+def _resolve_verdict_inputs(raw_inputs, case_root, cwd, delta_info=None) -> list:
+    """把 semantic.inputs 列表里的占位符替换成真实 Path。
+
+    占位符：
+      {case_trace}  → case_root/case.trace.jsonl
+      {cwd}         → case_root/<cwd>
+      {case_log}    → case_root/case.log
+      created       → delta_info["created"] 里所有文件的路径列表
+    """
+    out = []
+    for i in raw_inputs:
+        if i == "created":
+            # 展开 delta.created 里所有文件；无 delta 信息时跳过（不留字面 "created"）
+            if delta_info is not None:
+                for rel in sorted(delta_info.get("created", [])):
+                    out.append(Path(case_root) / cwd / rel)
+            continue
+        s = (str(i)
+             .replace("{case_trace}", str(Path(case_root) / "case.trace.jsonl"))
+             .replace("{cwd}", str(Path(case_root) / cwd))
+             .replace("{case_log}", str(Path(case_root) / "case.log")))
+        out.append(Path(s))
+    return out
+
+
+# ──────────────────────────────────────────────────
+# 六步 run_case
+# ──────────────────────────────────────────────────
+
+def run_case(
+    contract: Contract,
+    golden: Path,
+    work_root: Path,
+    base_env: dict,
+    models: dict,
+    claude_bin: str | None = None,
+) -> CaseResult:
+    """六步编排：隔离→快照 before→触发→快照 after+delta→三轴→verdict + retry-once（infra flake）。
+
+    硬 FAIL 只来自轴①②（确定性）；轴③语义失败→NEEDS-REVIEW（G1）。
+    model 永远显式 --model（G5）。
+    """
+    binary = claude_bin or os.environ.get("CLAUDE_BIN", "claude")
+    t0 = time.monotonic()
+
+    # requires 检查（SKIP）
+    skip_reason = _check_requires(contract.requires)
+    if skip_reason:
+        return CaseResult(contract.case_id, contract.skill, "SKIP",
+                          detail=skip_reason, model=contract.model)
+
+    for attempt in (1, 2):
+        suffix = "" if attempt == 1 else "-retry"
+        case_dir = Path(work_root) / f"{contract.case_id}{suffix}"
+
+        try:
+            result = _attempt(contract, golden, case_dir, base_env, models, binary)
+        except ClaudeTimeout as e:
+            # infra flake：超时 retry-once
+            if attempt == 1:
+                continue
+            return CaseResult(
+                contract.case_id, contract.skill, "FAIL",
+                attempts=attempt, attribution="env",
+                detail=str(e), kept_dir=str(case_dir),
+                case_dir=str(case_dir),
+                duration_s=time.monotonic() - t0,
+                model=contract.model,
+            )
+        except Exception as e:
+            return CaseResult(
+                contract.case_id, contract.skill, "ERROR",
+                attempts=attempt, attribution="unknown",
+                detail=f"unexpected error: {e}",
+                kept_dir=str(case_dir), case_dir=str(case_dir),
+                duration_s=time.monotonic() - t0,
+                model=contract.model,
+            )
+
+        status, detail, axis_detail, verdict_result = result
+
+        if status == "PASS":
+            return CaseResult(
+                contract.case_id, contract.skill, "PASS",
+                attempts=attempt, model=contract.model,
+                case_dir=str(case_dir),
+                duration_s=time.monotonic() - t0,
+                axis_detail=axis_detail,
+            )
+        if status == "NEEDS-REVIEW":
+            return CaseResult(
+                contract.case_id, contract.skill, "NEEDS-REVIEW",
+                attempts=attempt, model=contract.model,
+                case_dir=str(case_dir),
+                duration_s=time.monotonic() - t0,
+                detail=detail, axis_detail=axis_detail,
+                verdict_result=verdict_result,
+            )
+        # status == "FAIL"：第一次 attempt 直接 retry，第二次最终返回 FAIL
+        if attempt == 2:
+            return CaseResult(
+                contract.case_id, contract.skill, "FAIL",
+                attempts=attempt, attribution="unknown",
+                detail=detail, kept_dir=str(case_dir),
+                case_dir=str(case_dir),
+                duration_s=time.monotonic() - t0,
+                model=contract.model,
+                axis_detail=axis_detail,
+            )
+
+    raise AssertionError("unreachable")
+
+
+def _attempt(contract, golden, case_dir, base_env, models, binary):
+    """单次尝试，返回 (status, detail, axis_detail, verdict_result)。"""
+    case_dir = Path(case_dir)
+
+    # 步骤 1：隔离克隆
+    case_clone(golden, case_dir)
+    cwd = case_dir / contract.fixture
+    env = case_env(base_env, case_dir)
+
+    # 步骤 2：before 快照
+    before = snapshot(cwd)
+
+    # 步骤 3：触发 claude
+    prompt = contract.prompt or None
+    turns = contract.turns or None
+    if prompt and turns:
+        raise ValueError("contract has both prompt and turns")
+    if not prompt and not turns:
+        raise ValueError("contract has neither prompt nor turns")
+    res = trigger_run(
+        prompt=prompt,
+        turns=turns,
+        cwd=cwd,
+        log_dir=case_dir,
+        model=contract.model,    # 显式传 model（G5）
+        tools=contract.tools,
+        timeout=contract.timeout,
+        env=env,
+        claude_bin=binary,
+    )
+
+    # 步骤 4：after 快照 + delta
+    after = snapshot(cwd)
+    d = delta(before, after)
+
+    # 步骤 5：轴① 过程断言（硬）
+    proc_results = check_process(contract.process, res.trace_path)
+    proc_failed = [r for r in proc_results if not r.ok]
+
+    # 步骤 5：轴② 产物 delta 断言（硬）
+    fs_results = check_fs(contract.filesystem, d, cwd, contract.path.parent)
+    fs_failed = [r for r in fs_results if not r.ok]
+
+    axis_detail = {
+        "process": [{"type": r.type, "ok": r.ok, "detail": r.detail} for r in proc_results],
+        "filesystem": [{"type": r.type, "ok": r.ok, "detail": r.detail} for r in fs_results],
+        "delta": {k: sorted(v) for k, v in d.items()},
+    }
+
+    # 任一硬断言失败 → FAIL（确定性闸门）
+    if proc_failed or fs_failed:
+        fail_details = (
+            [f"process/{r.type}: {r.detail}" for r in proc_failed] +
+            [f"fs/{r.type}: {r.detail}" for r in fs_failed]
+        )
+        return "FAIL", "; ".join(fail_details), axis_detail, None
+
+    # 步骤 5：轴③ 语义 judge（软，仅 PASS 后运行）
+    if contract.semantic and models:
+        judge_name = models.get("semantic_judge", "single")
+        judge_setter, judge_model = _judge_role(models)
+        rubric_key = contract.semantic.get("rubric", "")
+        if not rubric_key:
+            axis_detail["semantic"] = {"error": "semantic.rubric missing"}
+            return "NEEDS-REVIEW", "semantic.rubric missing", axis_detail, None
+
+        # rubric 路径：相对 contract 所在目录
+        rubric = contract.path.parent / rubric_key
+        raw_inputs = contract.semantic.get("inputs", [])
+        inputs = _resolve_verdict_inputs(raw_inputs, case_dir, contract.fixture, d)
+
+        try:
+            judge = get_judge(judge_name)
+            status_j, verdict = judge.judge(
+                rubric=rubric,
+                inputs=inputs,
+                model=judge_model,
+                work_dir=case_dir,
+                env=env,
+                claude_bin=binary,
+            )
+        except NotImplementedError as e:
+            axis_detail["semantic"] = {"error": str(e)}
+            return "NEEDS-REVIEW", f"judge not implemented: {e}", axis_detail, None
+        except Exception as e:
+            axis_detail["semantic"] = {"error": str(e)}
+            return "NEEDS-REVIEW", f"judge error: {e}", axis_detail, None
+
+        axis_detail["semantic"] = verdict
+        if status_j != "PASS":
+            return "NEEDS-REVIEW", "semantic judge non-PASS", axis_detail, verdict
+
+    return "PASS", "", axis_detail, None
+
+
+def _judge_role(models: dict):
+    """从 models dict 取 default-judge 的 (setter, model)，无则用默认。"""
+    roles = models.get("roles", {})
+    role_cfg = roles.get("default-judge", {})
+    setter = role_cfg.get("setter", "")
+    model = role_cfg.get("model", "lingzhi/claude-opus-4-8")
+    return setter, model
+
+
+def _check_requires(requires: list) -> str | None:
+    """全部满足返回 None，否则返回第一条不满足原因。"""
+    import shutil as _shutil
+    for req in requires:
+        kind, _, val = req.partition(":")
+        if kind == "exclusive":
+            continue  # 由 scheduler 处理
+        if kind == "env" and not os.environ.get(val):
+            return f"env {val} unset"
+        if kind == "dir":
+            p = Path(os.path.expandvars(os.path.expanduser(val)))
+            if not p.is_dir():
+                return f"dir missing: {p}"
+        if kind == "cmd" and _shutil.which(val) is None:
+            return f"cmd missing: {val}"
+        if kind == "proc-free":
+            import subprocess as _sp
+            if _sp.run(["pgrep", "-f", val], capture_output=True).returncode == 0:
+                return f"process busy: {val}"
+    return None
+
+
+# ──────────────────────────────────────────────────
+# Git helpers
+# ──────────────────────────────────────────────────
 
 def git(repo, *args) -> str:
     return subprocess.run(["git", "-C", str(repo), *args],
@@ -36,76 +300,15 @@ def touched_plugins(repo: Path) -> set:
     return {p.split("/")[1] for p in diff.splitlines() if p.startswith("plugins/")}
 
 
-def sweep_setup(repo: Path, tmp: Path, plugins: set, claude_bin: str) -> Path:
-    """golden snapshot + 本地 marketplace 安装分支代码 + 冒烟。
-    每次 sweep 的 CLAUDE_CONFIG_DIR 都是 fresh mktemp 副本，marketplace add 不存在跨 sweep 幂等性问题。
-    """
-    golden = tmp / "golden"
-    for fx in sorted((repo / "tests/fixtures").iterdir()):
-        if fx.is_dir():
-            shutil.copytree(fx, golden / fx.name)
-    env = {**os.environ, "CLAUDE_CONFIG_DIR": str(golden / "claude-config")}
-
-    def cc(*args):
-        r = subprocess.run([claude_bin, *args], env=env, capture_output=True,
-                           text=True, timeout=300)
-        if r.returncode != 0:
-            sys.exit(f"ABORT sweep-setup: claude {' '.join(args)} failed:\n{r.stdout}{r.stderr}")
-
-    cc("plugin", "marketplace", "add", str(repo))
-    for p in sorted(plugins):
-        cc("plugin", "install", f"{p}@katana")
-    return golden
-
-
-def _resolve_verdict_inputs(raw_inputs, case_root, cwd) -> list:
-    """把 verdict.inputs 列表里的占位符替换成真实 Path。
-    支持：{cwd}→<case_root>/<cwd>，{case_log}→<case_root>/case.log，
-         {case_trace}→<case_root>/case.trace.jsonl。
-    """
-    out = []
-    for i in raw_inputs:
-        s = (str(i)
-             .replace("{cwd}", str(Path(case_root) / cwd))
-             .replace("{case_log}", str(Path(case_root) / "case.log"))
-             .replace("{case_trace}", str(Path(case_root) / "case.trace.jsonl")))
-        out.append(Path(s))
-    return out
-
-
-def build_base_env(no_ccs_check: bool) -> dict:
-    """harness 子进程基础环境覆盖层。
-    与 claude_cli.py 里 {**os.environ, **env} 合并后生效，故显式覆盖而非删键。
-    态卫生：
-      - KATANA_KB_ROOT=""  ：③ 后 local.zsh 导出真实 KB 路径，子进程继承会盖掉 fixture .katana；
-                             空字符串使 katana kb-root 解析视为未设，回落 fixture 的 .katana。
-      - KATANA_CONFIG_FILE=""：防真实 ~/.katana 经 env 被采纳。
-    HOME 隔离在 case.py 层（每 attempt 单独 mkdir），此处不注入。
-    """
-    env: dict = {}
-    if not no_ccs_check:
-        if not ccs_online():
-            sys.exit("ABORT: ccs (127.0.0.1:15721) offline — 绝不 fallback 直连")
-        env["ANTHROPIC_BASE_URL"] = f"http://{CCS_HOST}:{CCS_PORT}"
-        # claude CLI requires ANTHROPIC_API_KEY to use API-key mode (not OAuth).
-        # ccs does not validate incoming tokens; any non-empty string works.
-        # Caller may override via ANTHROPIC_AUTH_TOKEN env var.
-        env["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_AUTH_TOKEN", "ccs-local")
-    # 态卫生：显式覆盖为空，使宿主真实值在 {**os.environ, **env} 合并后失效。
-    env["KATANA_KB_ROOT"] = ""
-    env["KATANA_CONFIG_FILE"] = ""
-    # harness 流量恒过 ccs→lingzhi(Bedrock)，后端拒 Claude Code 实验 anthropic-beta header
-    # （stream-json 工具流式触发 fine-grained-tool-streaming beta → 400 invalid beta flag）。
-    # 与 set_claude_ccswitch_* setter 一致地关掉。2026-06-21 经 live 契约重跑确认。
-    env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
-    return env
-
+# ──────────────────────────────────────────────────
+# CLI main
+# ──────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="katana contract runner v2")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--touched", action="store_true")
-    ap.add_argument("--case", help="按 skill 或 case_id 过滤，如 wiki:query 或 query-hot")
+    ap.add_argument("--case", help="按 skill 或 case_id 过滤")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--repo", default=str(Path(__file__).resolve().parents[1]))
     ap.add_argument("--validate-only", action="store_true")
@@ -137,53 +340,47 @@ def main():
     claude_bin = os.environ.get("CLAUDE_BIN", "claude")
     base_env = build_base_env(args.no_ccs_check)
 
+    # 加载模型配置（tests/models.yaml）
+    try:
+        from harness.model import load_models
+        models = load_models(repo)
+    except Exception:
+        models = {"semantic_judge": "single", "roles": {}}
+
+    if args.skip_judge:
+        # skip-judge 模式下把 models 里 semantic_judge 标记清除（但不影响三轴①②）
+        models = dict(models)
+        models["_skip_judge"] = True
+
     t0 = time.monotonic()
     tmp = Path(tempfile.mkdtemp(prefix="katana-contracts."))
     plugins = {c.path.parts[-4] for c in contracts}
-    golden = sweep_setup(repo, tmp, plugins, claude_bin)
+
+    try:
+        golden = golden_setup(repo, tmp, plugins, claude_bin)
+    except SystemExit:
+        raise
 
     def make_job(c):
         def job():
-            r = run_case(c, golden, tmp / "cases", claude_bin=claude_bin,
-                         base_env=base_env)
-            # 契约断言通过后才跑 case verdict（assert-down：verdict 不替代 assert）
-            if r.status == "PASS" and c.verdict and not args.skip_judge:
-                rubric_key = c.verdict.get("rubric")
-                if not rubric_key:
-                    r.status = "NEEDS-REVIEW"
-                    r.verdict_result = {"error": "verdict.rubric missing in contract", "items": []}
-                    return r
-                rubric = repo / "tests/judge" / rubric_key
-                # 使用 r.case_dir 确保指向实际 PASS 的 attempt 目录（含重试场景）
-                case_root = Path(r.case_dir)
-                inputs = _resolve_verdict_inputs(
-                    c.verdict.get("inputs", []), case_root, c.cwd)
-                status, vr = run_case_verdict(rubric=rubric, inputs=inputs,
-                                              model=c.model, work_dir=tmp,
-                                              claude_bin=claude_bin, base_env=base_env)
-                if status != "PASS":
-                    r.status, r.verdict_result = "NEEDS-REVIEW", vr
-            return r
+            effective_models = {} if models.get("_skip_judge") else models
+            return run_case(c, golden, tmp / "cases",
+                            base_env=base_env, models=effective_models,
+                            claude_bin=claude_bin)
         job.requires = c.requires
         return job
 
     results = schedule([make_job(c) for c in contracts], jobs_n=args.jobs,
                        requires_of=lambda j: j.requires)
+
     branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     sha = git(repo, "rev-parse", "--short", "HEAD")
-    overall = ""
-    if not args.skip_judge:
-        index = "\n".join(str(p) for p in sorted((tmp / "cases").rglob("*"))[:400])
-        overall = run_overall_backstop(
-            rubric=repo / "tests/judge/overall-rubric.md",
-            report_md=render_report(results, branch=branch, sha=sha,
-                                    jobs=args.jobs, total_s=time.monotonic() - t0),
-            artifact_index=index, model=os.environ.get("KATANA_CONTRACT_MODEL") or "lingzhi/claude-opus-4-8",
-            work_dir=tmp, claude_bin=claude_bin, base_env=base_env)
+    total_s = time.monotonic() - t0
 
-    md = render_report(results, branch=branch, sha=sha, jobs=args.jobs,
-                       total_s=time.monotonic() - t0, overall_verdict=overall)
+    md = render_report(results, branch=branch, sha=sha,
+                       jobs=args.jobs, total_s=total_s)
     out = repo / "tests/reports" / f"{branch.replace('/', '-')}-{sha}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(md, encoding="utf-8")
     print(md)
     print(f"\nreport: {out}")
