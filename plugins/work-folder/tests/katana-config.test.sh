@@ -153,6 +153,27 @@ out_i="$(
 check "(i) stray cwd .katana NOT auto-discovered" "THE_DEFAULT" "$out_i"
 
 # ---------------------------------------------------------------------------
+# (j)-(m) CLI dispatch (run directly, not sourced): get/resolve/kb-root.
+#   Skill bodies invoke `bash katana-config.sh resolve <key>` at load-time to
+#   get a kb-root-absolute path (Claude Code dynamic injection). Sourcing must
+#   NOT trigger the dispatch.
+# ---------------------------------------------------------------------------
+cli_kb="$TMP/cli_kb"; mkdir -p "$cli_kb/.katana-writing"
+printf 'writing_dir=.katana-writing\n' > "$cli_kb/.katana"
+j_get="$(KATANA_CONFIG_FILE="$cli_kb/.katana" bash "$CONFIG_SH" get writing_dir '' KATANA_WRITING_DIR)"
+check "(j) CLI get returns raw value" ".katana-writing" "$j_get"
+k_res="$(KATANA_CONFIG_FILE="$cli_kb/.katana" KATANA_KB_ROOT="$cli_kb" bash "$CONFIG_SH" resolve writing_dir '' KATANA_WRITING_DIR)"
+check "(k) CLI resolve returns kb-root-absolute" "$cli_kb/.katana-writing" "$k_res"
+l_root="$(KATANA_KB_ROOT="$cli_kb" bash "$CONFIG_SH" kb-root)"
+check "(l) CLI kb-root echoes KB root" "$cli_kb" "$l_root"
+m_rc=0
+bash "$CONFIG_SH" bogus_subcmd >/dev/null 2>&1 || m_rc=$?
+check "(m) CLI unknown subcommand exits 2" "2" "$m_rc"
+# Sourcing must not auto-run the dispatch (would error/echo usage on no args).
+n_src="$(set -uo pipefail; . "$CONFIG_SH" 2>&1; printf 'SOURCED_CLEAN')"
+check "(n) sourcing does not trigger CLI dispatch" "SOURCED_CLEAN" "$n_src"
+
+# ---------------------------------------------------------------------------
 echo "-------------------------------------------"
 echo "katana-config: ${pass} passing, ${fail} failing"
 [ "$fail" -eq 0 ] || exit 1

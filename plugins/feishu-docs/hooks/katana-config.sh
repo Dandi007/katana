@@ -137,3 +137,18 @@ katana_resolve_path() {
             ;;
     esac
 }
+
+# CLI mode: when executed directly (not sourced), dispatch subcommands so skill
+# bodies can fetch config at invoke-time via  !`.../katana-config.sh <cmd> ...`
+# (Claude Code dynamic context injection). Sourced use (session-start) is
+# unaffected. `resolve` returns a kb-root-absolute path (use for KB-relative
+# path keys); `get` returns the raw configured value (back-compat, non-path
+# keys); `kb-root` echoes the KB root.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    case "${1:-}" in
+        get) shift; katana_config_get "$@" ;;
+        resolve) shift; katana_resolve_path "$(katana_config_get "$@")" ;;
+        kb-root) katana_kb_root ;;
+        *) echo "usage: katana-config.sh {get|resolve|kb-root} <key> [default] [env_var]" >&2; exit 2 ;;
+    esac
+fi
