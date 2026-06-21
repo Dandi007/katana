@@ -31,13 +31,15 @@ def _parse_vote(stream_stdout: str):
             continue
         if ev.get("type") == "result":
             result_text = ev.get("result", "") or ""
-    m = re.search(r"```json\s*(\{.*?\})\s*```", result_text, re.DOTALL)
-    if not m:
-        return None, result_text
-    try:
-        return json.loads(m.group(1)), result_text
-    except json.JSONDecodeError:
-        return None, result_text
+    blocks = re.findall(r"```json\s*(\{.*?\})\s*```", result_text, re.DOTALL)
+    for raw in reversed(blocks):
+        try:
+            parsed = json.loads(raw)
+            if "items" in parsed:
+                return parsed, result_text
+        except json.JSONDecodeError:
+            continue
+    return None, result_text
 
 
 def run_model(member: dict, prompt: str, out_dir: Path, timeout: int,

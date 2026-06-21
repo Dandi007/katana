@@ -3,3 +3,4 @@ plugins/memory/bin/
 .DS_Store
 __pycache__/
 *.pyc
+.jury/

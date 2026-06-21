@@ -2,10 +2,10 @@ skill: jury:review
 input:
   prompt: |
     在当前目录执行以下步骤（用 Bash）：
-    1. git init 一个临时 repo；写文件 calc.py 内含函数 add(a,b) 正确实现，git commit。
-    2. 改 calc.py：把 add 改成 `return a - b`（引入明显 bug），git commit。
-    3. 用 /jury:review 评审 HEAD~1..HEAD 的改动（base=HEAD~1）。
-    4. 读 .jury/jury-verdict.json，把 quorum 和 dissent 念给我。
+    1. 在当前目录下新建子目录 `scratch/`，在 scratch/ 里 git init；写文件 calc.py 内含函数 add(a,b) 正确实现，git commit。
+    2. 改 scratch/calc.py：把 add 改成 `return a - b`（引入明显 bug），git commit。
+    3. 在 scratch/ 目录内用 /jury:review 评审 HEAD~1..HEAD 的改动（base=HEAD~1）。
+    4. 读 scratch/.jury/jury-verdict.json，把 quorum 和 dissent 念给我。
   cwd: kb
 run:
   timeout: 1200
