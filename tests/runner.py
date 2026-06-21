@@ -82,11 +82,13 @@ def run_case(
     base_env: dict,
     models: dict,
     claude_bin: str | None = None,
+    skip_judge: bool = False,
 ) -> CaseResult:
     """六步编排：隔离→快照 before→触发→快照 after+delta→三轴→verdict + retry-once（infra flake）。
 
     硬 FAIL 只来自轴①②（确定性）；轴③语义失败→NEEDS-REVIEW（G1）。
     model 永远显式 --model（G5）。
+    skip_judge=True 时显式跳过轴③（--skip-judge / 非 semantic 契约路径）。
     """
     binary = claude_bin or os.environ.get("CLAUDE_BIN", "claude")
     t0 = time.monotonic()
@@ -102,7 +104,8 @@ def run_case(
         case_dir = Path(work_root) / f"{contract.case_id}{suffix}"
 
         try:
-            result = _attempt(contract, golden, case_dir, base_env, models, binary)
+            result = _attempt(contract, golden, case_dir, base_env, models, binary,
+                              skip_judge=skip_judge)
         except ClaudeTimeout as e:
             # infra flake：超时 retry-once
             if attempt == 1:
@@ -144,22 +147,21 @@ def run_case(
                 detail=detail, axis_detail=axis_detail,
                 verdict_result=verdict_result,
             )
-        # status == "FAIL"：第一次 attempt 直接 retry，第二次最终返回 FAIL
-        if attempt == 2:
-            return CaseResult(
-                contract.case_id, contract.skill, "FAIL",
-                attempts=attempt, attribution="unknown",
-                detail=detail, kept_dir=str(case_dir),
-                case_dir=str(case_dir),
-                duration_s=time.monotonic() - t0,
-                model=contract.model,
-                axis_detail=axis_detail,
-            )
+        # status == "FAIL"：轴①②确定性断言失败，立即返回，不重试（retry 只给 infra flake / ClaudeTimeout）
+        return CaseResult(
+            contract.case_id, contract.skill, "FAIL",
+            attempts=attempt, attribution="unknown",
+            detail=detail, kept_dir=str(case_dir),
+            case_dir=str(case_dir),
+            duration_s=time.monotonic() - t0,
+            model=contract.model,
+            axis_detail=axis_detail,
+        )
 
     raise AssertionError("unreachable")
 
 
-def _attempt(contract, golden, case_dir, base_env, models, binary):
+def _attempt(contract, golden, case_dir, base_env, models, binary, skip_judge: bool = False):
     """单次尝试，返回 (status, detail, axis_detail, verdict_result)。"""
     case_dir = Path(case_dir)
 
@@ -216,8 +218,8 @@ def _attempt(contract, golden, case_dir, base_env, models, binary):
         )
         return "FAIL", "; ".join(fail_details), axis_detail, None
 
-    # 步骤 5：轴③ 语义 judge（软，仅 PASS 后运行）
-    if contract.semantic and models:
+    # 步骤 5：轴③ 语义 judge（软，仅 PASS 后运行；skip_judge=True 时显式跳过）
+    if contract.semantic and not skip_judge and models.get("semantic_judge"):
         judge_name = models.get("semantic_judge", "single")
         judge_setter, judge_model = _judge_role(models)
         rubric_key = contract.semantic.get("rubric", "")
@@ -264,24 +266,28 @@ def _judge_role(models: dict):
 
 
 def _check_requires(requires: list) -> str | None:
-    """全部满足返回 None，否则返回第一条不满足原因。"""
+    """全部满足返回 None，否则返回第一条不满足原因。未知 kind 立即 raise（防 typo 假 PASS）。"""
     import shutil as _shutil
     for req in requires:
         kind, _, val = req.partition(":")
         if kind == "exclusive":
             continue  # 由 scheduler 处理
-        if kind == "env" and not os.environ.get(val):
-            return f"env {val} unset"
-        if kind == "dir":
+        elif kind == "env":
+            if not os.environ.get(val):
+                return f"env {val} unset"
+        elif kind == "dir":
             p = Path(os.path.expandvars(os.path.expanduser(val)))
             if not p.is_dir():
                 return f"dir missing: {p}"
-        if kind == "cmd" and _shutil.which(val) is None:
-            return f"cmd missing: {val}"
-        if kind == "proc-free":
+        elif kind == "cmd":
+            if _shutil.which(val) is None:
+                return f"cmd missing: {val}"
+        elif kind == "proc-free":
             import subprocess as _sp
             if _sp.run(["pgrep", "-f", val], capture_output=True).returncode == 0:
                 return f"process busy: {val}"
+        else:
+            raise ValueError(f"unknown requires kind: {kind!r}")
     return None
 
 
@@ -347,10 +353,7 @@ def main():
     except Exception:
         models = {"semantic_judge": "single", "roles": {}}
 
-    if args.skip_judge:
-        # skip-judge 模式下把 models 里 semantic_judge 标记清除（但不影响三轴①②）
-        models = dict(models)
-        models["_skip_judge"] = True
+    skip_judge = args.skip_judge  # 显式标志，直接传给 run_case（I2）
 
     t0 = time.monotonic()
     tmp = Path(tempfile.mkdtemp(prefix="katana-contracts."))
@@ -363,10 +366,9 @@ def main():
 
     def make_job(c):
         def job():
-            effective_models = {} if models.get("_skip_judge") else models
             return run_case(c, golden, tmp / "cases",
-                            base_env=base_env, models=effective_models,
-                            claude_bin=claude_bin)
+                            base_env=base_env, models=models,
+                            claude_bin=claude_bin, skip_judge=skip_judge)
         job.requires = c.requires
         return job
 

@@ -72,10 +72,9 @@ def test_check_requires_env_and_dir(tmp_path, monkeypatch):
 
 
 def test_unknown_requires_kind_raises(tmp_path):
-    """未知 requires kind 不 raise，仅跳过（v2 行为：_check_requires 不 raise 未知 kind）。"""
-    # v2 _check_requires 对未知 kind 静默跳过（与 v1 check_requires 不同）
-    result = _check_requires(["envv:TYPO"])
-    assert result is None   # 未知 kind 忽略，不报错
+    """未知 requires kind 必须 raise ValueError（防 typo 静默假 PASS）。"""
+    with pytest.raises(ValueError, match="unknown requires kind"):
+        _check_requires(["envv:TYPO"])
 
 
 # ──────────────────────────────────────────────────
@@ -103,9 +102,9 @@ def test_run_case_skip(tmp_path):
     assert r.status == "SKIP" and "nonexistent" in r.detail
 
 
-def test_run_case_retry_then_fail_keeps_dir(tmp_path, monkeypatch):
-    """断言失败 → retry → FAIL；kept_dir 存在。"""
-    # 契约要求 skill_loaded=absent-skill，fake-claude 只吐 fake-skill → FAIL
+def test_run_case_fail_no_retry_keeps_dir(tmp_path, monkeypatch):
+    """轴①断言失败 → 立即 FAIL（attempts==1，不重试）；kept_dir 存在。"""
+    # C1：轴①②FAIL 是确定性回归，不走 retry-once（retry 只给 ClaudeTimeout）
     body = """
 skill: demo:hello
 trigger:
@@ -120,7 +119,7 @@ expect:
     r = run_case(c, golden(tmp_path), tmp_path / "work",
                  base_env={}, models=EMPTY_MODELS, claude_bin=SHIM)
     assert r.status == "FAIL", r.detail
-    assert r.attempts == 2
+    assert r.attempts == 1   # C1: 轴①FAIL 不重试
     assert r.attribution == "unknown"
     assert Path(r.kept_dir).exists()
 

@@ -18,14 +18,20 @@ def _match(glob, names):
 
 def check_fs(asserts, delta, cwd, contract_dir):
     cwd, contract_dir = Path(cwd), Path(contract_dir)
-    # 累积所有 created/modified/deleted 声明的 glob，供 unchanged_outside 消费
-    # unchanged_outside 必须放断言列表最后，才能看到前面所有声明
+
+    # 第一遍：收集所有 created/modified/deleted 的 glob 进 declared
+    # 这样 unchanged_outside 无论放哪里都能看到完整的声明集合（m3）
     declared = set()
-    out = []
     for a in asserts:
         ((typ, val),) = a.items()
         if typ in ("created", "modified", "deleted"):
             declared.add(val)
+
+    # 第二遍：执行所有断言
+    out = []
+    for a in asserts:
+        ((typ, val),) = a.items()
+        if typ in ("created", "modified", "deleted"):
             hit = _match(val, delta[typ])
             out.append(Result(typ, bool(hit), "" if hit else f"no {typ} match: {val}"))
         elif typ == "content":

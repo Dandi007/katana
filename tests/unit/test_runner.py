@@ -16,7 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from harness.schema import load_contract
-from runner import CaseResult, run_case, _resolve_verdict_inputs
+from runner import CaseResult, run_case, _resolve_verdict_inputs, _check_requires
 
 SHIM = str(Path(__file__).parent / "fake-claude")
 EMPTY_MODELS = {}   # skip-judge 路径：无轴③
@@ -118,6 +118,7 @@ expect:
 
     assert r.status == "FAIL", f"expected FAIL, got {r.status}"
     assert "created" in r.detail or "fs/" in r.detail
+    assert r.attempts == 1  # I1: 轴②FAIL 不重试（防 C1 回退）
 
 
 def test_run_case_fails_when_skill_not_loaded(tmp_path):
@@ -144,7 +145,7 @@ expect:
     )
 
     assert r.status == "FAIL"
-    assert r.attempts == 2   # retry-once 后最终 FAIL
+    assert r.attempts == 1   # C1: 轴①FAIL 不重试，立即返回
 
 
 def test_run_case_skip_when_requires_not_met(tmp_path):
@@ -288,3 +289,13 @@ def test_resolve_verdict_inputs_mixed():
     assert "/c/case.trace.jsonl" in strs
     assert any("out.md" in s for s in strs)
     assert "/c/kb/notes.md" in strs
+
+
+# ──────────────────────────────────────────────────
+# C2：未知 requires kind 必须 raise
+# ──────────────────────────────────────────────────
+
+def test_unknown_requires_kind_raises():
+    """typo kind（如 envv:FOO）必须 raise ValueError，不能静默当满足条件（防假 PASS）。"""
+    with pytest.raises(ValueError, match="unknown requires kind"):
+        _check_requires(["envv:MY_VAR"])
