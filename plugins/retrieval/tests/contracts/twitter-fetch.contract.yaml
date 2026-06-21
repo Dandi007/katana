@@ -1,15 +1,19 @@
 skill: retrieval:twitter
-preconditions:
+setup:
+  fixture: kb
   requires:
     - "env:KATANA_E2E_NETWORK"
-input:
+trigger:
   prompt: |
     用 /retrieval:twitter 抓取 @jack 的第一条推文（tweet id 20，
-    内容为 "just setting up my twttr"），给出推文正文与可信度。
-  cwd: kb
-run:
+    内容为 "just setting up my twttr"），给出推文正文与可信度，
+    把结果写到 ./twitter-fetch-result.md。
+  tools: [Read, Grep, Glob, Bash, Write]
   timeout: 300
-  allowed_tools: [Read, Grep, Glob, Bash]
-assert:
-  - stdout_grep: "twttr|jack"
-  - stdout_grep: "high|medium|low"
+expect:
+  process:
+    - skill_loaded: retrieval:twitter
+  filesystem:
+    - created: "twitter-fetch-result.md"
+    - content: {path: "twitter-fetch-result.md", matches: "twttr|jack"}
+    - unchanged_outside: true

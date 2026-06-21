@@ -1,12 +1,13 @@
 skill: writing:readability-check
-input:
+setup:
+  fixture: kb
+trigger:
   prompt: "我想从库里几篇现有的好原子笔记冷启动出这个类型的 template 和 pattern。这个 skill 有没有对应的模式？它会产出哪两类首稿、落盘前要不要人工确认？"
-  cwd: kb
-assert:
-  - stdout_grep: "distill"
-  - stdout_grep: "template"
-  - stdout_grep: "pattern"
-  - stdout_grep: "确认"
-
-run:
-  no_tools: true
+  tools: []
+expect:
+  process:
+    - skill_loaded: writing:readability-check
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/writing-distill-mode.md
+    inputs:
+      - "{case_trace}"

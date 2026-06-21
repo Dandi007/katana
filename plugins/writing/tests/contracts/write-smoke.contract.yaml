@@ -1,10 +1,13 @@
 skill: writing:write
-input:
+setup:
+  fixture: kb
+trigger:
   prompt: "我要起草一篇 tech-spec。按这个 skill，在动笔写正文之前你的写前步骤有哪些、写完正文后要做什么？"
-  cwd: kb
-assert:
-  - stdout_grep: "patterns"
-  - stdout_grep: "自检"
-
-run:
-  no_tools: true
+  tools: []
+expect:
+  process:
+    - skill_loaded: writing:write
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/writing-write-smoke.md
+    inputs:
+      - "{case_trace}"

@@ -13,7 +13,7 @@ set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 VALIDATE="$PLUGIN_DIR/skills/fpa/scripts/validate_fpa.py"
-FPA_DIR="$KB_DIR/docs/fpa"
+FPA_DIR="$CWD/docs/fpa"
 
 # ── 1. validate_fpa.py 存在 ─────────────────────────────────────────────────
 if [ ! -f "$VALIDATE" ]; then

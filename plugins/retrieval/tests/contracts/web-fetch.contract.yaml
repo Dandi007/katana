@@ -1,15 +1,19 @@
 skill: retrieval:web
-preconditions:
+setup:
+  fixture: kb
   requires:
     - "env:KATANA_E2E_NETWORK"
-input:
+trigger:
   prompt: |
-    用 /retrieval:web 查 example.com 首页标题并给出来源与可信度。
-  cwd: kb
-run:
+    用 /retrieval:web 查 example.com 首页标题并给出来源与可信度，
+    把结果写到 ./web-fetch-result.md。
+  tools: [Read, Grep, Glob, Bash, Write]
   timeout: 300
-  allowed_tools: [Read, Grep, Glob, Bash]
-assert:
-  - stdout_grep: "Example Domain"
-  - stdout_grep: "example\\.com"
-  - stdout_grep: "high|medium|low"
+expect:
+  process:
+    - skill_loaded: retrieval:web
+  filesystem:
+    - created: "web-fetch-result.md"
+    - content: {path: "web-fetch-result.md", matches: "Example Domain"}
+    - content: {path: "web-fetch-result.md", matches: "example\\.com"}
+    - unchanged_outside: true

@@ -1,10 +1,22 @@
-"""Prompt 验收两层：case verdict（难契约 skill）+ overall backstop（sweep 级）。
-judge 未经 meta-eval 校准：任何 no / 解析失败 → NEEDS-REVIEW，绝不直接 FAIL。"""
+"""轴③ 可插拔 judge。
+
+SingleJudge（默认）：rubric+inputs → fenced json → 任何非 yes = NEEDS-REVIEW。
+JuryJudge：stub，后续 MR 接入 jury plugin。
+
+用法：
+    judge = get_judge("single")
+    status, verdict = judge.judge(rubric, inputs, model, work_dir, env, claude_bin)
+"""
 import json
 import re
 from pathlib import Path
-from .claude_cli import run_claude
 
+from . import trigger
+
+
+# ──────────────────────────────────────────────────
+# 公共工具：fenced json 解析
+# ──────────────────────────────────────────────────
 
 def parse_verdict_json(text: str) -> dict:
     """从文本中提取 fenced json 格式的 verdict。"""
@@ -13,6 +25,81 @@ def parse_verdict_json(text: str) -> dict:
         raise ValueError("no fenced json in judge output")
     return json.loads(m.group(1))
 
+
+# ──────────────────────────────────────────────────
+# Judge 协议（duck typing，不强迫继承）
+# ──────────────────────────────────────────────────
+
+class SingleJudge:
+    """单模型 judge：搬旧 run_case_verdict 逻辑，改走 trigger.run。"""
+
+    def judge(
+        self,
+        rubric,
+        inputs: list,
+        model: str,
+        work_dir,
+        env: dict,
+        claude_bin=None,
+    ) -> tuple[str, dict]:
+        """
+        运行 case-level verdict：读 rubric 与产物，返回 (status, verdict_dict)。
+
+        Status:
+        - PASS: 所有项都是 yes
+        - NEEDS-REVIEW: 任何项是 no 或解析/执行失败
+
+        Verdict dict 包含 items（裁决项）与可选 error（解析失败时）。
+        """
+        rubric = Path(rubric)
+        work_dir = Path(work_dir)
+        try:
+            prompt = _judge_prompt(rubric, inputs)
+            res = trigger.run(
+                prompt=prompt,
+                cwd=work_dir,
+                log_dir=work_dir,
+                model=model,
+                tools=["Read"],
+                timeout=300,
+                env=env or {},
+                claude_bin=claude_bin,
+            )
+            verdict = parse_verdict_json(res.result_text)
+        except Exception as e:
+            return "NEEDS-REVIEW", {"error": f"judge parse/run failed: {e}", "items": []}
+
+        bad = [i for i in verdict.get("items", []) if i.get("answer") != "yes"]
+        return ("NEEDS-REVIEW" if bad else "PASS"), verdict
+
+
+class JuryJudge:
+    """Jury 多模型 judge（接缝 stub，后续 MR 接入 jury plugin）。"""
+
+    def judge(self, *args, **kwargs):
+        raise NotImplementedError("jury adapter: 后续 MR")
+
+
+# ──────────────────────────────────────────────────
+# Registry
+# ──────────────────────────────────────────────────
+
+_REGISTRY: dict[str, object] = {
+    "single": SingleJudge(),
+    "jury": JuryJudge(),
+}
+
+
+def get_judge(name: str):
+    """按名称查 judge 实例。未知名报错。"""
+    if name not in _REGISTRY:
+        raise KeyError(f"unknown judge: {name!r}. available: {list(_REGISTRY)}")
+    return _REGISTRY[name]
+
+
+# ──────────────────────────────────────────────────
+# 内部工具
+# ──────────────────────────────────────────────────
 
 def _judge_prompt(rubric: Path, inputs: list) -> str:
     """构造 judge prompt：rubric + 输入文件内容。"""
@@ -28,76 +115,25 @@ def _judge_prompt(rubric: Path, inputs: list) -> str:
     return "\n".join(parts)
 
 
+# ──────────────────────────────────────────────────
+# 向后兼容：保留旧顶层函数（旧测试可继续 import）
+# ──────────────────────────────────────────────────
+
 def run_case_verdict(
     *,
-    rubric: Path,
+    rubric,
     inputs: list,
     model: str,
-    work_dir: Path,
+    work_dir,
     claude_bin=None,
     base_env=None,
 ) -> tuple[str, dict]:
-    """
-    运行 case-level verdict：读 rubric 与产物，返回 (status, verdict_dict)。
-
-    Status:
-    - PASS: 所有项都是 yes
-    - NEEDS-REVIEW: 任何项是 no 或解析/执行失败
-
-    Verdict dict 包含 items（裁决项）与可选 error（解析失败时）。
-    """
-    try:
-        res = run_claude(
-            prompt=_judge_prompt(Path(rubric), inputs),
-            cwd=work_dir,
-            log_path=Path(work_dir) / "judge.log",
-            model=model,
-            permission_mode="default",
-            allowed_tools=["Read"],
-            timeout=300,
-            env=base_env or {},
-            claude_bin=claude_bin,
-        )
-        verdict = parse_verdict_json(res.stdout)
-    except Exception as e:
-        return "NEEDS-REVIEW", {"error": f"judge parse/run failed: {e}", "items": []}
-
-    bad = [i for i in verdict.get("items", []) if i.get("answer") != "yes"]
-    return ("NEEDS-REVIEW" if bad else "PASS"), verdict
-
-
-def run_overall_backstop(
-    *,
-    rubric: Path,
-    report_md: str,
-    artifact_index: str,
-    model: str,
-    work_dir: Path,
-    claude_bin=None,
-    base_env=None,
-) -> str:
-    """
-    运行 sweep-level overall backstop：读全量报告与产物索引，返回原始文本响应。
-
-    失败时返回带下划线的错误消息（便于测试与日志混合）。
-    """
-    prompt = (
-        f"{Path(rubric).read_text(encoding='utf-8')}\n\n"
-        f"## Sweep Report\n````\n{report_md[:40000]}\n````\n"
-        f"## Artifact Index\n````\n{artifact_index[:10000]}\n````"
+    """旧顶层函数，委托给 SingleJudge（向后兼容）。"""
+    return get_judge("single").judge(
+        rubric=rubric,
+        inputs=inputs,
+        model=model,
+        work_dir=work_dir,
+        env=base_env or {},
+        claude_bin=claude_bin,
     )
-    try:
-        res = run_claude(
-            prompt=prompt,
-            cwd=work_dir,
-            log_path=Path(work_dir) / "overall-judge.log",
-            model=model,
-            permission_mode="default",
-            allowed_tools=["Read"],
-            timeout=600,
-            env=base_env or {},
-            claude_bin=claude_bin,
-        )
-        return res.stdout.strip()
-    except Exception as e:
-        return f"_(overall backstop failed: {e})_"

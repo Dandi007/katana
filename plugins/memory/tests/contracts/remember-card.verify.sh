@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Verify that a NEW memory card containing "92" was written to $KB_DIR/memory/,
+# Verify that a NEW memory card containing "92" was written to $CWD/memory/,
 # excluding the two pre-existing fixture cards.
 set -euo pipefail
 
-MEMORY_DIR="$KB_DIR/memory"
+MEMORY_DIR="$CWD/memory"
 
 # Find cards that contain "92" but are NOT the two pre-seeded fixture cards
 new_card=$(grep -rl "92" "$MEMORY_DIR" \

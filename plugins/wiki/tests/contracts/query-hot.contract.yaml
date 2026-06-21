@@ -1,8 +1,19 @@
 skill: wiki:query
-input:
-  prompt: "用 /wiki:query 回答：手冲咖啡的推荐萃取水温和粉水比是多少？"
-  cwd: kb
-assert:
-  - stdout_grep: "90"
-  - stdout_grep: "1:15"
-  - stdout_grep: "\\[\\[.*\\]\\]"
+setup:
+  fixture: kb
+trigger:
+  prompt: "用 /wiki:query 回答：手冲咖啡的推荐萃取水温和粉水比是多少？把回答写到 answer.md。"
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
+expect:
+  process:
+    - skill_loaded: wiki:query
+  filesystem:
+    - created: "answer.md"
+    - content: {path: "answer.md", matches: "90"}
+    - content: {path: "answer.md", matches: "1:15"}
+    - content: {path: "answer.md", matches: "\\[\\[.*\\]\\]"}
+    - unchanged_outside: true
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/wiki-query-hot.md
+    inputs:
+      - "{created:answer.md}"

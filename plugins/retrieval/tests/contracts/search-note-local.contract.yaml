@@ -1,11 +1,17 @@
 skill: retrieval:search-note
-input:
-  prompt: |
-    用 /retrieval:search-note 在当前知识库搜「意式浓缩 温度」，列出命中笔记。
-  cwd: kb
-run:
-  timeout: 180
-  allowed_tools: [Read, Grep, Glob, Bash]
-assert:
-  - stdout_grep: "意式浓缩温度-A"
-  - stdout_grep: "意式浓缩温度-B"
+setup:
+  fixture: kb
+  requires: [cmd:claude]
+trigger:
+  prompt: "用 /retrieval:search-note 在当前知识库搜「意式浓缩 温度」，把命中笔记名逐行写到 ./search-result.md。"
+  tools: [Read, Grep, Glob, Bash, Write]
+expect:
+  process:
+    - skill_loaded: retrieval:search-note
+  filesystem:
+    - created: "search-result.md"
+    - unchanged_outside: true
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/search-note.md
+    inputs:
+      - "{created:search-result.md}"

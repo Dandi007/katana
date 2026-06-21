@@ -1,10 +1,13 @@
 skill: writing:readability-check
-input:
+setup:
+  fixture: kb
+trigger:
   prompt: "用 readability-check 检查一份文档时分哪几趟检查？冷读这一趟必须用什么来执行、为什么主 agent 不能自己冷读？"
-  cwd: kb
-assert:
-  - stdout_grep: "冷读"
-  - stdout_grep: "subagent"
-
-run:
-  no_tools: true
+  tools: []
+expect:
+  process:
+    - skill_loaded: writing:readability-check
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/writing-readability-check-workflow.md
+    inputs:
+      - "{case_trace}"

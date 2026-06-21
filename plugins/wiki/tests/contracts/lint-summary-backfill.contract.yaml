@@ -1,9 +1,23 @@
 skill: wiki:lint
-input:
+setup:
+  fixture: kb-summary
+trigger:
   prompt: "用 /wiki:lint 对本库做一次摘要 backfill：给所有缺 摘要 frontmatter 的页补上一行 摘要，不要改正文。本次提案视为已批准，直接写入。"
-  cwd: kb-summary
-assert:
-  - script: scripts/check-summary-backfill.sh
-verdict:
-  rubric: case-rubrics/wiki-lint-summary.md
-  inputs: ["{cwd}/笔记/手冲咖啡萃取.md", "{cwd}/笔记/咖啡豆烘焙度.md"]
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
+expect:
+  process:
+    - skill_loaded: wiki:lint
+  filesystem:
+    - modified: "笔记/手冲咖啡萃取.md"
+    - modified: "笔记/咖啡豆烘焙度.md"
+    - script: scripts/check-summary-backfill.sh
+    - allowed: "笔记/*.md"
+    - allowed: ".wiki/lint/*.md"
+    - allowed: "wiki-log.md"
+    - allowed: "log.md"
+    - unchanged_outside: true
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/wiki-lint-summary.md
+    inputs:
+      - "{created:笔记/手冲咖啡萃取.md}"
+      - "{created:笔记/咖啡豆烘焙度.md}"

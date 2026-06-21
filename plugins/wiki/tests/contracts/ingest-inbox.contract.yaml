@@ -1,11 +1,18 @@
 skill: wiki:ingest
-input:
-  prompt: |
-    用 /wiki:ingest 处理 inbox/cold-brew-source.md。本次提案视为已批准（预授权）。
-  cwd: kb
-assert:
-  - file_exists: "{cwd}/笔记/*冷萃*"
-  - file_grep: {path: "{cwd}/笔记/INDEX.md", pattern: "冷萃"}
-  - file_absent: "{cwd}/inbox/cold-brew-source.md"
-  - file_exists: "{cwd}/raw/cold-brew-source*"
-  - file_grep: {path: "{cwd}/wiki-log.md", pattern: "冷萃|ingest"}
+setup:
+  fixture: kb
+trigger:
+  prompt: "用 /wiki:ingest 处理 inbox/cold-brew-source.md。本次提案视为已批准。"
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
+expect:
+  process:
+    - skill_loaded: wiki:ingest
+  filesystem:
+    - created: "笔记/*冷萃*"
+    - created: "raw/cold-brew-source*"
+    - deleted: "inbox/cold-brew-source.md"
+    - modified: "笔记/INDEX.md"
+    - content: {path: "笔记/INDEX.md", matches: "冷萃"}
+    - modified: "wiki-log.md"
+    - allowed: "笔记/*.md"
+    - unchanged_outside: true

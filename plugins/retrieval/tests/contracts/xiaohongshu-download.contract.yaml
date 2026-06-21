@@ -1,19 +1,26 @@
 skill: retrieval:xiaohongshu
-preconditions:
+setup:
+  fixture: kb
   requires:
     - "dir:$KATANA_TEST_XHS_PROFILE"
     - "exclusive:chrome-profile"
-input:
+trigger:
   prompt: |
     使用 /retrieval:xiaohongshu skill：搜索关键词「盒马 快手菜」，
     取赞数最高的 1 篇笔记抓取详情与评论，按 skill 落盘格式下载到当前目录
     （本次 xiaohongshu_raw_dir 视为当前目录）。完成后输出落盘文件清单。
-  cwd: kb
-run:
+  tools:
+    - Read
+    - Write
+    - Edit
+    - "mcp__playwright__browser_navigate"
+    - "mcp__playwright__browser_evaluate"
+    - "mcp__playwright__browser_wait_for"
+    - "mcp__playwright__browser_snapshot"
   timeout: 900
-  allowed_tools: [Read, Write, Edit,
-    "mcp__playwright__browser_navigate", "mcp__playwright__browser_evaluate",
-    "mcp__playwright__browser_wait_for", "mcp__playwright__browser_snapshot"]
-assert:
-  - file_exists: "{cwd}/小红书-*/index.md"
-  - script: xiaohongshu-download.verify.sh
+expect:
+  process:
+    - skill_loaded: retrieval:xiaohongshu
+  filesystem:
+    - created: "小红书-*/index.md"
+    - script: xiaohongshu-download.verify.sh
