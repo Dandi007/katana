@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# 模拟 claude -p --output-format stream-json --verbose：吐合法 stream-json 但 result 只有散文，无 fenced json。
+cat >/dev/null
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"looks fine to me"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","result":"just prose, no json block","session_id":"fake"}'

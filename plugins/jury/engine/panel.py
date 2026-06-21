@@ -109,8 +109,9 @@ def fanout(prompt: str, out_dir: Path, roster: list, timeout: int,
     verdict = {**tally, "quorum": quorum,
                "ran": [r["name"] for r in ran]}
     (out_dir / "panel-meta.json").write_text(
-        json.dumps([{k: r[k] for k in ("name", "setter", "base_url_used",
-                     "model_string", "exit", "trace_path")} for r in members],
+        json.dumps([{**{k: r[k] for k in ("name", "setter", "base_url_used",
+                     "model_string", "exit", "trace_path")},
+                     "vote_parsed": r.get("vote") is not None} for r in members],
                    ensure_ascii=False, indent=2), encoding="utf-8")
     (out_dir / "jury-verdict.json").write_text(
         json.dumps(verdict, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -119,7 +120,7 @@ def fanout(prompt: str, out_dir: Path, roster: list, timeout: int,
         report.append(f"\n## {r['name']} (`{r['setter']}`, exit={r['exit']})\n")
         report.append(r.get("prose") or "_(无输出)_")
     (out_dir / "jury-report.md").write_text("\n".join(report), encoding="utf-8")
-    return {"members": members, "quorum": quorum, **tally}
+    return {"members": members, "quorum": quorum, "ran": [r["name"] for r in ran], **tally}
 
 
 def main():

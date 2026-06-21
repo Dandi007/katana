@@ -47,10 +47,11 @@ def test_fanout_emits_three_artifacts_and_meta(tmp_path):
 
 def test_fanout_partial_quorum_when_a_model_dies(tmp_path, monkeypatch):
     os.environ["JURY_CLAUDE_BIN"] = FAKE
+    _real_run_model = panel.run_model  # 先保存，避免 monkeypatch 后递归
     def flaky(member, *a, **k):
         if member["name"] == "gpt":
             raise RuntimeError("boom")
-        return panel.run_model(member, *a, **k)
+        return _real_run_model(member, *a, **k)
     monkeypatch.setattr(panel, "run_model", flaky)
     out = tmp_path / "out"; out.mkdir()
     summary = panel.fanout("x", out, panel.DEFAULT_ROSTER, 60, _profile(tmp_path))
@@ -58,3 +59,23 @@ def test_fanout_partial_quorum_when_a_model_dies(tmp_path, monkeypatch):
     meta = json.loads((out / "panel-meta.json").read_text())
     gpt = next(m for m in meta if m["name"] == "gpt")
     assert gpt["exit"] != 0
+    # I2: 幸存者真的成功了
+    assert len(summary["ran"]) == 3
+    assert "gpt" not in summary["ran"]
+
+
+def test_fanout_marks_unparseable_vote(tmp_path):
+    FAKE_NO_VOTE = str(Path(__file__).resolve().parent / "fake-claude-noVote")
+    os.environ["JURY_CLAUDE_BIN"] = FAKE_NO_VOTE
+    roster = [{"name": "opus", "setter": "set_claude_native_opus", "model": "opus"}]
+    out = tmp_path / "out"; out.mkdir()
+    summary = panel.fanout("review this", out, roster, 60, _profile(tmp_path))
+    # run_model 层：vote is None
+    assert summary["members"][0]["vote"] is None
+    # quorum partial（只有 1 个模型且没产出投票）
+    assert summary["quorum"] == "partial"
+    # panel-meta.json：vote_parsed=False 但 exit==0
+    meta = json.loads((out / "panel-meta.json").read_text())
+    opus_meta = next(m for m in meta if m["name"] == "opus")
+    assert opus_meta["vote_parsed"] is False
+    assert opus_meta["exit"] == 0
