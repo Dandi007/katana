@@ -74,7 +74,8 @@ def _attempt(contract: Contract, golden: Path, case_dir: Path,
             allowed_tools=contract.allowed_tools, no_tools=contract.no_tools, timeout=contract.timeout,
             env=env, claude_bin=claude_bin)
     ctx = Ctx(cwd=kb_cwd, stdout=res.stdout, case_log=log,
-              contract_dir=contract.path.parent)
+              contract_dir=contract.path.parent,
+              trace_path=getattr(res, "trace_path", None))
     return run_asserts(contract.asserts, ctx), ctx
 
 def run_case(contract: Contract, golden: Path, work_root: Path,

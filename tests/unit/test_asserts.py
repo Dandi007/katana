@@ -81,3 +81,32 @@ def test_script_env_isolated(tmp_path):
     s = tmp_path / "env.sh"
     s.write_text("#!/bin/bash\n[ -z \"${HOME:-}\" ]\n")
     assert run_asserts([{"script": "env.sh"}], c)[0].ok
+
+
+def test_trace_skill_loaded_and_tool_used(tmp_path):
+    from harness.asserts import Ctx, run_asserts
+    trace_file = tmp_path / "case.trace.jsonl"
+    trace_file.write_text('\n'.join([
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"command":"jury:review"}}]}}',
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"panel.py"}}]}}',
+    ]))
+    ctx_ = Ctx(cwd=tmp_path, stdout="", case_log=tmp_path / "l", contract_dir=tmp_path,
+               trace_path=trace_file)
+    res = run_asserts([
+        {"trace_skill_loaded": "jury:review"},
+        {"trace_tool_used": "Bash"},
+        {"trace_tool_absent": "WebFetch"},
+        {"trace_tool_count": {"tool": "Bash", "eq": 1}},
+        {"trace_grep": "panel\\.py"},
+    ], ctx_)
+    assert all(r.ok for r in res), [vars(r) for r in res]
+
+
+def test_trace_skill_loaded_fails_when_absent(tmp_path):
+    from harness.asserts import Ctx, run_asserts
+    trace_file = tmp_path / "case.trace.jsonl"
+    trace_file.write_text('{"type":"result","result":"x"}')
+    ctx_ = Ctx(cwd=tmp_path, stdout="", case_log=tmp_path / "l", contract_dir=tmp_path,
+               trace_path=trace_file)
+    res = run_asserts([{"trace_skill_loaded": "jury:review"}], ctx_)
+    assert not res[0].ok
