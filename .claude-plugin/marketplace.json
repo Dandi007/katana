@@ -81,6 +81,13 @@
       "category": "productivity",
       "source": "./plugins/writing",
       "homepage": "https://github.com/Dandi007/katana"
+    },
+    {
+      "name": "jury",
+      "description": "Multi-model review jury — parallel diverse-model review with divergence-preserving vote",
+      "category": "productivity",
+      "source": "./plugins/jury",
+      "homepage": "https://github.com/Dandi007/katana"
     }
   ]
 }
