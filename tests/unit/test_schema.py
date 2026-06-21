@@ -43,3 +43,42 @@ trigger: {prompt: p, model: lingzhi/claude-opus-4-8}
 expect: {filesystem: [{created: a}]}
 """))
     assert c.model == "lingzhi/claude-opus-4-8"
+
+
+def test_invariant_only_allowed_unchanged_fails(tmp_path):
+    """只有 allowed+unchanged_outside（无 created/modified/deleted/content/script/process）→ ContractError。"""
+    with pytest.raises(ContractError, match="invariant"):
+        load_contract(_w(tmp_path, """
+skill: x:y
+trigger: {prompt: p}
+expect:
+  filesystem:
+    - allowed: "*.md"
+    - unchanged_outside: true
+"""))
+
+
+def test_invariant_hard_fs_anchor_passes(tmp_path):
+    """有 created 锚 → 合法（不违反不变量）。"""
+    c = load_contract(_w(tmp_path, """
+skill: x:y
+trigger: {prompt: p}
+expect:
+  filesystem:
+    - created: out.md
+    - allowed: "*.log"
+    - unchanged_outside: true
+"""))
+    assert c.skill == "x:y"
+
+
+def test_invariant_process_anchor_passes(tmp_path):
+    """只有 process 断言（无 filesystem）→ 合法。"""
+    c = load_contract(_w(tmp_path, """
+skill: x:y
+trigger: {prompt: p}
+expect:
+  process:
+    - skill_loaded: x:y
+"""))
+    assert c.skill == "x:y"

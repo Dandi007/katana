@@ -292,6 +292,91 @@ def test_resolve_verdict_inputs_mixed():
 
 
 # ──────────────────────────────────────────────────
+# Important#1 新增：{created:<glob>} / {result_text} / dict-form inputs
+# ──────────────────────────────────────────────────
+
+def test_resolve_verdict_inputs_created_glob_matches(tmp_path):
+    """{created:foo.md} 解析到 delta.created 里的 foo.md。"""
+    delta_info = {
+        "created": {"foo.md", "bar.md"},
+        "modified": set(),
+        "deleted": set(),
+    }
+    paths = _resolve_verdict_inputs(
+        ["{created:foo.md}"],
+        Path("/case"),
+        "kb",
+        delta_info,
+    )
+    assert len(paths) == 1
+    assert str(paths[0]) == "/case/kb/foo.md"
+
+
+def test_resolve_verdict_inputs_created_glob_no_match():
+    """{created:missing.md} 无匹配时返回空列表（不留字面字符串）。"""
+    delta_info = {
+        "created": {"other.md"},
+        "modified": set(),
+        "deleted": set(),
+    }
+    paths = _resolve_verdict_inputs(
+        ["{created:missing.md}"],
+        Path("/case"),
+        "kb",
+        delta_info,
+    )
+    assert paths == []
+
+
+def test_resolve_verdict_inputs_created_glob_pattern(tmp_path):
+    """{created:lint-*.md} glob 匹配 delta.created 里的文件，取第一个（排序后）。"""
+    delta_info = {
+        "created": {"lint-report.md", "lint-summary.md", "other.txt"},
+        "modified": set(),
+        "deleted": set(),
+    }
+    paths = _resolve_verdict_inputs(
+        ["{created:lint-*.md}"],
+        Path("/case"),
+        "kb",
+        delta_info,
+    )
+    assert len(paths) == 1
+    # 排序后取第一个：lint-report.md
+    assert str(paths[0]) == "/case/kb/lint-report.md"
+
+
+def test_resolve_verdict_inputs_result_text(tmp_path):
+    """{result_text} 解析为含 result_text 文本的临时文件 Path。"""
+    paths = _resolve_verdict_inputs(
+        ["{result_text}"],
+        tmp_path,
+        "kb",
+        result_text="agent said hello",
+    )
+    assert len(paths) == 1
+    p = paths[0]
+    assert p.exists()
+    assert "agent said hello" in p.read_text(encoding="utf-8")
+
+
+def test_resolve_verdict_inputs_dict_form(tmp_path):
+    """dict-form inputs（如 route-three-queries）：按 value 逐个 resolve。"""
+    delta_info = {"created": set(), "modified": set(), "deleted": set()}
+    paths = _resolve_verdict_inputs(
+        {"answer": "{result_text}"},
+        tmp_path,
+        "kb",
+        delta_info,
+        result_text="routed to reddit",
+    )
+    assert len(paths) == 1
+    p = paths[0]
+    assert p.exists()
+    assert "routed to reddit" in p.read_text(encoding="utf-8")
+
+
+# ──────────────────────────────────────────────────
 # C2：未知 requires kind 必须 raise
 # ──────────────────────────────────────────────────
 

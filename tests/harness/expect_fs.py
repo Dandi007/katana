@@ -38,9 +38,15 @@ def check_fs(asserts, delta, cwd, contract_dir):
             hit = _match(val, delta[typ])
             out.append(Result(typ, bool(hit), "" if hit else f"no {typ} match: {val}"))
         elif typ == "content":
-            p = cwd / val["path"]
+            rel = val["path"]
+            # content 必须 ∈ delta.created ∪ delta.modified（真正的"本次产物"断言）
+            in_delta = rel in delta.get("created", set()) or rel in delta.get("modified", set())
+            if not in_delta:
+                out.append(Result(typ, False, f"content path not in delta: {rel}"))
+                continue
+            p = cwd / rel
             ok = p.exists() and re.search(val["matches"], p.read_text(encoding="utf-8"), re.M)
-            out.append(Result(typ, bool(ok), "" if ok else f"{val['path']} !~ {val['matches']}"))
+            out.append(Result(typ, bool(ok), "" if ok else f"{rel} !~ {val['matches']}"))
         elif typ == "unchanged_outside":
             changed = delta["created"] | delta["modified"] | delta["deleted"]
             stray = [c for c in changed if not any(fnmatch.fnmatch(c, g) for g in declared)]

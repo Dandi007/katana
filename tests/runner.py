@@ -46,24 +46,66 @@ class CaseResult:
 # 占位符解析
 # ──────────────────────────────────────────────────
 
-def _resolve_verdict_inputs(raw_inputs, case_root, cwd, delta_info=None) -> list:
-    """把 semantic.inputs 列表里的占位符替换成真实 Path。
+def _resolve_verdict_inputs(raw_inputs, case_root, cwd, delta_info=None,
+                            result_text: str = "") -> list:
+    """把 semantic.inputs 列表/dict 里的占位符替换成真实 Path。
+
+    支持 list 形式（常规）和 dict 形式（key=标签，value=占位符字符串）。
 
     占位符：
-      {case_trace}  → case_root/case.trace.jsonl
-      {cwd}         → case_root/<cwd>
-      {case_log}    → case_root/case.log
-      created       → delta_info["created"] 里所有文件的路径列表
+      {case_trace}      → case_root/case.trace.jsonl
+      {cwd}             → case_root/<cwd>
+      {case_log}        → case_root/case.log
+      {result_text}     → case_root/result_text.txt（含 result_text 文本的临时文件）
+      {created:<glob>}  → delta.created 里 fnmatch 匹配 <glob> 的第一个文件
+      created           → delta_info["created"] 里所有文件的路径列表（展开）
     """
+    # 若 inputs 是 dict（如 route-three-queries），把 value 列表化处理
+    if isinstance(raw_inputs, dict):
+        items = list(raw_inputs.values())
+    else:
+        items = list(raw_inputs)
+
+    # result_text 写临时文件（懒写：只在有占位符时写）
+    _result_text_path: Path | None = None
+
+    def _get_result_text_path() -> Path:
+        nonlocal _result_text_path
+        if _result_text_path is None:
+            p = Path(case_root) / "result_text.txt"
+            p.write_text(result_text or "", encoding="utf-8")
+            _result_text_path = p
+        return _result_text_path
+
     out = []
-    for i in raw_inputs:
+    for i in items:
         if i == "created":
             # 展开 delta.created 里所有文件；无 delta 信息时跳过（不留字面 "created"）
             if delta_info is not None:
                 for rel in sorted(delta_info.get("created", [])):
                     out.append(Path(case_root) / cwd / rel)
             continue
-        s = (str(i)
+        s = str(i)
+        # {created:<glob>}：在 delta.created 里 fnmatch 匹配，取第一个
+        import fnmatch as _fnmatch, re as _re
+        m = _re.match(r'^\{created:(.+?)\}$', s)
+        if m:
+            glob_pat = m.group(1)
+            if delta_info is not None:
+                matches = sorted(
+                    rel for rel in delta_info.get("created", [])
+                    if _fnmatch.fnmatch(rel, glob_pat)
+                )
+                if matches:
+                    out.append(Path(case_root) / cwd / matches[0])
+                # 无匹配时跳过（让 judge 感知缺失，而不是传字面字符串）
+            continue
+        # {result_text}：写临时文件返回 Path
+        if "{result_text}" in s:
+            s = s.replace("{result_text}", str(_get_result_text_path()))
+            out.append(Path(s))
+            continue
+        s = (s
              .replace("{case_trace}", str(Path(case_root) / "case.trace.jsonl"))
              .replace("{cwd}", str(Path(case_root) / cwd))
              .replace("{case_log}", str(Path(case_root) / "case.log")))
@@ -230,7 +272,8 @@ def _attempt(contract, golden, case_dir, base_env, models, binary, skip_judge: b
         # rubric 路径：相对 contract 所在目录
         rubric = contract.path.parent / rubric_key
         raw_inputs = contract.semantic.get("inputs", [])
-        inputs = _resolve_verdict_inputs(raw_inputs, case_dir, contract.fixture, d)
+        inputs = _resolve_verdict_inputs(raw_inputs, case_dir, contract.fixture, d,
+                                         result_text=res.result_text)
 
         try:
             judge = get_judge(judge_name)

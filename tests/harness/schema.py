@@ -60,9 +60,18 @@ def load_contract(path: Path) -> Contract:
     semantic = exp.get("semantic")
     _check_axis(process, PROCESS_TYPES, path, "process")
     _check_axis(filesystem, FS_TYPES, path, "filesystem")
-    # 不变量：至少一条确定性锚
-    if not process and not filesystem:
-        raise ContractError(f"{path}: needs >=1 process or filesystem assertion (invariant)")
+    # 不变量：至少一条确定性锚（allowed/unchanged_outside 不算锚）
+    _HARD_FS_TYPES = {"created", "modified", "deleted", "content", "script"}
+    has_hard_fs = any(
+        next(iter(e)) in _HARD_FS_TYPES
+        for e in filesystem
+        if isinstance(e, dict) and len(e) == 1
+    )
+    if not process and not has_hard_fs:
+        raise ContractError(
+            f"{path}: needs >=1 process or filesystem assertion (invariant); "
+            "allowed/unchanged_outside alone do not count as anchors"
+        )
     if semantic is not None and not isinstance(semantic.get("rubric"), str):
         raise ContractError(f"{path}: semantic.rubric must be a string")
     tools = trig.get("tools", list(DEFAULT_TOOLS))
