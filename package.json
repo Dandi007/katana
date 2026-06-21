@@ -19,7 +19,7 @@
   ],
   "scripts": {
     "test": "bun test parity/adapter/opencode/",
-    "test:shell": "bash plugins/memory/tests/scan-memory.test.sh",
+    "test:shell": "bash tests/run-shell-tests.sh",
     "test:pack": "bash tests/pack-parity.sh",
     "lint": "./tests/lint-structure.sh",
     "e2e": "./parity/e2e/run.sh parity/e2e/scenarios/basic.json both"
