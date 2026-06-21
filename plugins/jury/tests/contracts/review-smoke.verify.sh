@@ -2,7 +2,7 @@
 # 读 panel-meta.json：恰 4 个不同模型；opus 路 base_url 空(真原生)；其余指 15721。
 # 只验路由保真，不验 exit 成功——harness 隔离下 opus auth 会挂属预期。
 set -uo pipefail
-META="$KB_DIR/.jury/panel-meta.json"
+META="$KB_DIR/scratch/.jury/panel-meta.json"
 [ -f "$META" ] || { echo "no panel-meta.json"; exit 1; }
 python3 - "$META" <<'PY'
 import json, sys

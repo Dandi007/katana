@@ -43,11 +43,14 @@ def _parse_vote(stream_stdout: str):
 
 
 def run_model(member: dict, prompt: str, out_dir: Path, timeout: int,
-              profile: str = DEFAULT_PROFILE) -> dict:
+              profile: str = DEFAULT_PROFILE, target_dir: str = None) -> dict:
     """Run one panel member via claude -p.
 
     setter must be a shell-safe identifier matching ^set_claude[a-z0-9_]*$;
     any other value raises ValueError to prevent shell injection.
+
+    target_dir: 若给定，子进程在该目录下执行（cwd=target_dir），评审员可 Read 相对路径文件。
+    守 G9：评审员只读，allowedTools 仅含 Read/Grep/Glob，不含 Write/Edit/Bash。
     """
     name, setter = member["name"], member["setter"]
     if not re.fullmatch(r"set_claude[a-z0-9_]*", setter):
@@ -57,13 +60,16 @@ def run_model(member: dict, prompt: str, out_dir: Path, timeout: int,
     model_arg = f'--model {shlex.quote(member["model"])}' if member.get("model") else ""
     # 先 source+setter，把 setter 实际产生的 env dump 到 stderr 的 marker 行，
     # 再 exec claude。base_url_used/model_string 读 setter 真实结果，不靠猜。
+    # allowedTools 只读三件套（Read/Grep/Glob），守 G9 评审员不可写。
     inner = (
         f'source "{profile}"; {setter} >/dev/null 2>&1; '
         f'echo "__JURY_ENV__ base=${{ANTHROPIC_BASE_URL:-}} model=${{ANTHROPIC_MODEL:-}}" >&2; '
-        f'exec {claude_bin} -p {model_arg} --output-format stream-json --verbose --allowedTools ""'
+        f'exec {claude_bin} -p {model_arg} --output-format stream-json --verbose --allowedTools "Read,Grep,Glob"'
     )
+    # target_dir 给定时，让子进程 cwd=target_dir，评审员可用相对路径 Read 文件。
+    subprocess_cwd = target_dir if target_dir else None
     proc = subprocess.run(["zsh", "-c", inner], input=prompt, text=True,
-                          capture_output=True, timeout=timeout)
+                          capture_output=True, timeout=timeout, cwd=subprocess_cwd)
     trace.write_text(proc.stdout, encoding="utf-8")
     base_url, model_string = "", ""
     mm = re.search(r"__JURY_ENV__ base=(\S*) model=(\S*)", proc.stderr)
@@ -98,11 +104,22 @@ def _tally(members: list) -> dict:
 
 
 def fanout(prompt: str, out_dir: Path, roster: list, timeout: int,
-           profile: str = DEFAULT_PROFILE) -> dict:
+           profile: str = DEFAULT_PROFILE, target_dir: str = None,
+           spec: str = None) -> dict:
+    """并行派发所有 roster 成员评审同一 prompt。
+
+    target_dir: 透传给 run_model，评审员子进程在该目录执行（可 Read 相对路径）。
+    spec: 若给定，在 prompt 前置 spec 块（评审目标），帮助评审员对照验收标准。
+    """
+    # spec 非空时，在 prompt 前追加评审目标头，让每个评审员都能看到验收 spec。
+    effective_prompt = prompt
+    if spec:
+        effective_prompt = "## 评审目标（spec）\n" + spec + "\n\n---\n\n" + prompt
     out_dir = Path(out_dir)
     members = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(roster)) as ex:
-        futs = {ex.submit(run_model, m, prompt, out_dir, timeout, profile): m
+        futs = {ex.submit(run_model, m, effective_prompt, out_dir, timeout, profile,
+                          target_dir): m
                 for m in roster}
         for fut, m in futs.items():
             try:
@@ -139,11 +156,18 @@ def main():
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--roster")
     ap.add_argument("--profile", default=DEFAULT_PROFILE)
+    # 0.2 新增：评审员 cwd + 可选 spec 前置
+    ap.add_argument("--target-dir", default=None,
+                    help="评审员子进程工作目录（cwd），模型可 Read 相对路径文件")
+    ap.add_argument("--spec-file", default=None,
+                    help="spec 文件路径，内容将前置到 prompt 作为评审目标")
     a = ap.parse_args()
     roster = json.loads(Path(a.roster).read_text()) if a.roster else DEFAULT_ROSTER
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     prompt = Path(a.prompt_file).read_text(encoding="utf-8")
-    s = fanout(prompt, out, roster, a.timeout, a.profile)
+    spec = Path(a.spec_file).read_text(encoding="utf-8") if a.spec_file else None
+    s = fanout(prompt, out, roster, a.timeout, a.profile,
+               target_dir=a.target_dir, spec=spec)
     print(json.dumps({"quorum": s["quorum"], "dissent": s["dissent"]}, ensure_ascii=False))
 
 
