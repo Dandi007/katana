@@ -11,4 +11,8 @@ expect:
     - created: "WIKI.md"
     - content: {path: "WIKI.md", matches: "Zones"}
     - content: {path: "WIKI.md", matches: "Ingest"}
+    - created: "log.md"
+    - created: "index.md"
+    - created: "inbox/.gitkeep"
+    - created: ".katana"
     - unchanged_outside: true

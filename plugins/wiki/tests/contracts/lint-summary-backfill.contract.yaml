@@ -11,6 +11,9 @@ expect:
     - modified: "笔记/手冲咖啡萃取.md"
     - modified: "笔记/咖啡豆烘焙度.md"
     - script: scripts/check-summary-backfill.sh
+    - allowed: ".wiki/lint/*.md"
+    - allowed: "wiki-log.md"
+    - allowed: "log.md"
     - unchanged_outside: true
   semantic:
     rubric: ../../../../tests/judge/case-rubrics/wiki-lint-summary.md

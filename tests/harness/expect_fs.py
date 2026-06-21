@@ -19,19 +19,22 @@ def _match(glob, names):
 def check_fs(asserts, delta, cwd, contract_dir):
     cwd, contract_dir = Path(cwd), Path(contract_dir)
 
-    # 第一遍：收集所有 created/modified/deleted 的 glob 进 declared
+    # 第一遍：收集所有 created/modified/deleted/allowed 的 glob 进 declared
     # 这样 unchanged_outside 无论放哪里都能看到完整的声明集合（m3）
+    # allowed：只加入白名单、不产生断言结果（可选输出，写了不报 stray、没写不 FAIL）
     declared = set()
     for a in asserts:
         ((typ, val),) = a.items()
-        if typ in ("created", "modified", "deleted"):
+        if typ in ("created", "modified", "deleted", "allowed"):
             declared.add(val)
 
     # 第二遍：执行所有断言
     out = []
     for a in asserts:
         ((typ, val),) = a.items()
-        if typ in ("created", "modified", "deleted"):
+        if typ == "allowed":
+            pass  # 只加白名单（第一遍已处理），不产生断言结果
+        elif typ in ("created", "modified", "deleted"):
             hit = _match(val, delta[typ])
             out.append(Result(typ, bool(hit), "" if hit else f"no {typ} match: {val}"))
         elif typ == "content":

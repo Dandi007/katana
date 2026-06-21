@@ -1,2 +1,6 @@
 # 格式：<plugin>:<skill>  <原因>。G0 对此清单内 skill 不要求契约。
 # Wave 2 铺开时逐行删除。
+guide:using-katana  SessionStart 注入约定（非 Skill tool load），改由 plugins/guide/tests/session-start-inject.test.sh 机械测试
+retrieval:using-retrieval  SessionStart 注入约定（非 Skill tool load），改由 plugins/retrieval/tests/session-start-inject.test.sh 机械测试
+wiki:using-wiki  SessionStart 注入约定（非 Skill tool load），改由 plugins/wiki/tests/session-start-inject.test.sh 机械测试
+writing:using-writing  SessionStart 注入约定（非 Skill tool load），改由 plugins/writing/tests/session-start-inject.test.sh 机械测试

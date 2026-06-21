@@ -10,6 +10,8 @@ expect:
     - skill_loaded: retrieval:search-note
   filesystem:
     - created: "search-result.md"
-    - content: {path: "search-result.md", matches: "意式浓缩温度-A"}
-    - content: {path: "search-result.md", matches: "意式浓缩温度-B"}
     - unchanged_outside: true
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/search-note.md
+    inputs:
+      - "{created:search-result.md}"

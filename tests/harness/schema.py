@@ -5,7 +5,7 @@ from pathlib import Path
 import os, yaml
 
 PROCESS_TYPES = {"skill_loaded", "tool_used", "tool_absent", "tool_count", "sequence"}
-FS_TYPES = {"created", "modified", "deleted", "content", "unchanged_outside", "script"}
+FS_TYPES = {"created", "modified", "deleted", "allowed", "content", "unchanged_outside", "script"}
 DEFAULT_TOOLS = ["Read", "Grep", "Glob", "Write", "Edit", "Bash"]
 DEFAULT_MODEL = "lingzhi/claude-opus-4-8"
 
