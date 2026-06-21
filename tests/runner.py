@@ -58,6 +58,45 @@ def sweep_setup(repo: Path, tmp: Path, plugins: set, claude_bin: str) -> Path:
     return golden
 
 
+def _resolve_verdict_inputs(raw_inputs, case_root, cwd) -> list:
+    """把 verdict.inputs 列表里的占位符替换成真实 Path。
+    支持：{cwd}→<case_root>/<cwd>，{case_log}→<case_root>/case.log，
+         {case_trace}→<case_root>/case.trace.jsonl。
+    """
+    out = []
+    for i in raw_inputs:
+        s = (str(i)
+             .replace("{cwd}", str(Path(case_root) / cwd))
+             .replace("{case_log}", str(Path(case_root) / "case.log"))
+             .replace("{case_trace}", str(Path(case_root) / "case.trace.jsonl")))
+        out.append(Path(s))
+    return out
+
+
+def build_base_env(no_ccs_check: bool) -> dict:
+    """harness 子进程基础环境覆盖层。
+    与 claude_cli.py 里 {**os.environ, **env} 合并后生效，故显式覆盖而非删键。
+    态卫生：
+      - KATANA_KB_ROOT=""  ：③ 后 local.zsh 导出真实 KB 路径，子进程继承会盖掉 fixture .katana；
+                             空字符串使 katana kb-root 解析视为未设，回落 fixture 的 .katana。
+      - KATANA_CONFIG_FILE=""：防真实 ~/.katana 经 env 被采纳。
+    HOME 隔离在 case.py 层（每 attempt 单独 mkdir），此处不注入。
+    """
+    env: dict = {}
+    if not no_ccs_check:
+        if not ccs_online():
+            sys.exit("ABORT: ccs (127.0.0.1:15721) offline — 绝不 fallback 直连")
+        env["ANTHROPIC_BASE_URL"] = f"http://{CCS_HOST}:{CCS_PORT}"
+        # claude CLI requires ANTHROPIC_API_KEY to use API-key mode (not OAuth).
+        # ccs does not validate incoming tokens; any non-empty string works.
+        # Caller may override via ANTHROPIC_AUTH_TOKEN env var.
+        env["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_AUTH_TOKEN", "ccs-local")
+    # 态卫生：显式覆盖为空，使宿主真实值在 {**os.environ, **env} 合并后失效。
+    env["KATANA_KB_ROOT"] = ""
+    env["KATANA_CONFIG_FILE"] = ""
+    return env
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true")
@@ -92,15 +131,7 @@ def main():
         return
 
     claude_bin = os.environ.get("CLAUDE_BIN", "claude")
-    base_env = {}
-    if not args.no_ccs_check:
-        if not ccs_online():
-            sys.exit("ABORT: ccs (127.0.0.1:15721) offline — 绝不 fallback 直连")
-        base_env["ANTHROPIC_BASE_URL"] = f"http://{CCS_HOST}:{CCS_PORT}"
-        # claude CLI requires ANTHROPIC_API_KEY to use API-key mode (not OAuth).
-        # ccs does not validate incoming tokens; any non-empty string works.
-        # Caller may override via ANTHROPIC_AUTH_TOKEN env var.
-        base_env["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_AUTH_TOKEN", "ccs-local")
+    base_env = build_base_env(args.no_ccs_check)
 
     t0 = time.monotonic()
     tmp = Path(tempfile.mkdtemp(prefix="katana-contracts."))
@@ -121,9 +152,8 @@ def main():
                 rubric = repo / "tests/judge" / rubric_key
                 # 使用 r.case_dir 确保指向实际 PASS 的 attempt 目录（含重试场景）
                 case_root = Path(r.case_dir)
-                inputs = [Path(str(i).replace("{cwd}", str(case_root / c.cwd))
-                                   .replace("{case_log}", str(case_root / "case.log")))
-                          for i in c.verdict.get("inputs", [])]
+                inputs = _resolve_verdict_inputs(
+                    c.verdict.get("inputs", []), case_root, c.cwd)
                 status, vr = run_case_verdict(rubric=rubric, inputs=inputs,
                                               model=c.model, work_dir=tmp,
                                               claude_bin=claude_bin, base_env=base_env)

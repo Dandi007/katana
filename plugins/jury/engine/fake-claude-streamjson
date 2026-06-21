@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# 模拟 claude -p --output-format stream-json --verbose：读 stdin prompt，吐事件流。
+cat >/dev/null
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"looks ok"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","result":"```json {\"items\":[{\"q\":\"1\",\"answer\":\"yes\",\"evidence\":\"e\"}]} ```\nprose here","session_id":"fake"}'

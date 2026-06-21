@@ -3,14 +3,18 @@
 #   FAKE_CLAUDE_STDOUT  输出文本；FAKE_CLAUDE_WRITE "relpath:content" 在 cwd 写文件
 #   FAKE_CLAUDE_APPEND  relpath：把本轮 stdin prompt 追加一行（多轮累积验证用）
 #   FAKE_CLAUDE_EXIT    退出码（默认 0）；FAKE_CLAUDE_SLEEP 延迟秒
-# 识别 --output-format json（吐 {session_id,result}）与 --resume <id>。
-# 子命令（plugin/...）一律 echo 后成功返回。
+# 识别 --output-format stream-json（吐 stream-json 事件流）与 --output-format json（吐 {session_id,result}）
+# 及 --resume <id>。子命令（plugin/...）一律 echo 后成功返回。
 if [ "$1" != "-p" ]; then echo "fake-claude: $*"; exit 0; fi
-json=0; resume=""
+stream_json=0; json=0; resume=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
-    --output-format) [ "${args[$((i+1))]:-}" = "json" ] && json=1 ;;
+    --output-format)
+      fmt="${args[$((i+1))]:-}"
+      [ "$fmt" = "stream-json" ] && stream_json=1
+      [ "$fmt" = "json" ] && json=1
+      ;;
     --resume) resume="${args[$((i+1))]:-}" ;;
   esac
 done
@@ -26,7 +30,13 @@ if [ -n "${FAKE_CLAUDE_APPEND:-}" ]; then
 fi
 text="${FAKE_CLAUDE_STDOUT:-fake output}"
 [ -n "$resume" ] && text="$text resumed:$resume"
-if [ "$json" = "1" ] && [ -z "${FAKE_CLAUDE_BADJSON:-}" ]; then
+if [ "$stream_json" = "1" ] && [ -z "${FAKE_CLAUDE_BADJSON:-}" ]; then
+  # stream-json モード: system init + assistant tool_use + result 事件
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"s1"}'
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"fake-skill"}}]}}'
+  # result 事件携带 result 文本（含 resumed 标记，让 _result_text 能正确抽出）
+  printf '{"type":"result","subtype":"success","result":"%s","session_id":"s1"}\n' "$text"
+elif [ "$json" = "1" ] && [ -z "${FAKE_CLAUDE_BADJSON:-}" ]; then
   printf '{"session_id":"s1","result":"%s"}\n' "$text"
 else
   printf '%s\n' "$text"

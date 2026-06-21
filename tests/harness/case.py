@@ -60,7 +60,12 @@ def _attempt(contract: Contract, golden: Path, case_dir: Path,
     _snapshot(golden, case_dir)
     kb_cwd = case_dir / contract.cwd
     log = case_dir / "case.log"
-    env = {**base_env, "CLAUDE_CONFIG_DIR": str(case_dir / "claude-config")}
+    # HOME 隔离：防 ~/.katana 兜底命中真实文件（KATANA_KB_ROOT 已在 build_base_env 置空，
+    # 双重保险；隔离 HOME 同时防其他 ~ 展开路径误命中宿主配置）。
+    home = case_dir / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    env = {**base_env, "HOME": str(home),
+           "CLAUDE_CONFIG_DIR": str(case_dir / "claude-config")}
     if contract.turns:
         res = run_claude_session(
             turns=contract.turns, cwd=kb_cwd, log_path=log,
@@ -74,7 +79,8 @@ def _attempt(contract: Contract, golden: Path, case_dir: Path,
             allowed_tools=contract.allowed_tools, no_tools=contract.no_tools, timeout=contract.timeout,
             env=env, claude_bin=claude_bin)
     ctx = Ctx(cwd=kb_cwd, stdout=res.stdout, case_log=log,
-              contract_dir=contract.path.parent)
+              contract_dir=contract.path.parent,
+              trace_path=getattr(res, "trace_path", None))
     return run_asserts(contract.asserts, ctx), ctx
 
 def run_case(contract: Contract, golden: Path, work_root: Path,

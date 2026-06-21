@@ -1,0 +1,32 @@
+skill: jury:review
+input:
+  prompt: |
+    在当前目录执行以下步骤（用 Bash）：
+    1. 在当前目录下新建子目录 `scratch/`，在 scratch/ 里 git init；写文件 calc.py 内含函数 add(a,b) 正确实现，git commit。
+    2. 改 scratch/calc.py：把 add 改成 `return a - b`（引入明显 bug），git commit。
+    3. 在 scratch/ 目录内用 /jury:review 评审 HEAD~1..HEAD 的改动（base=HEAD~1）。
+    4. 读 scratch/.jury/jury-verdict.json，把 quorum 和 dissent 念给我。
+  cwd: kb
+run:
+  timeout: 1200
+  allowed_tools: [Read, Grep, Glob, Bash, Skill]
+preconditions:
+  requires:
+    - cmd:claude
+    - env:KATANA_E2E_JURY        # 门控：仅有本机订阅(Opus 原生)+ccs 时真跑
+assert:
+  # 黑盒：三产物
+  - file_exists: "{cwd}/.jury/jury-report.md"
+  - file_exists: "{cwd}/.jury/jury-verdict.json"
+  - file_exists: "{cwd}/.jury/panel-meta.json"
+  - size_min: {path: "{cwd}/.jury/jury-report.md", bytes: 200}
+  # 白盒：主 agent 真加载 skill + 真调引擎
+  - trace_skill_loaded: "jury:review"
+  - trace_tool_used: "Bash"
+  # 白盒：扇出保真（读 panel-meta）
+  - script: review-smoke.verify.sh
+verdict:
+  rubric: case-rubrics/jury-smoke.md
+  inputs:
+    - "{cwd}/.jury/jury-report.md"
+    - "{case_trace}"

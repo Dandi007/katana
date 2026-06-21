@@ -4,7 +4,9 @@ from pathlib import Path
 import os, yaml
 
 ASSERT_TYPES = {"file_exists", "file_absent", "file_grep", "stdout_grep",
-                "size_min", "json_path", "script"}
+                "size_min", "json_path", "script",
+                "trace_skill_loaded", "trace_tool_used", "trace_tool_absent",
+                "trace_tool_count", "trace_sequence", "trace_grep"}
 DEFAULT_TOOLS = ["Read", "Grep", "Glob", "Write", "Edit", "Bash"]
 
 
