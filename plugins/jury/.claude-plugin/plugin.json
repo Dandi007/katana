@@ -1,7 +1,7 @@
 {
   "name": "jury",
   "description": "Multi-model review jury — fan out one prompt template to N diverse models in parallel, preserve divergence + vote; also serves as the harness multi-model judge engine",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": { "name": "Dandi007" },
   "license": "MIT"
 }
