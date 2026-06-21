@@ -3,7 +3,7 @@
 # excluding the two pre-existing fixture cards.
 set -euo pipefail
 
-MEMORY_DIR="$KB_DIR/memory"
+MEMORY_DIR="$CWD/memory"
 
 # Find cards that contain "92" but are NOT the two pre-seeded fixture cards
 new_card=$(grep -rl "92" "$MEMORY_DIR" \

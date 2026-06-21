@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 多轮 incubate e2e 的末轮校验。KB_DIR 由 harness 注入（case 的 kb cwd）。
 set -uo pipefail
-root="$KB_DIR/Incubator"
+root="$CWD/Incubator"
 dir="$(find "$root" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | head -1)"
 [ -n "$dir" ] || { echo "FAIL: no Incubator/YYYY/MM/<topic> dir under $root"; exit 1; }
 fail=0

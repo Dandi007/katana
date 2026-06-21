@@ -1,38 +1,22 @@
 skill: deep-research:deep-research
-input:
+setup:
+  fixture: kb
+  requires:
+    - env:KATANA_E2E_NETWORK
+trigger:
   prompt: |
     用 /deep-research:deep-research 研究：本知识库中影响咖啡萃取质量的全部因素及其相互关系，
     重点综合现有笔记，输出带引用的研究报告到 ./research-report.md。
     控制在最小规模（宽度≤4，单轮）。
-  cwd: kb
-
-run:
+  tools: [Workflow, Agent, Read, Write, Grep, Glob, Bash, WebSearch, WebFetch]
   timeout: 3600
-  allowed_tools:
-    - Workflow
-    - Agent
-    - Read
-    - Write
-    - Grep
-    - Glob
-    - Bash
-    - WebSearch
-    - WebFetch
-
-preconditions:
-  requires:
-    - env:KATANA_E2E_NETWORK
-
-assert:
-  # SKILL.md 规定产物落盘于 $KB/DeepThought/<主题名>/report.md；
-  # 主题名由模型生成，用 script 做 normalize（cp 到固定名）以便 verdict.inputs 引用。
-  # file_exists 用 glob 检测目录层级。
-  - file_exists: "{cwd}/DeepThought/*/report.md"
-  # script：normalize report.md → research-report.md 并校验内容
-  - script: deep-research-kb.verify.sh
-
-# verdict 指向 normalize 后的固定路径（verify.sh cp report.md → research-report.md）
-verdict:
-  rubric: case-rubrics/deep-research-kb.md
-  inputs:
-    - "{cwd}/research-report.md"
+expect:
+  process:
+    - skill_loaded: deep-research:deep-research
+  filesystem:
+    - created: "DeepThought/*/report.md"
+    - script: deep-research-kb.verify.sh
+    - unchanged_outside: true
+  semantic:
+    rubric: tests/judge/case-rubrics/deep-research-kb.md
+    inputs: "{case_trace}"

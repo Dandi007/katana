@@ -1,8 +1,8 @@
 skill: incubate:incubate
-preconditions:
+setup:
+  fixture: kb
   requires: [cmd:claude]
-input:
-  cwd: kb
+trigger:
   turns:
     - "用 incubate 开一个孵化台，主题：Task ID 采集任务管理系统，维度 work"
     - "gather：在知识库里把和 Task ID 采集相关的工作文档找来，逐条提炼核心点写进 findings"
@@ -10,9 +10,13 @@ input:
     - "capture：这个系统的核心矛盾是实时性 vs 完整性，元数据可以后补"
     - "synthesize：把上面的资料和我的想法揉成一份能拿去 propose 的材料，写进 spec"
     - "graduate：把状态置为已毕业"
-run:
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
   timeout: 1800
-assert:
-  - file_exists: "{cwd}/Incubator/*/*/*/README.md"
-  - file_exists: "{cwd}/Incubator/*/*/*/spec.md"
-  - script: "incubate-e2e.verify.sh"
+expect:
+  process:
+    - skill_loaded: incubate:incubate
+  filesystem:
+    - created: "Incubator/*/*/*/README.md"
+    - created: "Incubator/*/*/*/spec.md"
+    - script: incubate-e2e.verify.sh
+    - unchanged_outside: true

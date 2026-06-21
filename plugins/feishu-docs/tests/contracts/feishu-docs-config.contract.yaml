@@ -1,11 +1,18 @@
 skill: feishu-docs:feishu-docs
-input:
+setup:
+  fixture: kb
+trigger:
   prompt: |
     feishu_docs_root 已配置为 docs/feishu-mirror。
     请说明：飞书文档镜像存放在哪个目录、AST 文件和 Markdown 文件各自的作用是什么，
-    以及如何拉取一篇新文档。
-  cwd: kb
-assert:
-  - stdout_grep: "feishu"
-  - stdout_grep: "ast"
-  - stdout_grep: "pull"
+    以及如何拉取一篇新文档。把说明写到 ./feishu-docs-answer.md。
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
+expect:
+  process:
+    - skill_loaded: feishu-docs:feishu-docs
+  filesystem:
+    - created: "feishu-docs-answer.md"
+    - content: {path: "feishu-docs-answer.md", matches: "feishu"}
+    - content: {path: "feishu-docs-answer.md", matches: "ast|\\.ast\\.json"}
+    - content: {path: "feishu-docs-answer.md", matches: "pull|拉取"}
+    - unchanged_outside: true
