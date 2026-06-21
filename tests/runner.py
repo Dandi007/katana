@@ -94,6 +94,10 @@ def build_base_env(no_ccs_check: bool) -> dict:
     # 态卫生：显式覆盖为空，使宿主真实值在 {**os.environ, **env} 合并后失效。
     env["KATANA_KB_ROOT"] = ""
     env["KATANA_CONFIG_FILE"] = ""
+    # harness 流量恒过 ccs→lingzhi(Bedrock)，后端拒 Claude Code 实验 anthropic-beta header
+    # （stream-json 工具流式触发 fine-grained-tool-streaming beta → 400 invalid beta flag）。
+    # 与 set_claude_ccswitch_* setter 一致地关掉。2026-06-21 经 live 契约重跑确认。
+    env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
     return env
 
 
