@@ -1,8 +1,19 @@
 skill: wiki:using-wiki
-input:
-  prompt: "意式浓缩的最佳萃取温度是多少？"
-  cwd: kb
-assert:
-  - stdout_grep: "\\[\\[.*\\]\\]"
-  - stdout_grep: "92"
-  - stdout_grep: "96"
+setup:
+  fixture: kb
+trigger:
+  prompt: "意式浓缩的最佳萃取温度是多少？把回答写到 answer.md。"
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
+expect:
+  process:
+    - skill_loaded: wiki:using-wiki
+  filesystem:
+    - created: "answer.md"
+    - content: {path: "answer.md", matches: "\\[\\[.*\\]\\]"}
+    - content: {path: "answer.md", matches: "92"}
+    - content: {path: "answer.md", matches: "96"}
+    - unchanged_outside: true
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/wiki-using-ironrules.md
+    inputs:
+      - "{created:answer.md}"

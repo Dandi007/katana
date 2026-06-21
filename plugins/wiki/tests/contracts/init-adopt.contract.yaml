@@ -1,8 +1,14 @@
 skill: wiki:init
-input:
+setup:
+  fixture: kb/init-arena
+trigger:
   prompt: "把当前目录领养为 wiki，schema 从存量笔记归纳，提案视为已批准，直接生成 WIKI.md"
-  cwd: kb/init-arena
-assert:
-  - file_exists: "{cwd}/WIKI.md"
-  - file_grep: {path: "{cwd}/WIKI.md", pattern: "Zones"}
-  - file_grep: {path: "{cwd}/WIKI.md", pattern: "Ingest"}
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
+expect:
+  process:
+    - skill_loaded: wiki:init
+  filesystem:
+    - created: "WIKI.md"
+    - content: {path: "WIKI.md", matches: "Zones"}
+    - content: {path: "WIKI.md", matches: "Ingest"}
+    - unchanged_outside: true

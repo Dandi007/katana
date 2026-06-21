@@ -1,10 +1,13 @@
 skill: writing:bluf
-input:
+setup:
+  fixture: kb
+trigger:
   prompt: "按 bluf 的信息架构：一份文档的 L0 应该写什么、必须是什么句式？L1 是什么？"
-  cwd: kb
-assert:
-  - stdout_grep: "L0"
-  - stdout_grep: "L1"
-
-run:
-  no_tools: true
+  tools: []
+expect:
+  process:
+    - skill_loaded: writing:bluf
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/writing-bluf-structure.md
+    inputs:
+      - "{case_trace}"

@@ -1,11 +1,18 @@
 skill: wiki:lint
-input:
+setup:
+  fixture: kb
+trigger:
   prompt: "用 /wiki:lint 对本库做一次完整体检，报告写到 lint-report.md。"
-  cwd: kb
-assert:
-  - file_exists: "{cwd}/lint-report.md"
-  - file_grep: {path: "{cwd}/lint-report.md", pattern: "92|96"}
-  - file_grep: {path: "{cwd}/lint-report.md", pattern: "矛盾|分歧|conflict"}
-verdict:
-  rubric: case-rubrics/wiki-lint.md
-  inputs: ["{cwd}/lint-report.md"]
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
+expect:
+  process:
+    - skill_loaded: wiki:lint
+  filesystem:
+    - created: "lint-report.md"
+    - content: {path: "lint-report.md", matches: "92|96"}
+    - content: {path: "lint-report.md", matches: "矛盾|分歧|conflict"}
+    - unchanged_outside: true
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/wiki-lint.md
+    inputs:
+      - "{created:lint-report.md}"

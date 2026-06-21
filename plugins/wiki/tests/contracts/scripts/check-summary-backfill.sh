@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # 断言：lint 跑完后，笔记/ 下每页 frontmatter 都有非空 摘要，且正文 byte 不变。
-# 由 contract 的 script 断言调用，env: KB_DIR（lint 跑过的库副本）。
+# 由 contract 的 script 断言调用，env: CWD（lint 跑过的库副本），DELTA_JSON。
 set -uo pipefail
-GOLDEN="$KB_DIR/.golden"
+GOLDEN="$CWD/.golden"
 fail=0
 for f in 手冲咖啡萃取 咖啡豆烘焙度 V60滤杯; do
-  page="$KB_DIR/笔记/$f.md"
+  page="$CWD/笔记/$f.md"
   [ -f "$page" ] || { echo "MISSING: $page"; fail=1; continue; }
   summ="$(awk 'c==1 && /^摘要:[[:space:]]*[^[:space:]]/{print; exit} /^---$/{c++}' "$page")"
   [ -n "$summ" ] || { echo "NO-SUMMARY: $f"; fail=1; }
