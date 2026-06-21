@@ -101,6 +101,58 @@ out_e="$(
 check "(e) user-level ~/.katana discovery" "user/level/value" "$out_e"
 
 # ---------------------------------------------------------------------------
+# (g) env KATANA_KB_ROOT wins over config kb_root key when both present.
+# ---------------------------------------------------------------------------
+cfg_g="$TMP/dot_katana_g"
+printf 'kb_root=/tmp/kb_from_config\n' > "$cfg_g"
+out_g="$(
+    set -uo pipefail
+    export HOME="$TMP/home_g"; mkdir -p "$HOME"
+    cd "$TMP" || exit 1
+    unset CLAUDE_PROJECT_DIR 2>/dev/null || true
+    export KATANA_CONFIG_FILE="$cfg_g"
+    export KATANA_KB_ROOT="/tmp/kb_from_env"
+    # shellcheck disable=SC1090
+    . "$CONFIG_SH"
+    printf '%s' "$(katana_kb_root)"
+)"
+check "(g) env KATANA_KB_ROOT wins over config kb_root" "/tmp/kb_from_env" "$out_g"
+
+# ---------------------------------------------------------------------------
+# (h) ~user (no slash) is NOT bash ~user-expanded; treated as relative and
+#     joined to kb_root (safe, no uncontrolled username expansion). Pins 3(c).
+# ---------------------------------------------------------------------------
+out_h="$(
+    set -uo pipefail
+    export HOME="$TMP/home_h"; mkdir -p "$HOME"
+    cd "$TMP" || exit 1
+    unset KATANA_CONFIG_FILE CLAUDE_PROJECT_DIR 2>/dev/null || true
+    export KATANA_KB_ROOT="/tmp/kb"
+    # shellcheck disable=SC1090
+    . "$CONFIG_SH"
+    printf '%s' "$(katana_resolve_path '~alice')"
+)"
+check "(h) ~user not expanded, joins kb_root" "/tmp/kb/~alice" "$out_h"
+
+# ---------------------------------------------------------------------------
+# (i) Intended narrowing: no env, no CLAUDE_PROJECT_DIR, a stray .katana in
+#     cwd is NOT auto-discovered (old $(pwd)/.katana fallback removed on
+#     purpose — cwd is no longer assumed to be the KB). Returns the default.
+# ---------------------------------------------------------------------------
+stray="$TMP/stray"; mkdir -p "$stray"
+printf 'work_folder_path=STRAY_SHOULD_NOT_BE_READ\n' > "$stray/.katana"
+out_i="$(
+    set -uo pipefail
+    export HOME="$TMP/home_i"; mkdir -p "$HOME"   # no ~/.katana here
+    cd "$stray" || exit 1
+    unset KATANA_CONFIG_FILE KATANA_KB_ROOT CLAUDE_PROJECT_DIR 2>/dev/null || true
+    # shellcheck disable=SC1090
+    . "$CONFIG_SH"
+    printf '%s' "$(katana_config_get work_folder_path 'THE_DEFAULT')"
+)"
+check "(i) stray cwd .katana NOT auto-discovered" "THE_DEFAULT" "$out_i"
+
+# ---------------------------------------------------------------------------
 echo "-------------------------------------------"
 echo "katana-config: ${pass} passing, ${fail} failing"
 [ "$fail" -eq 0 ] || exit 1
