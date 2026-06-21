@@ -73,6 +73,30 @@ def _resolve_verdict_inputs(raw_inputs, case_root, cwd) -> list:
     return out
 
 
+def build_base_env(no_ccs_check: bool) -> dict:
+    """harness 子进程基础环境覆盖层。
+    与 claude_cli.py 里 {**os.environ, **env} 合并后生效，故显式覆盖而非删键。
+    态卫生：
+      - KATANA_KB_ROOT=""  ：③ 后 local.zsh 导出真实 KB 路径，子进程继承会盖掉 fixture .katana；
+                             空字符串使 katana kb-root 解析视为未设，回落 fixture 的 .katana。
+      - KATANA_CONFIG_FILE=""：防真实 ~/.katana 经 env 被采纳。
+    HOME 隔离在 case.py 层（每 attempt 单独 mkdir），此处不注入。
+    """
+    env: dict = {}
+    if not no_ccs_check:
+        if not ccs_online():
+            sys.exit("ABORT: ccs (127.0.0.1:15721) offline — 绝不 fallback 直连")
+        env["ANTHROPIC_BASE_URL"] = f"http://{CCS_HOST}:{CCS_PORT}"
+        # claude CLI requires ANTHROPIC_API_KEY to use API-key mode (not OAuth).
+        # ccs does not validate incoming tokens; any non-empty string works.
+        # Caller may override via ANTHROPIC_AUTH_TOKEN env var.
+        env["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_AUTH_TOKEN", "ccs-local")
+    # 态卫生：显式覆盖为空，使宿主真实值在 {**os.environ, **env} 合并后失效。
+    env["KATANA_KB_ROOT"] = ""
+    env["KATANA_CONFIG_FILE"] = ""
+    return env
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true")
@@ -107,15 +131,7 @@ def main():
         return
 
     claude_bin = os.environ.get("CLAUDE_BIN", "claude")
-    base_env = {}
-    if not args.no_ccs_check:
-        if not ccs_online():
-            sys.exit("ABORT: ccs (127.0.0.1:15721) offline — 绝不 fallback 直连")
-        base_env["ANTHROPIC_BASE_URL"] = f"http://{CCS_HOST}:{CCS_PORT}"
-        # claude CLI requires ANTHROPIC_API_KEY to use API-key mode (not OAuth).
-        # ccs does not validate incoming tokens; any non-empty string works.
-        # Caller may override via ANTHROPIC_AUTH_TOKEN env var.
-        base_env["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_AUTH_TOKEN", "ccs-local")
+    base_env = build_base_env(args.no_ccs_check)
 
     t0 = time.monotonic()
     tmp = Path(tempfile.mkdtemp(prefix="katana-contracts."))
