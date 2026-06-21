@@ -11,13 +11,14 @@ description: 本地知识库检索源（只读）。原子笔记/Index/工作记
 
 | key | 说明 | 默认 |
 |-----|------|------|
-| `kb_dir` | KB 根目录（`.` 表示 `CLAUDE_PROJECT_DIR`） | `.` |
+| `kb_dir` | KB 根目录（相对值基于 KB 根；`.` 表示 KB 根本身） | `.` |
 | `search_note_embedding_url` | embedding 服务端点（语义检索用） | — |
 
-`kb_dir` 解析规则：
-- `.` 或空 → `$CLAUDE_PROJECT_DIR`
-- 相对路径 → `$CLAUDE_PROJECT_DIR/<kb_dir>`
-- 绝对路径 → 原值
+`kb_dir` 解析规则（经 `katana_resolve_path`，基准为 `katana_kb_root` 而非 cwd）：
+- 空 → KB 根（`katana_kb_root`）
+- `.` → KB 根（join 后规整为 `<KB根>/.`，等价 KB 根）
+- 相对路径 → `<KB根>/<kb_dir>`
+- 绝对路径 / `~` 前缀 → 原样 / 展开 `$HOME`
 
 ## 搜索范围
 
@@ -49,7 +50,10 @@ else
   # 回落：CLI（服务没起时不致命）。--source markdown 防 opencode 会话污染。
   PY="$(katana_config_get search_note_python "python3" "")"
   PY="${PY/#\~/$HOME}"   # .katana 里的 ~ 不会被自动展开，须手动展
-  "$PY" "${CLAUDE_PLUGIN_ROOT}/skills/search-note/scripts/query_lancedb.py" "查询词" --mode auto --top-k 10 --source markdown
+  # kb_dir 经 katana_resolve_path 解析成绝对 KB 根（基准 katana_kb_root，非 cwd），
+  # 显式传 --root，使 keyword 降级扫描根锁定 KB 而非当前工作目录。
+  KB_DIR="$(katana_resolve_path "$(katana_config_get kb_dir "." "")")"
+  "$PY" "${CLAUDE_PLUGIN_ROOT}/skills/search-note/scripts/query_lancedb.py" "查询词" --mode auto --top-k 10 --source markdown --root "$KB_DIR"
 fi
 ```
 

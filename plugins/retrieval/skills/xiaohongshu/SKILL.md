@@ -12,9 +12,16 @@ description: 小红书检索源。中文 UGC 消费决策/生活方式调研（�
 | 键 | 含义 | 示例 |
 |----|------|------|
 | `xiaohongshu_chrome_profile` | 登录态 profile 目录 | `~/.playwright-agent-profile` |
-| `xiaohongshu_raw_dir` | 下载落盘根目录（相对路径时基于项目根，即 `.katana` 所在目录；与 `kb_dir` 同语义） | `转换文档/web` |
+| `xiaohongshu_raw_dir` | 下载落盘根目录（相对路径时基于 KB 根，经 `katana_resolve_path` 解析；与 `kb_dir` 同语义） | `转换文档/web` |
 
 铁律：`.katana` 只放路径；账号与登录态留在 profile 目录内，绝不进 repo。
+
+落盘前先把配置值解析成绝对路径（基准 `katana_kb_root`，非 cwd）：
+
+```bash
+RAW_DIR="$(katana_resolve_path "$(katana_config_get xiaohongshu_raw_dir "转换文档/web" "")")"
+# 之后所有 <xiaohongshu_raw_dir> 占位均用解析后的绝对 $RAW_DIR
+```
 
 ## 前置：登录态
 
@@ -71,7 +78,7 @@ navigate 带 token 的 href，然后一次提取：
 
 1. **选篇**：高赞优先 + 作者多样性 + 标题视角互补（测评/红黑榜/对比贴混搭），默认 5-10 篇
 2. 逐篇走工作流 ②
-3. **落盘** `<xiaohongshu_raw_dir>/小红书-<主题>-<YYYY-MM-DD>/`：
+3. **落盘** `$RAW_DIR/小红书-<主题>-<YYYY-MM-DD>/`（`$RAW_DIR` = 上面解析出的绝对 `xiaohongshu_raw_dir`）：
    - 一篇一 md：`<序号两位>-<标题slug>.md`，frontmatter：
 
      ```yaml

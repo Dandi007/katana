@@ -19,15 +19,8 @@ case "$FEISHU_DOCS_ROOT" in
         ;;
 esac
 
-# 相对路径相对 CLAUDE_PROJECT_DIR 解析；~ 展开（仅 ~ 或 ~/ 前缀）
-case "$FEISHU_DOCS_ROOT" in
-    "~") FEISHU_DOCS_ROOT="$HOME" ;;
-    "~/"*) FEISHU_DOCS_ROOT="${HOME}${FEISHU_DOCS_ROOT#\~}" ;;
-esac
-case "$FEISHU_DOCS_ROOT" in
-    /*) : ;;
-    *) FEISHU_DOCS_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}/${FEISHU_DOCS_ROOT}" ;;
-esac
+# 解析为绝对路径：~ 展开 / 绝对原样 / 相对则 join kb_root（基准从 cwd 变 kb_root）
+FEISHU_DOCS_ROOT="$(katana_resolve_path "$FEISHU_DOCS_ROOT")"
 
 # 未配置（路径不存在）→ 静默退出，零打扰
 [ -d "$FEISHU_DOCS_ROOT" ] || exit 0
