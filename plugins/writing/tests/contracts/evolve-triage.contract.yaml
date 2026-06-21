@@ -2,12 +2,15 @@ skill: writing:readability-check
 setup:
   fixture: kb
 trigger:
-  prompt: "用 evolve 固化反馈时，一条「这类文档缺少某章节」的结构反馈、一条「这一节该怎么写得更好」的写法反馈、一条「评判标准」的反馈，分别落到哪个文件？"
+  prompt: "用 evolve 固化反馈时，一条「这类文档缺少某章节」的结构反馈、一条「这一节该怎么写得更好」的写法反馈、一条「评判标准」的反馈，分别落到哪个文件？把三类反馈各自落到哪个文件的判断写到 `./evolve-triage-answer.md`"
   model: lingzhi/claude-opus-4-8
-  tools: []
+  tools: [Read, Grep, Glob, Write, Bash]
 expect:
-  process:
-    - skill_loaded: writing:readability-check
+  filesystem:
+    - created: evolve-triage-answer.md
+    - content: {path: "evolve-triage-answer.md", matches: "template"}
+    - content: {path: "evolve-triage-answer.md", matches: "pattern"}
+    - unchanged_outside: true
   semantic:
     rubric: ../../../../tests/judge/case-rubrics/writing-evolve-triage.md
     inputs:

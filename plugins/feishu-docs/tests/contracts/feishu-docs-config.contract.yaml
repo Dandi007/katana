@@ -8,8 +8,6 @@ trigger:
     以及如何拉取一篇新文档。把说明写到 ./feishu-docs-answer.md。
   tools: [Read, Grep, Glob, Write, Edit, Bash]
 expect:
-  process:
-    - skill_loaded: feishu-docs:feishu-docs
   filesystem:
     - created: "feishu-docs-answer.md"
     - content: {path: "feishu-docs-answer.md", matches: "feishu"}

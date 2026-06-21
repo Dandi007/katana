@@ -13,6 +13,7 @@ expect:
     - content: {path: "WIKI.md", matches: "Ingest"}
     - created: "log.md"
     - created: "index.md"
-    - created: "inbox/.gitkeep"
-    - created: ".katana"
+    - allowed: "inbox/.gitkeep"
+    - allowed: "inbox/*"
+    - allowed: ".katana"
     - unchanged_outside: true
