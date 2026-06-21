@@ -15,17 +15,17 @@ REPO="$(cd "$HERE/.." && pwd)"
 out=$(KATANA_KB_ROOT="/tmp/REAL_KB_SHOULD_NOT_LEAK" uv run --with pyyaml python - "$REPO" <<'PY'
 import os, sys
 sys.path.insert(0, sys.argv[1] + "/tests")
-import runner
-base = runner.build_base_env(no_ccs_check=True)
-# 模拟 claude_cli.py 的合并方式
+from harness import isolate
+base = isolate.build_base_env(no_ccs_check=True)
+# 模拟 trigger.py 的合并方式
 effective = {**os.environ, **base}
 val = effective.get("KATANA_KB_ROOT", "")
 if val == "":
     print("EMPTY")
 else:
     print("LEAK:" + val)
-# HOME 隔离在 case.py 层（per-attempt），base 本身不要求含 HOME
-print("HOME_KEY", "HOME" in base or "(home注入在 case.py 层)")
+# HOME 隔离在 case_env() 层（per-attempt），base 本身不要求含 HOME
+print("HOME_KEY", "HOME" in base or "(home注入在 case_env 层)")
 PY
 )
 
