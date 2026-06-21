@@ -43,6 +43,7 @@ def search(
     owns = client is None
     c = client or httpx.Client(base_url=base_url, timeout=30)
     try:
+        # 自建 client 带 base_url → 用相对 /search；外部 client（仅测试用，无 base_url）→ 拼绝对 URL
         url = "/search" if (client is None) else f"{base_url}/search"
         resp = c.post(url, json=body)
         resp.raise_for_status()

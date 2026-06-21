@@ -9,8 +9,15 @@ def _config_sh() -> str:
     env = os.environ.get("KATANA_CONFIG_SH")
     if env:
         return env
+    # editable 安装下：config.py 在 mcp/shared/katana_kb_mcp_shared/ → repo 根上溯 4 层
     repo = Path(__file__).resolve().parents[3]
-    return str(repo / "plugins" / "wiki" / "hooks" / "katana-config.sh")
+    path = repo / "plugins" / "wiki" / "hooks" / "katana-config.sh"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"katana-config.sh not found at inferred path {path}; "
+            f"set KATANA_CONFIG_SH env to its absolute path"
+        )
+    return str(path)
 
 
 def _run(subcmd: str, args: list[str], config_file: str | None) -> str:
