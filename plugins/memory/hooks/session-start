@@ -11,9 +11,14 @@ source "${SCRIPT_DIR}/katana-config.sh"
 
 AWK_PROG="${SCRIPT_DIR}/scan-memory.awk"
 
-# Memory paths: env > .katana > default (identical resolution to the old binary).
+# Memory paths: env > .katana > default. System memory is user-level and stays
+# anchored at ~/.claude/memory. Project memory defaults to "<kb-root>/memory"
+# (not "<cwd>/memory") so it points at the KB regardless of cwd; a relative
+# config/env value is resolved against kb-root too (absolute values pass
+# through unchanged, preserving CLAUDE_MEMORY_PROJECT_DIR priority).
 SYSTEM_MEMORY="${CLAUDE_MEMORY_SYSTEM_DIR:-${HOME}/.claude/memory}"
-PROJECT_MEMORY="$(katana_config_get "memory_project_dir" "${CLAUDE_PROJECT_DIR:-$(pwd)}/memory" "CLAUDE_MEMORY_PROJECT_DIR")"
+PROJECT_MEMORY="$(katana_config_get "memory_project_dir" "$(katana_kb_root)/memory" "CLAUDE_MEMORY_PROJECT_DIR")"
+PROJECT_MEMORY="$(katana_resolve_path "$PROJECT_MEMORY")"
 
 # Collect byte-sorted *.md lists (parity with the Rust PathBuf sort). A missing
 # directory simply yields no files — the scanner then emits nothing for it.
