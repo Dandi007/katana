@@ -15,11 +15,11 @@ preconditions:
     - cmd:claude
     - env:KATANA_E2E_JURY        # 门控：仅有本机订阅(Opus 原生)+ccs 时真跑
 assert:
-  # 黑盒：三产物
-  - file_exists: "{cwd}/.jury/jury-report.md"
-  - file_exists: "{cwd}/.jury/jury-verdict.json"
-  - file_exists: "{cwd}/.jury/panel-meta.json"
-  - size_min: {path: "{cwd}/.jury/jury-report.md", bytes: 200}
+  # 黑盒：三产物（agent 在 kb/scratch/ 建 repo，产物落 scratch/.jury/）
+  - file_exists: "{cwd}/scratch/.jury/jury-report.md"
+  - file_exists: "{cwd}/scratch/.jury/jury-verdict.json"
+  - file_exists: "{cwd}/scratch/.jury/panel-meta.json"
+  - size_min: {path: "{cwd}/scratch/.jury/jury-report.md", bytes: 200}
   # 白盒：主 agent 真加载 skill + 真调引擎
   - trace_skill_loaded: "jury:review"
   - trace_tool_used: "Bash"
@@ -28,5 +28,5 @@ assert:
 verdict:
   rubric: case-rubrics/jury-smoke.md
   inputs:
-    - "{cwd}/.jury/jury-report.md"
+    - "{cwd}/scratch/.jury/jury-report.md"
     - "{case_trace}"
