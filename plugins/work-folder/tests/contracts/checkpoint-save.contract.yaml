@@ -1,13 +1,21 @@
 skill: work-folder:checkpoint
-input:
-  prompt: |
-    当前工作目录有一个进行中的 work folder：工作记录/fixture-task/。
-    我刚完成了「意式浓缩矛盾调研」：结论是 A/B 两派温度主张都保留、互链不抹平。
-    请用 checkpoint skill 保存当前工作状态到该 work folder。
-  cwd: kb
-assert:
-  - file_grep: {path: "{cwd}/工作记录/fixture-task/progress.md", pattern: "Updated.*2026"}
-  - file_grep: {path: "{cwd}/工作记录/fixture-task/progress.md", pattern: "矛盾调研"}
-  - file_exists: "{cwd}/工作记录/fixture-task/findings.md"
-  - file_exists: "{cwd}/工作记录/fixture-task/CLAUDE.md"
-  - file_grep: {path: "{cwd}/工作记录/fixture-task/CLAUDE.md", pattern: "Resume"}
+setup:
+  fixture: kb
+trigger:
+  turns:
+    - |
+      当前工作目录有一个进行中的 work folder：工作记录/fixture-task/。
+      我刚完成了「意式浓缩矛盾调研」：结论是 A/B 两派温度主张都保留、互链不抹平。
+      请用 /work-folder:checkpoint skill 保存当前工作状态到该 work folder。
+    - |
+      刚才的 checkpoint 完成了吗？简述 progress.md 里记录了什么内容。
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
+expect:
+  process:
+    - skill_loaded: work-folder:checkpoint
+  filesystem:
+    - modified: "工作记录/fixture-task/progress.md"
+    - content: {path: "工作记录/fixture-task/progress.md", matches: "矛盾调研"}
+    - created: "工作记录/fixture-task/CLAUDE.md"
+    - content: {path: "工作记录/fixture-task/CLAUDE.md", matches: "Resume"}
+    - unchanged_outside: true
