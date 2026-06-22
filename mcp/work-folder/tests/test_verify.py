@@ -71,6 +71,20 @@ class TestParseContextPaths:
         assert r1.path == "/Volumes/Data/code/self/agent-shell"
         assert r1.expected_branch == "main"
 
+    def test_branch_placeholder_normalized_to_empty(self):
+        # 分支列占位符（-）归一为 ""，避免误触发 DRIFT；真实分支名（含 /）保留
+        md = (
+            "## 关键路径\n"
+            "| 资源 | 路径 / 地址 | 分支 / 版本 | 备注 |\n"
+            "|------|------------|------------|------|\n"
+            "| svc | /Volumes/Data/svc | - | 非 git |\n"
+            "| repo | /Volumes/Data/code/self/katana | feat/wf-mcp | git |\n"
+        )
+        rs = parse_context_paths(md)
+        assert len(rs) == 2
+        assert rs[0].expected_branch == ""
+        assert rs[1].expected_branch == "feat/wf-mcp"
+
     def test_no_table_returns_empty(self):
         assert parse_context_paths(CONTEXT_NO_TABLE) == []
 
@@ -122,12 +136,10 @@ class TestParseContextPaths:
 |------|------------|------------|------|
 | file | /some/file.txt | - | 无分支期望 |
 """
-        # "-" 是原样存储的，后续 classify 拿到 expected_branch="-" 与实际不同时
-        # 不触发分支漂移（因为 "-" 算"无期望"）——不过规范里 expected_branch 存 raw，
-        # 所以此处只验 parse 行为（raw 存储）。
+        # "-" 在 parse 阶段即归一为 ""（无期望），避免 classify 误触发分支漂移。
         result = parse_context_paths(md)
         assert len(result) == 1
-        assert result[0].expected_branch == "-"
+        assert result[0].expected_branch == ""
 
 
 # ---------------------------------------------------------------------------

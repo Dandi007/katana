@@ -86,6 +86,9 @@ def parse_context_paths(context_md: str) -> list[Resource]:
         name = cells[0].strip()
         path = cells[1].strip()
         expected_branch = cells[2].strip() if len(cells) > 2 else ""
+        # 分支占位符归一：按 strip 后的精确相等判定（保留含 '/' 的真实分支名如 feat/wf-mcp）
+        if expected_branch in {"-", "—", "/", "N/A", "n/a", "无"}:
+            expected_branch = ""
 
         # 跳过路径为空的行
         if not path:
