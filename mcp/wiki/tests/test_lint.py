@@ -49,3 +49,19 @@ def test_raw_zone_exempt(tmp_path):
     _page(tmp_path / "DeepThought" / "x" / "report.md", "类型: 卡片\n", "raw 内容\n")
     fs = lint.lint_mechanical(str(tmp_path))["findings"]
     assert all("DeepThought" not in f["path"] for f in fs)
+
+
+def test_extract_wikilinks_strips_path():
+    s = lint.extract_wikilinks("见 [[Index/甲综述]] 和 [[乙]]")
+    assert s == {"甲综述", "乙"}
+
+
+def test_path_style_wikilink_not_false_broken_or_orphan(tmp_path):
+    # 甲 用路径式链向 Index/乙综述；乙综述 实际存在于 Index/ 子目录
+    _page(tmp_path / "Zettelkasten" / "甲.md", _GOOD_FM, "见 [[Index/乙综述]]\n")
+    _page(tmp_path / "Zettelkasten" / "Index" / "乙综述.md", _GOOD_FM, "回链 [[甲]]\n")
+    fs = lint.lint_mechanical(str(tmp_path))["findings"]
+    # 不应把 [[Index/乙综述]] 误报为断链
+    assert not any(f["code"] == "broken_link" for f in fs)
+    # 乙综述 被甲链向，不应误报 orphan
+    assert not any(f["code"] == "orphan" and f["path"].endswith("乙综述.md") for f in fs)

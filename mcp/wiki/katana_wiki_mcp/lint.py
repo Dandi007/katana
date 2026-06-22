@@ -29,10 +29,11 @@ _CODE_MAP = [
 
 
 def extract_wikilinks(body: str) -> set[str]:
-    """提取 body 中所有 [[target]]，剥离 |alias 与 #anchor。"""
+    """提取 body 中所有 [[target]]，剥离 |alias、#anchor 与路径前缀。"""
     out: set[str] = set()
     for m in _WIKILINK_RE.findall(body):
         t = m.split("|")[0].split("#")[0].strip()
+        t = t.rsplit("/", 1)[-1]  # [[Index/甲]] → 甲，合 Obsidian basename 消歧语义
         if t:
             out.add(t)
     return out
