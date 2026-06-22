@@ -50,10 +50,15 @@ def _basename(path: str) -> str:
 
 
 def lint_mechanical(
-    wiki_root: str, path: str | None = None, *, exclude_dirs: set[str] | None = None
+    wiki_root: str, path: str | None = None, *,
+    zone: str | None = None, exclude_dirs: set[str] | None = None
 ) -> dict:
-    """机械体检：逐页 invariants + 跨页 orphan/broken_link。raw zone 由枚举层豁免。"""
+    """机械体检：逐页 invariants + 跨页 orphan/broken_link。raw zone 由枚举层豁免。
+    Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "Zettelkasten"），跨页基线只在该 zone 内算。"""
     docs = enumerate_docs(wiki_root, exclude_dirs=exclude_dirs)
+    if zone:
+        z = zone.rstrip("/") + "/"
+        docs = [d for d in docs if d["path"].startswith(z)]
     findings: list[dict] = []
 
     # 跨页基线：所有页 basename 集合 + 所有被链 target 集合
