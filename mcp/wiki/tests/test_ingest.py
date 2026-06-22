@@ -66,9 +66,12 @@ def test_apply_rejects_missing_provenance_zero_writes(wiki):
 
 def test_apply_rejects_island_no_outlink(wiki):
     bad = _valid_new_page("孤岛.md"); bad["body"] = "正文完全没有 wikilink\n"
+    before = subprocess.run(["git","-C",str(wiki),"rev-parse","HEAD"],capture_output=True,text=True).stdout
     out = ingest.apply({"new_pages":[bad],"log_line":"x"}, str(wiki),
                        validate_fn=invariants.validate_page, write_fn=pages.write_page,
                        backlink_fn=pages.ensure_backlink, log_fn=pages.append_log, commit_fn=pages.git_commit)
     assert out["applied"] is False
     assert any("孤岛" in e for e in out["rejected"]["孤岛.md"])
     assert not (wiki/"孤岛.md").exists()
+    after = subprocess.run(["git","-C",str(wiki),"rev-parse","HEAD"],capture_output=True,text=True).stdout
+    assert before == after                            # 无 commit
