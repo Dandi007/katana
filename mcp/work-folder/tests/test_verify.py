@@ -293,14 +293,40 @@ class TestOverallLevel:
 # ---------------------------------------------------------------------------
 
 class TestFsGitProbeSmoke:
-    WORKTREE_ROOT = "/Volumes/Data/code/worktrees/katana/wf-mcp"
+    @staticmethod
+    def _git(repo, *args):
+        import subprocess
+        subprocess.run(
+            ["git", "-c", "user.email=ci@ci", "-c", "user.name=ci",
+             "-C", str(repo), *args],
+            check=True, capture_output=True, text=True,
+        )
 
-    def test_worktree_root_is_git(self):
-        fact = fs_git_probe(self.WORKTREE_ROOT)
+    def test_real_git_repo_detected_clean(self, tmp_path):
+        # 自建 tmp git repo（CI 可移植，不硬编码任何机器路径）
+        self._git(tmp_path, "init", "-q")
+        (tmp_path / "f.txt").write_text("x", encoding="utf-8")
+        self._git(tmp_path, "add", "f.txt")
+        self._git(tmp_path, "commit", "-qm", "init")
+
+        fact = fs_git_probe(str(tmp_path))
         assert fact["exists"] is True
         assert fact["is_git"] is True
-        # 分支应为 feat/wf-mcp（允许 startswith 匹配以防 detached HEAD 等情况）
-        assert fact["branch"].startswith("feat/wf-mcp") or fact["branch"] == "feat/wf-mcp"
+        assert fact["branch"]  # 非空（init 分支名，main/master 因 git 配置而异）
+        assert fact["dirty"] is False
+
+    def test_real_git_repo_dirty_detected(self, tmp_path):
+        # 需先有一次 commit（否则 unborn HEAD，rev-parse 失败 → 不算 git）
+        self._git(tmp_path, "init", "-q")
+        (tmp_path / "f.txt").write_text("x", encoding="utf-8")
+        self._git(tmp_path, "add", "f.txt")
+        self._git(tmp_path, "commit", "-qm", "init")
+        # 再加未跟踪文件 → dirty
+        (tmp_path / "untracked.txt").write_text("y", encoding="utf-8")
+        fact = fs_git_probe(str(tmp_path))
+        assert fact["exists"] is True
+        assert fact["is_git"] is True
+        assert fact["dirty"] is True
 
     def test_missing_path_returns_not_exists(self):
         fact = fs_git_probe("/this/path/definitely/does/not/exist/12345")
