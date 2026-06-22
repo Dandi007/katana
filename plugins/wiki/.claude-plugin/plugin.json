@@ -1,7 +1,7 @@
 {
   "name": "wiki",
   "description": "LLM-maintained wiki engine for any markdown knowledge base — schema-driven zones, provenance-enforced ingest, deterministic query ladder, adversarial lint (Karpathy LLM Wiki pattern + governance)",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": { "name": "Dandi007" },
   "license": "MIT"
 }
