@@ -10,8 +10,10 @@ import os
 from fastmcp import FastMCP
 
 from katana_kb_mcp_shared import config, vault_search
+from katana_wiki_mcp import enumerate as _enumerate
 from katana_wiki_mcp import ingest as _ingest
 from katana_wiki_mcp import invariants as _inv
+from katana_wiki_mcp import lint as _lint
 from katana_wiki_mcp import pages as _pages
 from katana_wiki_mcp import query as _query
 
@@ -98,6 +100,29 @@ async def wiki_ingest_apply(proposal: dict) -> dict:
         write_fn=_pages.write_page, backlink_fn=_pages.ensure_backlink,
         log_fn=_pages.append_log, commit_fn=_pages.git_commit,
     )
+
+
+@mcp.tool()
+async def wiki_list_docs(zone: str | None = None) -> list[dict]:
+    """枚举 wiki 全部可写文档（自动排除 raw/干扰目录），返回带路径的清单。
+
+    返回每条含 path/类型/frontmatter/mtime/hash。拿到 path 后可自行 read/grep/顺 wikilink 深挖。
+    Args: zone 可选，限定子目录前缀（如 "Zettelkasten/Index"）。
+    """
+    docs = _enumerate.enumerate_docs(_wiki_root or ".")
+    if zone:
+        docs = [d for d in docs if d["path"].startswith(zone.rstrip("/") + "/")]
+    return docs
+
+
+@mcp.tool()
+async def wiki_lint_mechanical(path: str | None = None) -> dict:
+    """确定性机械体检：逐页不变量（缺 provenance/outlink/摘要/frontmatter）+ 跨页 orphan/broken_link。
+
+    返回 {findings:[{path,code,detail}], skipped, scanned}。raw zone 自动豁免。
+    Args: path 可选，限定单页逐页检查（跨页基线仍扫全库）。
+    """
+    return _lint.lint_mechanical(_wiki_root or ".", path)
 
 
 def main() -> None:

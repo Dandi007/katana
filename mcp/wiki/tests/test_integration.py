@@ -179,3 +179,27 @@ def test_search_routes_through_vault_search(wiki_repo, monkeypatch):
     assert isinstance(res, list)
     assert res[0]["path"] == "a.md"
     assert captured["dir"] == server._scope  # wiki_root==kb_root → None
+
+
+# --- 追加：wiki_list_docs / wiki_lint_mechanical ---
+
+def test_list_docs_returns_paths_excluding_raw(wiki_repo):
+    (wiki_repo / "Zettelkasten").mkdir()
+    (wiki_repo / "Zettelkasten" / "甲.md").write_text(
+        "---\n类型: 卡片\n摘要: s\n---\n链 [[existing]]\n", encoding="utf-8")
+    (wiki_repo / "DeepThought").mkdir()
+    (wiki_repo / "DeepThought" / "r.md").write_text(
+        "---\n类型: 卡片\n---\nraw\n", encoding="utf-8")
+    docs = _run(server.wiki_list_docs())
+    paths = [d["path"] for d in docs]
+    assert "Zettelkasten/甲.md" in paths
+    assert all("DeepThought" not in p for p in paths)
+
+
+def test_lint_mechanical_reports_broken_link(wiki_repo):
+    (wiki_repo / "Zettelkasten").mkdir()
+    (wiki_repo / "Zettelkasten" / "甲.md").write_text(
+        "---\n创建日期: 2026-06-22 10:00\ntags: [t]\n类型: 卡片\nsources: [human:x]\n摘要: s\n"
+        "---\n链 [[不存在]]\n", encoding="utf-8")
+    res = _run(server.wiki_lint_mechanical())
+    assert any(f["code"] == "broken_link" for f in res["findings"])
