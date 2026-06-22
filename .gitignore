@@ -4,3 +4,4 @@ plugins/memory/bin/
 __pycache__/
 *.pyc
 .jury/
+*.egg-info/
