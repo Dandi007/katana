@@ -7,8 +7,7 @@ from __future__ import annotations
 import re
 
 from katana_wiki_mcp import invariants as _inv
-from katana_wiki_mcp.enumerate import enumerate_docs
-from katana_wiki_mcp.pages import parse_page
+from katana_wiki_mcp.enumerate import enumerate_docs, safe_parse_page
 from pathlib import Path
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
@@ -63,7 +62,7 @@ def lint_mechanical(
     bodies: dict[str, str] = {}
     for d in docs:
         text = (Path(wiki_root) / d["path"]).read_text(encoding="utf-8")
-        _, body = parse_page(text)
+        _, body = safe_parse_page(text)
         bodies[d["path"]] = body
         linked_targets |= extract_wikilinks(body)
 

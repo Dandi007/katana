@@ -39,3 +39,19 @@ def test_enumerate_extracts_type_and_hash_and_mtime(tmp_path):
     (tmp_path / "Zettelkasten" / "甲.md").write_text(
         "---\n类型: 卡片\n摘要: s\n---\n改了\n", encoding="utf-8")
     assert en.enumerate_docs(str(tmp_path))[0]["hash"] != h1
+
+
+def test_enumerate_tolerates_malformed_frontmatter(tmp_path):
+    # 未闭合 [ → yaml.safe_load 抛 ParserError（真机 7 篇同类）
+    bad = tmp_path / "Zettelkasten" / "坏yaml.md"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("---\ntags: [未闭合\n类型: 卡片\n---\n正文 [[x]]\n", encoding="utf-8")
+    (tmp_path / "Zettelkasten" / "好.md").write_text(
+        "---\n类型: 卡片\n摘要: s\n---\n正文 [[y]]\n", encoding="utf-8")
+    docs = en.enumerate_docs(str(tmp_path))           # 不应抛异常
+    paths = [d["path"] for d in docs]
+    assert "Zettelkasten/坏yaml.md" in paths          # 坏页仍被枚举
+    assert "Zettelkasten/好.md" in paths
+    bad_doc = next(d for d in docs if d["path"].endswith("坏yaml.md"))
+    assert bad_doc["frontmatter"] == {}               # 解析失败退化为 {}
+    assert bad_doc["类型"] is None

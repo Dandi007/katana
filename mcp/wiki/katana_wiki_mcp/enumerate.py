@@ -15,6 +15,17 @@ DEFAULT_EXCLUDE_DIRS: set[str] = {
 }
 
 
+def safe_parse_page(text: str) -> tuple[dict, str]:
+    """容错版 parse_page：frontmatter 解析失败时退化为 ({}, 原文)，不抛异常。
+
+    只用于 enumerate/lint 的只读扫描路径；ingest 写入路径仍用严格 pages.parse_page。
+    """
+    try:
+        return parse_page(text)
+    except Exception:
+        return {}, text
+
+
 def _short_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
@@ -34,7 +45,7 @@ def enumerate_docs(
                 continue
             fp = Path(dirpath) / name
             text = fp.read_text(encoding="utf-8")
-            fm, _ = parse_page(text)
+            fm, _ = safe_parse_page(text)
             out.append({
                 "path": str(fp.relative_to(root)),
                 "类型": fm.get("类型"),
