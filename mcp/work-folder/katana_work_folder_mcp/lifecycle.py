@@ -174,7 +174,9 @@ def do_save(
 
     abs_path = str(Path(folder).resolve())
     now = now_fn()
-    now_hm = now.strftime("%H:%M")
+    # changelog 用秒级时间戳：避免同一分钟内两次相同事件渲染出 byte-identical 行
+    # 被 insert_changelog_row 的幂等去重吞掉，丢失 append-only 历史。
+    now_hm = now.strftime("%H:%M:%S")
     written: list[str] = []
 
     # 幂等种子（补全缺失的 progress.md / context.md）
@@ -241,9 +243,9 @@ def do_save(
 # 4. do_resume — 恢复 work-folder（核心不变量：BROKEN → blocked=True）
 # ---------------------------------------------------------------------------
 
-def _now_hm(now) -> str:
-    """从 datetime-like 对象提取 HH:MM 字符串。"""
-    return now.strftime("%H:%M")
+def _now_hm(now) -> str:  # noqa: D401 — changelog 秒级时间戳，见 do_save 说明
+    """从 datetime-like 对象提取 HH:MM:SS 字符串（changelog 秒级，避免幂等去重吞掉同分钟事件）。"""
+    return now.strftime("%H:%M:%S")
 
 
 def do_resume(folder: str, *, now_fn, probe_fn=None) -> dict:
@@ -300,6 +302,9 @@ def do_resume(folder: str, *, now_fn, probe_fn=None) -> dict:
     }
 
     # --- 环境验证 ---
+    # 注：验证只针对 context.md 中**声明**的关键路径（符合 SKILL.md R3）。
+    # 若 context 无关键路径表，resources=[] → overall=MATCH → 不阻塞放行；
+    # 这是「没声明就没东西可验」的有意行为，不是漏洞（checkpoint 未记路径即无验证义务）。
     context_md = loaded["context"] or ""
     resources = _ver.parse_context_paths(context_md)
     verdicts = _ver.verify_env(resources, probe_fn=probe_fn)

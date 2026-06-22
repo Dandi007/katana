@@ -4,6 +4,7 @@ TDD 顺序：先跑红，实现后转绿。
 """
 import asyncio
 import datetime
+import inspect
 
 import katana_work_folder_mcp.server as server
 
@@ -97,7 +98,7 @@ class TestToolRegistration:
         for fn_name in ("wf_search", "wf_create", "wf_list", "wf_save", "wf_resume"):
             fn = getattr(server, fn_name, None)
             assert fn is not None, f"server.{fn_name} not found"
-            assert asyncio.iscoroutinefunction(fn), f"server.{fn_name} should be async"
+            assert inspect.iscoroutinefunction(fn), f"server.{fn_name} should be async"
 
 
 # ---------------------------------------------------------------------------
