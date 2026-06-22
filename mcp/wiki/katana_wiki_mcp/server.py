@@ -1,22 +1,29 @@
 """katana-wiki-mcp — wiki 的 FastMCP server。
 
-第一个 tool：wiki_search（薄检索原语，复用 vault-search 栈，按 wiki_root scope）。
-业务逻辑抽成纯函数（compute_scope / _do_search）便于单测；FastMCP tool 只做薄壳。
+Tools:
+  wiki_search — 薄检索原语，复用 vault-search 栈，按 wiki_root scope。
+  wiki_query  — fat tool：判重检索 + cold gap-log + 返回综合协议文本。
+业务逻辑抽成纯函数便于单测；FastMCP tool 只做薄壳。
 """
+import datetime
 import os
 from fastmcp import FastMCP
 
 from katana_kb_mcp_shared import config, vault_search
+from katana_wiki_mcp import pages as _pages
+from katana_wiki_mcp import query as _query
 
 mcp = FastMCP(
     "katana-wiki-mcp",
     instructions=(
-        "Wiki 的 MCP 接口：知识检索/查询/入库。wiki_search 做混合检索并返回带路径的候选，"
-        "agent 可据路径自行深挖（read/grep/follow link）。"
+        "Wiki 的 MCP 接口：知识检索/查询/入库。"
+        "wiki_search 做混合检索并返回带路径的候选，agent 可据路径自行深挖。"
+        "wiki_query 做 fat 检索：判重 + cold gap-log + 综合协议，是 query skill 的 server 侧。"
     ),
 )
 
 _scope: str | None = None
+_wiki_root: str | None = None
 
 
 def compute_scope(wiki_root: str, kb_root: str) -> str | None:
@@ -26,8 +33,9 @@ def compute_scope(wiki_root: str, kb_root: str) -> str | None:
 
 
 def configure(wiki_root: str, kb_root: str) -> None:
-    global _scope
+    global _scope, _wiki_root
     _scope = compute_scope(wiki_root, kb_root)
+    _wiki_root = wiki_root
 
 
 def _do_search(query: str, top_k: int, scope: str | None) -> list[dict]:
@@ -50,6 +58,25 @@ async def wiki_search(query: str, top_k: int = 10) -> list[dict]:
         top_k: 返回上限，默认 10。
     """
     return _do_search(query, top_k, _scope)
+
+
+@mcp.tool()
+async def wiki_query(question: str, top_k: int = 10) -> dict:
+    """对 wiki 提问：server 判重检索 + 返回候选(带路径)与综合协议；空集走 cold 并记 gap log。
+
+    返回 candidates 后，按 synthesis_contract 综合作答：每条 claim 带 citation 或标 [inference]；
+    candidates 带 path，可自行 read 全文深挖。cold=True 表示 wiki 不覆盖，勿裸答冒充。
+
+    Args:
+        question: 问题文本。
+        top_k: 候选上限，默认 10。
+    """
+    return _query._do_query(
+        question, _scope, _wiki_root or ".", top_k,
+        search_fn=vault_search.search,
+        log_fn=_pages.append_log,
+        now_fn=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+    )
 
 
 def main() -> None:
