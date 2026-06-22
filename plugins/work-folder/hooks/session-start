@@ -28,12 +28,19 @@ esac
 # so the injected guidance points at the real work-folder regardless of cwd.
 WF_ABS="$(katana_resolve_path "$WF_PATH")"
 
-# Read the template and substitute the path
-content=$(cat "${PLUGIN_ROOT}/rules/work-folder.md" 2>/dev/null || true)
-[ -z "$content" ] && exit 0
+# per-suite 开关：mcp 模式不灌 full work-folder rules，只注一行触发器（二选一）
+WF_INTERFACE="$(katana_config_get "work_folder_interface" "skill" "KATANA_WORK_FOLDER_INTERFACE")"
 
-# Replace the default path in the template with the configured (absolute) path
-content="${content//docs\/work-records/${WF_ABS}}"
+if [ "$WF_INTERFACE" = "mcp" ]; then
+    content="本项目 work-folder 走 MCP（非 skill 模式）：跨 session 工作先调 wf_create 建新 / wf_resume 恢复（resume 时 server 实跑环境验证，返回 MATCH/DRIFT/BROKEN；BROKEN 必停、只报阻塞勿进入工作状态）；存档调 wf_save（server 强制追加 progress changelog、覆盖 context 快照、重生成 Resume Guide）；找历史工作记录用 wf_search（返回带路径候选，可据路径自行 read/grep）。work folder 根：${WF_ABS}。协议细节由各 tool 返回值下发。"
+else
+    # Read the template and substitute the path
+    content=$(cat "${PLUGIN_ROOT}/rules/work-folder.md" 2>/dev/null || true)
+    [ -z "$content" ] && exit 0
+
+    # Replace the default path in the template with the configured (absolute) path
+    content="${content//docs\/work-records/${WF_ABS}}"
+fi
 
 escape_for_json() {
     local s="$1"

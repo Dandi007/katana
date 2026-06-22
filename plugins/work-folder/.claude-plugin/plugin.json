@@ -1,7 +1,7 @@
 {
   "name": "work-folder",
   "description": "Work-folder convention (injected at session start) + checkpoint skill for cross-session save/resume",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "author": { "name": "Dandi007" },
   "license": "MIT"
 }
