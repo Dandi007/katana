@@ -55,3 +55,19 @@ def test_enumerate_tolerates_malformed_frontmatter(tmp_path):
     bad_doc = next(d for d in docs if d["path"].endswith("坏yaml.md"))
     assert bad_doc["frontmatter"] == {}               # 解析失败退化为 {}
     assert bad_doc["类型"] is None
+
+
+import json as _json
+
+
+def test_enumerate_frontmatter_is_json_serializable(tmp_path):
+    # 创建日期 不加引号 → yaml.safe_load 解析成 date 对象
+    p = tmp_path / "Zettelkasten" / "带日期.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("---\n创建日期: 2026-06-22\n类型: 卡片\n摘要: s\n---\n正文 [[x]]\n",
+                 encoding="utf-8")
+    docs = en.enumerate_docs(str(tmp_path))
+    # 整个结果可 JSON 序列化（不抛 TypeError）
+    _json.dumps(docs)
+    d = next(x for x in docs if x["path"].endswith("带日期.md"))
+    assert d["frontmatter"]["创建日期"] == "2026-06-22"  # date → ISO 字符串
