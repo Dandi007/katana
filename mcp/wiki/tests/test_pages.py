@@ -71,3 +71,20 @@ def test_archive_inbox_git_mv(wiki):
     newrel = pages.archive_inbox(str(f), str(wiki / "raw"), str(wiki))
     assert "raw" in newrel
     assert (wiki / newrel).exists() and not f.exists()
+
+
+def test_parse_page_body_with_dashes_not_misparsed():
+    fm = {"类型": "卡片", "tags": ["a"]}
+    body = "正文第一段\n\n---\n\n分隔线后第二段 [[x]]\n"
+    text = pages.render_page(fm, body)
+    fm2, body2 = pages.parse_page(text)
+    assert fm2 == fm
+    assert "分隔线后第二段" in body2
+    assert body2.count("---") == 1  # body 里的 --- 保留，没被当 frontmatter fence 吞掉
+
+
+def test_git_commit_empty_is_idempotent(wiki):
+    sha1 = subprocess.run(["git", "-C", str(wiki), "rev-parse", "--short", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    sha2 = pages.git_commit(str(wiki), "no-op", [])
+    assert sha2 == sha1  # 无变更：返回当前 HEAD，不炸

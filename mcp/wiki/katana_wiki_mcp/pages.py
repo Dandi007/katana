@@ -73,7 +73,7 @@ def append_log(wiki_root: str, line: str) -> None:
 
 
 def git_commit(wiki_root: str, message: str, paths: list[str]) -> str:
-    """Stage paths and commit in wiki_root. Returns short SHA."""
+    """Stage paths and commit in wiki_root. Returns short SHA. Idempotent: no-op if nothing staged."""
     def _run(*args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["git", "-C", wiki_root, *args],
@@ -83,6 +83,21 @@ def git_commit(wiki_root: str, message: str, paths: list[str]) -> str:
         )
 
     _run("add", "--", *paths)
+
+    # Check if there are staged changes
+    diff_result = subprocess.run(
+        ["git", "-C", wiki_root, "diff", "--cached", "--quiet"],
+        capture_output=True,
+        text=True,
+    )
+
+    # diff --cached --quiet: exit 0 = no changes, exit 1 = has changes
+    if diff_result.returncode == 0:
+        # No staged changes; return current HEAD short SHA without committing
+        result = _run("rev-parse", "--short", "HEAD")
+        return result.stdout.strip()
+
+    # Has staged changes; commit
     _run("commit", "-m", message)
     result = _run("rev-parse", "--short", "HEAD")
     return result.stdout.strip()
