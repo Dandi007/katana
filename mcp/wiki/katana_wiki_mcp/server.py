@@ -10,6 +10,8 @@ import os
 from fastmcp import FastMCP
 
 from katana_kb_mcp_shared import config, vault_search
+from katana_wiki_mcp import ingest as _ingest
+from katana_wiki_mcp import invariants as _inv
 from katana_wiki_mcp import pages as _pages
 from katana_wiki_mcp import query as _query
 
@@ -76,6 +78,25 @@ async def wiki_query(question: str, top_k: int = 10) -> dict:
         search_fn=vault_search.search,
         log_fn=_pages.append_log,
         now_fn=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+    )
+
+
+@mcp.tool()
+async def wiki_ingest_plan(source_text: str) -> dict:
+    """入库第一步：server orient 判重 + 返回判断指令(create-vs-update/resist-table/拆单元)与 proposal schema。
+    据此造 proposal 交给 wiki_ingest_apply。Args: source_text 待入库内容(或其摘录)。"""
+    return _ingest.plan(source_text, _scope, search_fn=vault_search.search)
+
+
+@mcp.tool()
+async def wiki_ingest_apply(proposal: dict) -> dict:
+    """入库第二步：server 校验不变量(缺 provenance/outlink/frontmatter 必拒,零落盘)→ 通过则写页+自动反链+log+commit。
+    Args: proposal 见 wiki_ingest_plan 返回的 proposal_schema。返回 applied/rejected/commit。"""
+    return _ingest.apply(
+        proposal, _wiki_root or ".",
+        validate_fn=_inv.validate_page,
+        write_fn=_pages.write_page, backlink_fn=_pages.ensure_backlink,
+        log_fn=_pages.append_log, commit_fn=_pages.git_commit,
     )
 
 
