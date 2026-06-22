@@ -30,3 +30,17 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - name: OpenCode parity adapter unit tests
         run: bun test parity/adapter/opencode/
+
+  mcp-unit:
+    # Gates the MCP servers (katana-wiki-mcp + katana-work-folder-mcp): L0 单元 +
+    # 全状态图集成回归（create/save/resume MATCH/DRIFT/BROKEN/list/search）。
+    # 无 svc / 无 LLM / 无网络；把原先只能手跑的 live e2e 固化成确定性 merge gate。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: install mcp packages + run unit/integration tests
+        run: |
+          uv venv
+          uv pip install -e mcp/shared -e mcp/wiki -e mcp/work-folder pytest
+          PYTHON=.venv/bin/python bash mcp/run-tests.sh
