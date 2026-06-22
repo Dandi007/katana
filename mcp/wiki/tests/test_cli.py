@@ -34,3 +34,14 @@ def test_cli_lint_mechanical_json(tmp_path, capsys, monkeypatch):
     assert rc == 0
     res = json.loads(capsys.readouterr().out)
     assert any(f["code"] == "broken_link" for f in res["findings"])
+
+
+def test_cli_lint_mechanical_zone_flag(tmp_path, capsys, monkeypatch):
+    _seed(tmp_path)
+    (tmp_path / "智元工作").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "智元工作" / "日报.md").write_text("# 日报\n无 frontmatter\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_resolve_wiki_root", lambda: str(tmp_path))
+    rc = cli.main(["lint-mechanical", "--zone", "Zettelkasten"])
+    assert rc == 0
+    res = json.loads(capsys.readouterr().out)
+    assert all("智元工作" not in f["path"] for f in res["findings"])

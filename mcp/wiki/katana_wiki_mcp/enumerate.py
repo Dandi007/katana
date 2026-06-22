@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import os
 from pathlib import Path
@@ -13,6 +14,31 @@ from katana_wiki_mcp.pages import parse_page
 DEFAULT_EXCLUDE_DIRS: set[str] = {
     ".git", ".obsidian", ".wiki", ".trash", "转换文档", "DeepThought",
 }
+
+
+def safe_parse_page(text: str) -> tuple[dict, str]:
+    """容错版 parse_page：frontmatter 解析失败时退化为 ({}, 原文)，不抛异常。
+
+    只用于 enumerate/lint 的只读扫描路径；ingest 写入路径仍用严格 pages.parse_page。
+    """
+    try:
+        return parse_page(text)
+    except Exception:
+        return {}, text
+
+
+def _json_safe(obj):
+    """递归把 date/datetime 转 ISO 字符串，保证 frontmatter 可 JSON 序列化。
+
+    yaml.safe_load 会把 `创建日期: 2026-06-22` 解析成 date 对象，MCP/CLI 的 JSON 出口需此归一。
+    """
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (datetime.date, datetime.datetime)):
+        return obj.isoformat()
+    return obj
 
 
 def _short_hash(text: str) -> str:
@@ -34,11 +60,11 @@ def enumerate_docs(
                 continue
             fp = Path(dirpath) / name
             text = fp.read_text(encoding="utf-8")
-            fm, _ = parse_page(text)
+            fm, _ = safe_parse_page(text)
             out.append({
                 "path": str(fp.relative_to(root)),
                 "类型": fm.get("类型"),
-                "frontmatter": fm,
+                "frontmatter": _json_safe(fm),
                 "mtime": fp.stat().st_mtime,
                 "hash": _short_hash(text),
             })

@@ -116,13 +116,13 @@ async def wiki_list_docs(zone: str | None = None) -> list[dict]:
 
 
 @mcp.tool()
-async def wiki_lint_mechanical(path: str | None = None) -> dict:
+async def wiki_lint_mechanical(path: str | None = None, zone: str | None = None) -> dict:
     """确定性机械体检：逐页不变量（缺 provenance/outlink/摘要/frontmatter）+ 跨页 orphan/broken_link。
 
     返回 {findings:[{path,code,detail}], skipped, scanned}。raw zone 自动豁免。
-    Args: path 可选，限定单页逐页检查（跨页基线仍扫全库）。
+    Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "Zettelkasten"），跨页基线只在该 zone 内算。
     """
-    return _lint.lint_mechanical(_wiki_root or ".", path)
+    return _lint.lint_mechanical(_wiki_root or ".", path, zone=zone)
 
 
 def main() -> None:

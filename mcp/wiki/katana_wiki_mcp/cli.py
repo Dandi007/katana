@@ -21,6 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     p_list.add_argument("--zone", default=None)
     p_lint = sub.add_parser("lint-mechanical")
     p_lint.add_argument("--path", default=None)
+    p_lint.add_argument("--zone", default=None)
     args = parser.parse_args(argv)
 
     root = _resolve_wiki_root()
@@ -32,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(docs, sys.stdout, ensure_ascii=False)
         return 0
     if args.cmd == "lint-mechanical":
-        res = _lint.lint_mechanical(root, args.path)
+        res = _lint.lint_mechanical(root, args.path, zone=args.zone)
         json.dump(res, sys.stdout, ensure_ascii=False)
         return 0
     return 1

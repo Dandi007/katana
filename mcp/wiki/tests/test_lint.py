@@ -65,3 +65,29 @@ def test_path_style_wikilink_not_false_broken_or_orphan(tmp_path):
     assert not any(f["code"] == "broken_link" for f in fs)
     # 乙综述 被甲链向，不应误报 orphan
     assert not any(f["code"] == "orphan" and f["path"].endswith("乙综述.md") for f in fs)
+
+
+def test_lint_tolerates_malformed_frontmatter(tmp_path):
+    bad = tmp_path / "Zettelkasten" / "坏yaml.md"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("---\ntags: [未闭合\n---\n正文链 [[甲]]\n", encoding="utf-8")
+    _page(tmp_path / "Zettelkasten" / "甲.md", _GOOD_FM, "回链 [[坏yaml]]\n")
+    res = lint.lint_mechanical(str(tmp_path))          # 不应抛异常
+    assert res["scanned"] >= 2
+    # 坏页 body 的 [[甲]] 仍被识别 → 甲 不应被误报 orphan
+    assert not any(f["code"] == "orphan" and f["path"].endswith("甲.md")
+                   for f in res["findings"])
+
+
+def test_lint_mechanical_zone_scoping(tmp_path):
+    # wiki zone 内一页（缺各种东西）+ zone 外一页（工作记录，无 frontmatter）
+    _page(tmp_path / "Zettelkasten" / "甲.md", _GOOD_FM, "正文 [[乙]]\n")
+    (tmp_path / "智元工作").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "智元工作" / "周报.md").write_text("# 周报\n无 frontmatter 的工作记录\n", encoding="utf-8")
+    # 不限 zone：两边都扫到
+    full = lint.lint_mechanical(str(tmp_path))
+    assert any("智元工作" in f["path"] for f in full["findings"])
+    # 限 zone=Zettelkasten：只在 wiki 子树内，工作记录零 finding
+    scoped = lint.lint_mechanical(str(tmp_path), zone="Zettelkasten")
+    assert all("智元工作" not in f["path"] for f in scoped["findings"])
+    assert all(f["path"].startswith("Zettelkasten/") for f in scoped["findings"])
