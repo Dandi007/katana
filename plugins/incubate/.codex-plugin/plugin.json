@@ -1,0 +1,19 @@
+{
+  "name": "incubate",
+  "version": "0.1.0",
+  "description": "Idea incubator for gathering and shaping thoughts into future proposals.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "ideas", "writing"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Incubate",
+    "shortDescription": "Idea incubation workflow.",
+    "longDescription": "Accrete notes, commentary, and inspiration around a concrete topic before writing a proposal.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use incubate to capture and shape this idea."]
+  }
+}

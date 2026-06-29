@@ -1,0 +1,19 @@
+{
+  "name": "writing",
+  "version": "0.3.1",
+  "description": "Document writing, BLUF structure, and readability review workflows.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "writing", "review"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Writing",
+    "shortDescription": "Writing and readability workflows.",
+    "longDescription": "Document writing, BLUF structure, readability review, and template-guided writing workflows.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use writing:write for this document."]
+  }
+}

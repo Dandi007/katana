@@ -1,0 +1,6 @@
+interface:
+  display_name: Retrieval Shared
+  short_description: Internal reference holder; use retrieval:route instead.
+
+policy:
+  allow_implicit_invocation: false

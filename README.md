@@ -69,57 +69,30 @@ skill exposure.
 
 ## Install (Codex)
 
-SKILL.md files follow the [Agent Skills](https://agentskills.io) open standard,
-which Codex supports natively (source:
-[agentskills.io client listing](https://agentskills.io),
-[developers.openai.com/codex/skills](https://developers.openai.com/codex/skills/)).
-
-Codex discovers skills from `.agents/skills/` in your repo root (and parent
-directories up to the repo root), as well as `$HOME/.agents/skills` for
-user-level installs.
-
-**Project-level install** (skills available in this repo only):
+Katana ships a Codex marketplace at `.agents/plugins/marketplace.json`. Each
+`plugins/<name>` package has its own `.codex-plugin/plugin.json`, so the Codex
+install shape mirrors the Claude Code plugin shape.
 
 ```bash
-# Clone katana and symlink the skills you want into your repo's .agents/skills/
-git clone https://github.com/Dandi007/katana /tmp/katana
-
-mkdir -p .agents/skills
-cp -r /tmp/katana/plugins/guide/skills/using-katana         .agents/skills/
-cp -r /tmp/katana/plugins/work-folder/skills/checkpoint     .agents/skills/
-cp -r /tmp/katana/plugins/deep-research/skills/deep-research .agents/skills/
-cp -r /tmp/katana/plugins/memory/skills/remember            .agents/skills/
-cp -r /tmp/katana/plugins/memory/skills/validate            .agents/skills/
-cp -r /tmp/katana/plugins/obsidian-md/skills/obsidian-writing .agents/skills/
-cp -r /tmp/katana/plugins/wiki/skills/using-wiki            .agents/skills/
-cp -r /tmp/katana/plugins/wiki/skills/init                  .agents/skills/
-cp -r /tmp/katana/plugins/wiki/skills/ingest                .agents/skills/
-cp -r /tmp/katana/plugins/wiki/skills/query                 .agents/skills/
-cp -r /tmp/katana/plugins/wiki/skills/lint                  .agents/skills/
-cp -r /tmp/katana/plugins/fpa/skills/fpa                    .agents/skills/
-cp -r /tmp/katana/plugins/fpa/skills/first-principles-thinking .agents/skills/
+codex plugin marketplace add Dandi007/katana
 ```
 
-**User-level install** (skills available across all repos):
+Then open Codex Plugins, choose the `Katana` marketplace, and install the
+individual plugins you want (`guide`, `retrieval`, `wiki`, `work-folder`,
+`writing`, etc.).
+
+For local development, point Codex at a clone:
 
 ```bash
-git clone https://github.com/Dandi007/katana /tmp/katana
-
-mkdir -p "$HOME/.agents/skills"
-cp -r /tmp/katana/plugins/guide/skills/using-katana         "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/work-folder/skills/checkpoint     "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/deep-research/skills/deep-research "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/memory/skills/remember            "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/memory/skills/validate            "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/obsidian-md/skills/obsidian-writing "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/wiki/skills/using-wiki            "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/wiki/skills/init                  "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/wiki/skills/ingest                "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/wiki/skills/query                 "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/wiki/skills/lint                  "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/fpa/skills/fpa                    "$HOME/.agents/skills/"
-cp -r /tmp/katana/plugins/fpa/skills/first-principles-thinking "$HOME/.agents/skills/"
+codex plugin marketplace add /data/code/self/katana
+codex plugin add retrieval@katana
+codex plugin add wiki@katana
 ```
+
+Codex installs the bundled `skills/` from each selected plugin. Claude Code
+SessionStart/PostToolUse hooks are not part of this Codex wrapper; use Codex
+repo instructions or a future Codex hooks adapter for equivalent lifecycle
+behavior.
 
 ## Testing
 
@@ -128,6 +101,13 @@ contract (input prompt + mechanical artifact assertions), executed for real
 via `claude -p` in an isolated fixture KB with per-case snapshots. A judge
 layer backstops semantic expectations (NEEDS-REVIEW, never hard-fail). See
 `tests/README.md`.
+
+Codex plugin metadata is checked with:
+
+```bash
+python3 scripts/validate_codex_plugins.py
+python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/retrieval
+```
 
 Claude Code-specific features degrade gracefully elsewhere:
 

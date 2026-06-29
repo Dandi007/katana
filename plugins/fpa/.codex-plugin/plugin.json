@@ -1,0 +1,19 @@
+{
+  "name": "fpa",
+  "version": "0.1.0",
+  "description": "First Principles Analysis workflow with structured reasoning and validation.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "reasoning", "analysis"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana FPA",
+    "shortDescription": "First Principles Analysis.",
+    "longDescription": "Structured first-principles reasoning workflow with analysis artifacts and validation guidance.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use fpa to analyze this from first principles."]
+  }
+}

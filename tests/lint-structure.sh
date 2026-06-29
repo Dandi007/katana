@@ -54,6 +54,9 @@ if mkt != disk:
     print(f"G0-FAIL: marketplace {sorted(mkt)} != disk {sorted(disk)}"); sys.exit(1)
 PY
 
+# 4b) Codex plugin wrappers ↔ marketplace.json 一致性
+python3 "$REPO/scripts/validate_codex_plugins.py" || FAIL=1
+
 # 5) table.json ↔ hooks.json 一致性校验
 python3 - "$REPO" <<'PY' || FAIL=1
 import json, sys, pathlib
