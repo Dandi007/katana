@@ -1,0 +1,19 @@
+{
+  "name": "jury",
+  "version": "0.2.1",
+  "description": "Multi-model review jury workflow.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "review", "jury"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Jury",
+    "shortDescription": "Multi-model review workflow.",
+    "longDescription": "Fan out review prompts, preserve divergence, and synthesize review votes.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use jury to review this artifact."]
+  }
+}

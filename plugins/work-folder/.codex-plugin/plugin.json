@@ -1,0 +1,19 @@
+{
+  "name": "work-folder",
+  "version": "0.4.2",
+  "description": "Work-folder convention and checkpoint skill for cross-session save and resume.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "work-folder", "checkpoint"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Work Folder",
+    "shortDescription": "Checkpoint and resume workflow.",
+    "longDescription": "Work-folder checkpoint skill for saving and resuming cross-session task state.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use checkpoint to save this work state."]
+  }
+}

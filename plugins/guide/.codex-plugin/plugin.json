@@ -1,0 +1,19 @@
+{
+  "name": "guide",
+  "version": "0.2.0",
+  "description": "Toolkit map and composition guide for katana plugins.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "guide", "workflow"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Guide",
+    "shortDescription": "Katana toolkit guide.",
+    "longDescription": "Composition guide for selecting and combining katana skills.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use using-katana to orient this task."]
+  }
+}

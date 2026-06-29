@@ -1,0 +1,19 @@
+{
+  "name": "wiki",
+  "version": "0.3.2",
+  "description": "LLM-maintained wiki engine for Markdown knowledge bases.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "wiki", "knowledge-base"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Wiki",
+    "shortDescription": "Markdown wiki governance.",
+    "longDescription": "Schema-driven query, ingest, init, and lint workflows for Markdown knowledge bases.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use wiki:query to answer from the wiki."]
+  }
+}

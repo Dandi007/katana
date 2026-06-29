@@ -1,0 +1,80 @@
+{
+  "name": "katana",
+  "interface": {
+    "displayName": "Katana"
+  },
+  "plugins": [
+    {
+      "name": "guide",
+      "source": { "source": "local", "path": "./plugins/guide" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    },
+    {
+      "name": "work-folder",
+      "source": { "source": "local", "path": "./plugins/work-folder" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    },
+    {
+      "name": "deep-research",
+      "source": { "source": "local", "path": "./plugins/deep-research" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    },
+    {
+      "name": "memory",
+      "source": { "source": "local", "path": "./plugins/memory" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    },
+    {
+      "name": "obsidian-md",
+      "source": { "source": "local", "path": "./plugins/obsidian-md" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    },
+    {
+      "name": "wiki",
+      "source": { "source": "local", "path": "./plugins/wiki" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    },
+    {
+      "name": "retrieval",
+      "source": { "source": "local", "path": "./plugins/retrieval" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    },
+    {
+      "name": "fpa",
+      "source": { "source": "local", "path": "./plugins/fpa" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    },
+    {
+      "name": "feishu-docs",
+      "source": { "source": "local", "path": "./plugins/feishu-docs" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    },
+    {
+      "name": "incubate",
+      "source": { "source": "local", "path": "./plugins/incubate" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    },
+    {
+      "name": "writing",
+      "source": { "source": "local", "path": "./plugins/writing" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    },
+    {
+      "name": "jury",
+      "source": { "source": "local", "path": "./plugins/jury" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

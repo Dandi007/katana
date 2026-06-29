@@ -1,0 +1,19 @@
+{
+  "name": "retrieval",
+  "version": "0.3.2",
+  "description": "Multi-source information retrieval with intent routing and credibility labels.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "retrieval", "search"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Retrieval",
+    "shortDescription": "Multi-source retrieval routing.",
+    "longDescription": "Intent routing, credibility labels, and source-specific retrieval skills for web, local notes, code, GitHub, GitLab, Feishu, Reddit, and more.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use retrieval:route to find sources."]
+  }
+}

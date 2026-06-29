@@ -1,0 +1,19 @@
+{
+  "name": "feishu-docs",
+  "version": "0.2.1",
+  "description": "Mirror Feishu DocX as local block-tree AST and read-only Markdown.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "feishu", "docs"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Feishu Docs",
+    "shortDescription": "Mirror Feishu DocX locally.",
+    "longDescription": "One-way pull workflow for mirroring Feishu DocX as local source-of-truth artifacts.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use feishu-docs to mirror this document."]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "obsidian-md",
+  "version": "0.1.0",
+  "description": "Obsidian Markdown writing rules grounded in official docs.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "obsidian", "markdown"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Obsidian Markdown",
+    "shortDescription": "Obsidian Markdown rules.",
+    "longDescription": "Grounded Obsidian Markdown writing rules for wikilinks, headings, frontmatter, embeds, and callouts.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use obsidian-writing for this Markdown note."]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "memory",
+  "version": "0.2.3",
+  "description": "Operational memory skills for verified facts and lifecycle management.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "memory", "facts"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Memory",
+    "shortDescription": "Verified fact memory skills.",
+    "longDescription": "Skills for remembering and validating operational memory cards.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use memory to store this verified fact."]
+  }
+}

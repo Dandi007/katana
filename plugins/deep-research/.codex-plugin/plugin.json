@@ -1,0 +1,19 @@
+{
+  "name": "deep-research",
+  "version": "0.6.1",
+  "description": "Deep research over your local knowledge base, web, and named platform sources.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "research", "agent-skills"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Deep Research",
+    "shortDescription": "Multi-round cited research workflow.",
+    "longDescription": "Research over local knowledge bases, web, and named platform sources with a cited report workflow.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use deep-research to research this topic."]
+  }
+}
