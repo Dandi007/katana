@@ -45,9 +45,22 @@ def render_index(entries: list[dict]) -> str:
 
     每行：updated · status · id · title · goal · folder
     """
+
+    def _updated_key(e):
+        """统一 updated 为 ISO 字符串排序。
+
+        YAML 解析时，不带引号的 ``2026-07-01`` 会被解析成 ``datetime.date``，
+        带引号的 ``"2026-07-01"`` 则是 str。混在一起 sorted() 会抛 TypeError。
+        统一转成 ``YYYY-MM-DD`` 字符串再排，空值降到最后。
+        """
+        v = e["fm"].get("updated", "")
+        if hasattr(v, "isoformat"):  # datetime.date / datetime.datetime
+            return v.isoformat()
+        return str(v) if v else ""
+
     sorted_entries = sorted(
         entries,
-        key=lambda e: e["fm"].get("updated", ""),
+        key=_updated_key,
         reverse=True,
     )
     lines = [
@@ -60,7 +73,7 @@ def render_index(entries: list[dict]) -> str:
     ]
     for e in sorted_entries:
         fm = e["fm"]
-        updated = fm.get("updated", "")
+        updated = _updated_key(e)  # 统一转 ISO 字符串（datetime.date → str）
         status = fm.get("status", "")
         id_ = fm.get("id", "")
         title = fm.get("title", "")
