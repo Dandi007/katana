@@ -9,6 +9,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 katana-work-folder-mcp = "katana_work_folder_mcp.server:main"
+wf-lint = "katana_work_folder_mcp.brief:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
