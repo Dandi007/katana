@@ -200,6 +200,30 @@ class TestWfListRouting:
 
 
 # ---------------------------------------------------------------------------
+# 6b. 路由测试：wf_reindex 路由到 _reindex.reindex（用 _wf_root）
+# ---------------------------------------------------------------------------
+
+class TestWfReindexRouting:
+    def test_registered_and_routes(self, monkeypatch):
+        tools = asyncio.run(server.mcp.list_tools())
+        assert "wf_reindex" in {t.name for t in tools}
+
+        _set_wf_root("/kb/wf")
+        captured = {}
+
+        def fake_reindex(root, dry_run=False):
+            captured["root"] = root
+            captured["dry_run"] = dry_run
+            return {"indexed": 3, "skipped": 0, "errors": [], "index_path": "/kb/wf/INDEX.md"}
+
+        monkeypatch.setattr(server._reindex, "reindex", fake_reindex)
+        result = asyncio.run(server.wf_reindex(dry_run=True))
+        assert captured["root"] == "/kb/wf"
+        assert captured["dry_run"] is True
+        assert result["indexed"] == 3
+
+
+# ---------------------------------------------------------------------------
 # 7. 路由测试：wf_save 路由到 _lifecycle.do_save（含 _safe_resume_fields 过滤）
 # ---------------------------------------------------------------------------
 

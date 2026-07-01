@@ -14,6 +14,7 @@ from fastmcp import FastMCP
 
 from katana_kb_mcp_shared import config, vault_search
 from katana_work_folder_mcp import lifecycle as _lifecycle
+from katana_work_folder_mcp import reindex as _reindex
 
 mcp = FastMCP(
     "katana-work-folder-mcp",
@@ -171,6 +172,19 @@ async def wf_resume(folder: str) -> dict:
         folder: work-folder 路径（绝对或相对 work_folder_root）。
     """
     return _lifecycle.do_resume(_resolve_folder(folder), now_fn=_now)
+
+
+@mcp.tool()
+async def wf_reindex(dry_run: bool = False) -> dict:
+    """扫全 work_folder_root 下的 `_brief.md`，按 updated 倒序重生成顶层 INDEX.md。
+
+    server 机械保证：递归扫描、parse、排序、写 INDEX.md（dry_run 时只返回 preview 不落盘）。
+    wf_create/save/resume 只维护单个 folder 的 `_brief.md`；INDEX 是聚合视图，需要显式 reindex 刷新。
+
+    Args:
+        dry_run: True 时不写文件，返回 preview 字段含将生成的 INDEX 内容。
+    """
+    return _reindex.reindex(_wf_root or ".", dry_run=dry_run)
 
 
 def main() -> None:
