@@ -18,7 +18,9 @@ from dataclasses import asdict
 from pathlib import Path
 
 from katana_work_folder_mcp import artifacts as _art
+from katana_work_folder_mcp import brief_ops as _brief_ops
 from katana_work_folder_mcp import verify as _ver
+from katana_work_folder_mcp.brief import BRIEF_NAME, BriefError, parse_brief
 
 # ---------------------------------------------------------------------------
 # 协议常量（返回给模型的"判断半"）
@@ -118,6 +120,16 @@ def do_create(work_folder_root: str, topic: str, *, now_fn) -> dict:
         phase="",
         now=now_hm,
     )
+
+    # _brief.md — work folder 的"身份证"，创建即 seed（status=active，见 D8）。
+    if _brief_ops.seed_brief(
+        folder,
+        title=topic,
+        goal=topic,
+        status="active",
+        now=now.strftime("%Y-%m-%d"),
+    ):
+        seeded.append(BRIEF_NAME)
 
     return {
         "created": True,
@@ -231,6 +243,19 @@ def do_save(
     guide_files = _art.gen_resume_guide(folder, **rf)
     written.extend(guide_files)
 
+    # _brief.md — 写入即刷新 updated + 拉回 active（D8）。
+    # 缺失时用 progress 的 goal 兜底 seed（老 folder 迁移期）。
+    _pg_goal, _, _ = _read_progress_fields(folder)
+    seed_title = _pg_goal or summary
+    if _brief_ops.touch_brief(
+        folder,
+        now=now.strftime("%Y-%m-%d"),
+        reactivate=True,
+        seed_title=seed_title,
+        seed_goal=_pg_goal or seed_title,
+    ):
+        written.append(BRIEF_NAME)
+
     return {
         "saved": True,
         "folder": abs_path,
@@ -326,6 +351,19 @@ def do_resume(folder: str, *, now_fn, probe_fn=None) -> dict:
         detail=f"环境验证: {n_match}✅ {n_drift}⚠️ {n_broken}❌",
     )
 
+    # --- _brief.md 复活（D8：resume 即刷新 updated + status 拉回 active） ---
+    _pg_goal = ""
+    m = re.search(r"\*\*Goal:\*\*\s*(.+)", loaded["progress"] or "")
+    if m:
+        _pg_goal = m.group(1).strip()
+    _brief_ops.touch_brief(
+        folder,
+        now=now.strftime("%Y-%m-%d"),
+        reactivate=True,
+        seed_title=_pg_goal or None,
+        seed_goal=_pg_goal or None,
+    )
+
     # --- 构建 resume_report ---
     level_icon = {"MATCH": "✅", "DRIFT": "⚠️", "BROKEN": "❌"}
     verdict_lines = "\n".join(
@@ -371,7 +409,29 @@ def do_list(work_folder_root: str, *, limit: int = 10) -> dict:
         limit:            返回上限（默认 10）。
 
     Returns:
-        {"candidates": [{path, status, mtime}, ...]}
+        {"candidates": [{path, status, mtime, title?, goal?, brief_status?, updated?}, ...]}
+
+    存在 `_brief.md` 时补充 title/goal/brief_status/updated（brief 是新 SSoT），
+    解析失败静默跳过 enrich（不影响候选本身）。
     """
     candidates = _art.list_work_folders(work_folder_root)[:limit]
+    for c in candidates:
+        _enrich_with_brief(c)
     return {"candidates": candidates}
+
+
+def _enrich_with_brief(candidate: dict) -> None:
+    """就地为候选补 brief 字段（title/goal/brief_status/updated）；无 brief 或解析失败则跳过。"""
+    brief = Path(candidate["path"]) / BRIEF_NAME
+    if not brief.exists():
+        return
+    try:
+        r = parse_brief(brief.read_text(encoding="utf-8"))
+    except (BriefError, OSError):
+        return
+    fm = r["frontmatter"]
+    candidate["title"] = fm.get("title", "")
+    candidate["goal"] = r["goal"]
+    candidate["brief_status"] = fm.get("status", "")
+    updated = fm.get("updated", "")
+    candidate["updated"] = updated.isoformat() if hasattr(updated, "isoformat") else str(updated)

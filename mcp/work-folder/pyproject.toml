@@ -10,6 +10,7 @@ dev = ["pytest>=8"]
 [project.scripts]
 katana-work-folder-mcp = "katana_work_folder_mcp.server:main"
 wf-lint = "katana_work_folder_mcp.brief:main"
+wf-touch = "katana_work_folder_mcp.brief_ops:main"
 wf-reindex = "katana_work_folder_mcp.reindex:main"
 wf-report = "katana_work_folder_mcp.report:main"
 
