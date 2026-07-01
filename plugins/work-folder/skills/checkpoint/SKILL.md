@@ -46,6 +46,7 @@ Work folder 路径可通过以下方式覆盖（优先级从高到低）：
 
 | Artifact | checkpoint 操作 |
 |----------|----------------|
+| `_brief.md` | **MCP 自动维护**——`wf_create` seed、`wf_save`/`wf_resume` 刷新 `updated` + 拉回 active；手写场景才需手动补。顶层 `INDEX.md` 由 `wf_reindex` 聚合，非单次 checkpoint 职责 |
 | spec.md / plan.md / goal.md | 只读引用；已有不动，无则不创建（不在 checkpoint 职责内）|
 | golden-order.md | **必须维护**——回顾本次 session，把尚未落地的用户输入/纠正/选择追加进去 |
 | progress.md | **必须更新**——更新状态、追加 Changelog |

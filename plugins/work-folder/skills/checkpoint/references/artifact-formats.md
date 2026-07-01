@@ -9,6 +9,7 @@
 
 | 文件 | 记录内容 |
 |------|----------|
+| `_brief.md` | **work folder 的"身份证"（core）**：YAML frontmatter（id/title/status/created/updated + 可选 tags/kind/links）+ 一行 `**Goal:**` + 摘要。顶层 `INDEX.md` 由全库 `_brief.md` 聚合生成 |
 | `golden-order.md` | 人类输入与纠正（最高优先级）：用户的选择、答疑、纠正、scope/priority 变更 |
 | `goal.md` | 交付目标与验收标准 |
 | `spec.md` | 技术设计、约束、范围、非目标 |
@@ -19,6 +20,34 @@
 | `CLAUDE.md` / `AGENTS.md` | Resume Guide：供新 session 快速恢复上下文的摘要 |
 
 ## Artifact 格式规范
+
+### _brief.md（core，由 MCP 自动维护）
+
+work folder 的"身份证"，与顶层 `INDEX.md` 构成 brief/索引层。
+
+```markdown
+---
+id: 2026-0701-<slug>          # YYYY-MMDD-<slug>，由 folder 路径推导
+title: <一句话标题>
+status: active                # active / paused / archived / completed
+created: 2026-07-01
+updated: "2026-07-01"         # 带引号 ISO 字符串，避免 YAML 解析成 date 后 reindex 混类型排序
+tags: [tag1, tag2]            # 可选
+kind: design                  # 可选
+links: ["[[other-brief]]"]    # 可选
+---
+
+**Goal:** <一行目标，goal.md 的浓缩>
+
+<摘要：现在推进到哪、下一步是什么>
+```
+
+**维护方式（无需手写，MCP 机械保证）**：
+- `wf_create` → 创建即 seed `_brief.md`（status=active）
+- `wf_save` / `wf_resume` → 写入/恢复即刷新 `updated`，并把 status 拉回 active（completed 不复活）
+- `wf_reindex` → 扫全库 `_brief.md`，按 `updated` 倒序重生成顶层 `INDEX.md`（`wf_create/save` 只维护单个 folder，INDEX 需显式 reindex；session-harvest 追加 progress 后也会自动 touch + reindex）
+
+手工整理老 folder 时可用 `wf-touch <folder>` / `wf-reindex <root>` CLI，或 `wf-lint` 校验合规。
 
 ### golden-order.md
 
