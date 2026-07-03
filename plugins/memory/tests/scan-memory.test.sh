@@ -3,9 +3,11 @@
 #
 # expected.json is a frozen golden for the awk scanner (originally captured
 # from the retired Rust `claude-memory-scan` binary; footer format revised
-# 2026-06-15 to drop the duplicated dir lines + verbose paragraph — card
-# rows unchanged). The scanner MUST reproduce it byte-for-byte on the fixture
-# corpus, which covers:
+# 2026-06-15 to drop the duplicated dir lines + verbose paragraph; header
+# format revised 2026-07-03 to lead with Total/dirs/read-hint so they survive
+# a host-side ~2KB truncation of the injected block — card rows unchanged).
+# The scanner MUST reproduce it byte-for-byte on the fixture corpus, which
+# covers:
 # untyped/typed grouping, type sorting, status filtering, inline-comment
 # stripping, quoted scalars, and skipped (missing-name / no-frontmatter) cards.
 set -euo pipefail

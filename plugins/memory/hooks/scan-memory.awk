@@ -146,9 +146,14 @@ END {
     sysd = (sysdir != "") ? sysdir : "(not set)"
     projd = (projdir != "") ? projdir : "(not set)"
 
-    ac = "<memory-index>\n" content "\n\n" \
+    # Header first: Total / dirs / read-full-file hint lead the block so they
+    # survive a host-side truncation of the injected additionalContext (Claude
+    # Code persists large SessionStart hook output and injects only a ~2KB
+    # preview from the top; footer metadata placed last would be cut off).
+    ac = "<memory-index>\n" \
          "Total: " total " cards (" nsysrec " system + " nprojrec " project) · 索引仅 L1 描述，需全文(事实/证据/验证步骤)直接读对应卡文件\n" \
-         "dirs: system=" sysd " · project=" projd "\n</memory-index>"
+         "dirs: system=" sysd " · project=" projd "\n\n" \
+         content "\n</memory-index>"
 
     printf "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"%s\"}}\n", jesc(ac)
 }
