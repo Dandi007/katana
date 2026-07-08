@@ -134,7 +134,7 @@ def build_app(data_root: str) -> Starlette:
 def main() -> None:
     data_root = os.environ.get("KATANA_MEMORY_DIR", "/data/memory")
     host = os.environ.get("KATANA_MEMORY_MCP_HOST", "127.0.0.1")
-    port = int(os.environ.get("KATANA_MEMORY_MCP_PORT", "5604"))
+    port = int(os.environ.get("KATANA_MEMORY_MCP_PORT", "5605"))
     uvicorn.run(build_app(data_root), host=host, port=port)
 
 
