@@ -39,7 +39,13 @@ def parse_card(text: str) -> dict | None:
     body = text[fence_end:].lstrip("\n")
     meta = {k: _as_str(fm.pop(k, None)) for k in _CANONICAL}
     metadata = fm.pop("metadata", None) or {}
-    meta["type"] = _as_str(metadata.get("type")) if isinstance(metadata, dict) else None
+    if isinstance(metadata, dict):
+        meta["type"] = _as_str(metadata.get("type"))
+        extra_keys = {k: v for k, v in metadata.items() if k != "type"}
+        meta["metadata_extra"] = extra_keys if extra_keys else {}
+    else:
+        meta["type"] = None
+        meta["metadata_extra"] = {}
     meta["extra"] = fm
     meta["body"] = body
     return meta
@@ -63,9 +69,23 @@ def serialize_card(meta: dict, body: str) -> str:
     for k in _CANONICAL:
         if meta.get(k) is not None:
             lines.append(f"{k}: {_scalar(meta[k])}")
-    if meta.get("type") is not None:
+    # Build metadata block: type first, then sorted extra keys
+    mtype = meta.get("type")
+    mextra = meta.get("metadata_extra") or {}
+    if mtype is not None or mextra:
         lines.append("metadata:")
-        lines.append(f"  type: {meta['type']}")
+        if mtype is not None:
+            lines.append(f"  type: {mtype}")
+        for k in sorted(mextra.keys()):
+            v = mextra[k]
+            if isinstance(v, bool):
+                lines.append(f"  {k}: {str(v).lower()}")
+            elif v is None:
+                lines.append(f"  {k}: null")
+            elif isinstance(v, str):
+                lines.append(f"  {k}: {_scalar(v)}")
+            else:
+                lines.append(f"  {k}: {v}")
     extra = meta.get("extra") or {}
     if extra:
         lines.append(yaml.safe_dump(extra, allow_unicode=True, sort_keys=True).rstrip("\n"))
@@ -133,18 +153,22 @@ def get_card(tenant_dir: str, card_id: str) -> dict | None:
     return out
 
 
-def _validate(name=None, status=None, type=None) -> None:
+def _validate(name=None, status=None, type=None, description=None, last_verified=None) -> None:
     if name is not None and not NAME_RE.fullmatch(name):
         raise ValueError(f"invalid name (kebab-case required): {name!r}")
     if status is not None and status not in STATUSES:
         raise ValueError(f"invalid status: {status!r} (allowed: {sorted(STATUSES)})")
     if type is not None and type not in TYPES:
         raise ValueError(f"invalid type: {type!r} (allowed: {sorted(TYPES)})")
+    if description is not None and "\n" in description:
+        raise ValueError("description must be a single line (no newlines)")
+    if last_verified is not None and "\n" in last_verified:
+        raise ValueError("last_verified must be a single line (no newlines)")
 
 
 def create_card(tenant_dir: str, name: str, description: str, body: str,
                 type: str | None = None, now: str | None = None) -> dict:
-    _validate(name=name, type=type)
+    _validate(name=name, type=type, description=description)
     if not description.strip():
         raise ValueError("description is required")
     path = os.path.join(tenant_dir, f"{name}.md")
@@ -155,7 +179,7 @@ def create_card(tenant_dir: str, name: str, description: str, body: str,
         "id": gen_id({c["id"] for c in cards}),
         "name": name, "description": description,
         "status": "active", "last_verified": now or _today(),
-        "type": type, "extra": {},
+        "type": type, "extra": {}, "metadata_extra": {},
     }
     with open(path, "w", encoding="utf-8") as f:
         f.write(serialize_card(meta, body))
@@ -168,7 +192,9 @@ def update_card(tenant_dir: str, card_id: str, *, name: str | None = None,
                 description: str | None = None, body: str | None = None,
                 status: str | None = None, type: str | None = None,
                 last_verified: str | None = None) -> dict:
-    _validate(name=name, status=status, type=type)
+    _validate(name=name, status=status, type=type, description=description, last_verified=last_verified)
+    if description is not None and not description:
+        raise ValueError("description cannot be empty string (use None to leave unchanged)")
     cur = _find(tenant_dir, card_id)
     if cur is None:
         raise KeyError(f"card not found: {card_id}")

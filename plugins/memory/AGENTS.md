@@ -43,10 +43,10 @@ metadata:
 
 | tool | 签名 | 说明 |
 |------|------|------|
-| `memory_index` | `()` | 返回当前租户全量 card 列表（id / name / description / status / last_verified） |
-| `memory_get` | `(id)` | 读取指定 card 全文（含 frontmatter + body） |
+| `memory_index` | `()` | 返回当前租户全量 card 列表（id / name / description / status / type / last_verified） |
+| `memory_get` | `(id)` | 读取指定 card 全文（含 frontmatter + body，不含服务端路径） |
 | `memory_create` | `(name, description, body, type?)` | 新建 card，服务生成 id，写入 git repo |
-| `memory_update` | `(id, description?, body?, last_verified?, status?)` | 更新 card 指定字段 |
+| `memory_update` | `(id, name?, description?, body?, status?, type?, last_verified?)` | 更新 card 指定字段；name 改名会同步 rename 文件，type 可改类型 |
 | `memory_delete` | `(id)` | 删除 card（git rm + commit） |
 
 ## Skills

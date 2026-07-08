@@ -46,6 +46,8 @@ def test_create_then_index_then_get(srv):
     assert idx["cards"][0]["id"] == created["id"]
     got = _call(mcp, "memory_get", {"id": created["id"]})
     assert "## How to Verify" in got["body"]
+    # path must not be exposed to callers
+    assert "path" not in got
 
 
 def test_update_and_delete_commit(srv):

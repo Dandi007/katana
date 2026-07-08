@@ -51,6 +51,7 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
         c = store.get_card(tenant_dir, id)
         if c is None:
             raise ValueError(f"card not found: {id}")
+        c.pop("path", None)
         return c
 
     @m.tool()

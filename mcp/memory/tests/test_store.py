@@ -31,6 +31,8 @@ def test_parse_card_extracts_canonical_fields():
     assert c["last_verified"] == "2026-07-08"
     assert c["extra"] == {"custom_key": "keepme"}
     assert c["body"].startswith("## Fact")
+    # metadata_extra should be empty for this card (no extra metadata keys)
+    assert c["metadata_extra"] == {}
 
 
 def test_parse_card_no_frontmatter_returns_none():
@@ -204,3 +206,102 @@ def test_delete(seeded):
     assert store.get_card(tenant_dir, c1["id"]) is None
     with pytest.raises(KeyError):
         store.delete_card(tenant_dir, c1["id"])
+
+
+# ── I1: metadata_extra preservation ─────────────────────────────────────────
+
+CARD_WITH_METADATA_EXTRA = """---
+id: m-aabbcc
+name: meta-extra-card
+description: card with extra metadata
+status: active
+last_verified: 2026-07-08
+metadata:
+  type: reference
+  source: auto-session-harvest
+  provisional: true
+  originSessionId: sess-123
+---
+
+## Fact
+
+some fact
+
+## How to Verify
+
+check something
+"""
+
+
+def test_parse_card_preserves_metadata_extra():
+    """parse_card 应保留 metadata 中除 type 外的所有键到 metadata_extra。"""
+    c = store.parse_card(CARD_WITH_METADATA_EXTRA)
+    assert c["type"] == "reference"
+    assert c["metadata_extra"] == {
+        "source": "auto-session-harvest",
+        "provisional": True,
+        "originSessionId": "sess-123",
+    }
+
+
+def test_serialize_roundtrip_preserves_metadata_extra():
+    """parse→serialize→parse roundtrip 后 metadata 所有键保留。"""
+    c = store.parse_card(CARD_WITH_METADATA_EXTRA)
+    out = store.serialize_card(c, c["body"])
+    c2 = store.parse_card(out)
+    assert c2["type"] == "reference"
+    assert c2["metadata_extra"]["source"] == "auto-session-harvest"
+    assert c2["metadata_extra"]["provisional"] is True
+    assert c2["metadata_extra"]["originSessionId"] == "sess-123"
+
+
+def test_update_card_preserves_metadata_extra(tenant_dir):
+    """update_card 改 description 后原 metadata 键（含 metadata_extra）不丢。"""
+    # Write a card with extra metadata directly
+    path = os.path.join(tenant_dir, "meta-extra-card.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(CARD_WITH_METADATA_EXTRA)
+    # Find the card via scan
+    cards, _ = store._scan(tenant_dir)
+    assert len(cards) == 1
+    card_id = cards[0]["id"]
+    # Update description only
+    store.update_card(tenant_dir, card_id, description="updated description")
+    # Re-parse the file after update to verify metadata_extra survived
+    with open(path, encoding="utf-8") as f:
+        reparsed = store.parse_card(f.read())
+    assert reparsed is not None
+    assert reparsed["metadata_extra"]["source"] == "auto-session-harvest"
+    assert reparsed["metadata_extra"]["provisional"] is True
+    assert reparsed["metadata_extra"]["originSessionId"] == "sess-123"
+    assert reparsed["description"] == "updated description"
+
+
+def test_metadata_extra_not_in_toplevel_extra():
+    """metadata_extra 键不应混入顶层 extra dict。"""
+    c = store.parse_card(CARD_WITH_METADATA_EXTRA)
+    assert "source" not in c["extra"]
+    assert "provisional" not in c["extra"]
+    assert "originSessionId" not in c["extra"]
+
+
+# ── I2: multiline description / empty description validation ─────────────────
+
+def test_create_rejects_multiline_description(tenant_dir):
+    """create_card 传入含 \\n 的 description 应 raise ValueError。"""
+    with pytest.raises(ValueError, match="single line"):
+        store.create_card(tenant_dir, "ml-card", "foo\nbar", "body")
+
+
+def test_update_rejects_multiline_description(seeded):
+    """update_card 传入含 \\n 的 description 应 raise ValueError。"""
+    tenant_dir, c1, _ = seeded
+    with pytest.raises(ValueError, match="single line"):
+        store.update_card(tenant_dir, c1["id"], description="foo\nbar")
+
+
+def test_update_rejects_empty_description(seeded):
+    """update_card 传入空串 description 应 raise ValueError（None 表示不改，OK）。"""
+    tenant_dir, c1, _ = seeded
+    with pytest.raises(ValueError, match="empty"):
+        store.update_card(tenant_dir, c1["id"], description="")
