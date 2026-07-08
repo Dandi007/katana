@@ -58,7 +58,7 @@ description: 创建或更新 memory card（本地可验证事实），通过 MCP
    - 新建：`memory_create(name, description, body, type?)`
    - 更新：`memory_update(id, name?, description?, body?, status?, type?, last_verified?)`
    - **这一步是必须的。如果你还没调用 MCP tool，你还没完成。**
-   - 若找不到 `memory_create` / `memory_update` 等 MCP tool，提示用户检查 katana-memory-mcp 服务是否在运行（默认 `http://127.0.0.1:5604`，tenant `uther`）
+   - 若找不到 `memory_create` / `memory_update` 等 MCP tool，提示用户检查 katana-memory-mcp 服务是否在运行（默认 `http://127.0.0.1:5605`，tenant `uther`）
 
 ## 输出
 

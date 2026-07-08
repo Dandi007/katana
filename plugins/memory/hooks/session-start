@@ -3,7 +3,7 @@
 # 数据访问 100% 收敛到 MCP 服务；本 hook 只是一个带降级的 curl。
 set -euo pipefail
 
-URL="${KATANA_MEMORY_MCP_URL:-http://127.0.0.1:5604}"
+URL="${KATANA_MEMORY_MCP_URL:-http://127.0.0.1:5605}"
 TENANT="${KATANA_MEMORY_TENANT:-uther}"
 
 if out="$(curl -fsS --max-time 3 "${URL}/t/${TENANT}/index" 2>/dev/null)" && [ -n "$out" ]; then

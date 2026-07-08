@@ -32,7 +32,7 @@ description: 核验 memory cards 是否仍与事实(SSoT)一致——结构体�
 1. **确定 scope 与深度**
    - 调用 `memory_index` 获取全量 card 列表（含 id、name、description、status、last_verified）
    - 用户提到"深度/仔细/彻底/逐条核实" → 深度模式（含 L3）；否则默认模式（L1 + L2）
-   - 若找不到 `memory_index` 等 MCP tool，提示用户检查 katana-memory-mcp 服务是否在运行（默认 `http://127.0.0.1:5604`，tenant `uther`）
+   - 若找不到 `memory_index` 等 MCP tool，提示用户检查 katana-memory-mcp 服务是否在运行（默认 `http://127.0.0.1:5605`，tenant `uther`）
 
 2. **L1 结构检查**
    - 对 `memory_index` 返回的每张 card，检查必要字段：name, description, status, last_verified → 缺失记为 `incomplete`

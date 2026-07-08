@@ -5,7 +5,7 @@ Claude Code plugin：operational memory system。
 ## 机制
 
 - **数据存储**：memory cards 保存在 `KATANA_MEMORY_DIR` 指向的独立 git repo（默认 `/data/memory`），按多租户目录组织（`<KATANA_MEMORY_DIR>/<tenant>/`）
-- **服务**：`katana-memory-mcp` 运行在 `:5604`（FastMCP），统一暴露 5 个 MCP tool（`memory_index` / `memory_get` / `memory_create` / `memory_update` / `memory_delete`）
+- **服务**：`katana-memory-mcp` 运行在 `:5605`（FastMCP），统一暴露 5 个 MCP tool（`memory_index` / `memory_get` / `memory_create` / `memory_update` / `memory_delete`）
 - **SessionStart hook** 是一个带降级的 curl——向服务 `GET /t/<tenant>/index` 拉取 `<memory-index>` hook JSON，服务不可达时注入降级提示，退出码始终为 0
 - **所有读写走 MCP tools（id 寻址）**：skills 不直接操作文件系统；数据访问 100% 收敛到服务端
 - **L2 正文**不注入到 session context，需要时用 `memory_get(id)` 读取具体 card
@@ -14,11 +14,11 @@ Claude Code plugin：operational memory system。
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `KATANA_MEMORY_MCP_URL` | `http://127.0.0.1:5604` | MCP 服务地址 |
+| `KATANA_MEMORY_MCP_URL` | `http://127.0.0.1:5605` | MCP 服务地址 |
 | `KATANA_MEMORY_TENANT` | `uther` | 租户标识，决定 card 存储子目录 |
 | `KATANA_MEMORY_DIR` | `/data/memory` | 独立 git repo 根目录 |
 | `KATANA_MEMORY_MCP_HOST` | `127.0.0.1` | 服务监听地址 |
-| `KATANA_MEMORY_MCP_PORT` | `5604` | 服务监听端口 |
+| `KATANA_MEMORY_MCP_PORT` | `5605` | 服务监听端口 |
 
 ## Card 格式
 
