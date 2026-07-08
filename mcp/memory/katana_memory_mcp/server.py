@@ -12,7 +12,7 @@ from pathlib import Path
 import uvicorn
 from fastmcp import FastMCP
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
 from katana_memory_mcp import gitops, index as index_mod, store
@@ -111,12 +111,24 @@ def build_app(data_root: str) -> Starlette:
         sub_apps.append(sub)
         mounts.append(Mount(f"/t/{t}", app=sub))
 
+    def _tenant_cards(tenant: str) -> list[dict] | None:
+        if tenant not in tenants:
+            return None
+        return store.list_cards(os.path.join(data_root, tenant))["cards"]
+
     async def index_endpoint(request):
         tenant = request.path_params["tenant"]
-        if tenant not in tenants:
+        cards = _tenant_cards(tenant)
+        if cards is None:
             return JSONResponse({"error": f"unknown tenant: {tenant}"}, status_code=404)
-        cards = store.list_cards(os.path.join(data_root, tenant))["cards"]
         return JSONResponse(index_mod.hook_payload(cards, tenant))
+
+    async def index_md_endpoint(request):
+        tenant = request.path_params["tenant"]
+        cards = _tenant_cards(tenant)
+        if cards is None:
+            return PlainTextResponse(f"unknown tenant: {tenant}", status_code=404)
+        return PlainTextResponse(index_mod.render_index(cards, tenant))
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
@@ -126,7 +138,11 @@ def build_app(data_root: str) -> Starlette:
             yield
 
     return Starlette(
-        routes=[Route("/t/{tenant}/index", index_endpoint), *mounts],
+        routes=[
+            Route("/t/{tenant}/index", index_endpoint),
+            Route("/t/{tenant}/index.md", index_md_endpoint),
+            *mounts,
+        ],
         lifespan=lifespan,
     )
 

@@ -84,6 +84,26 @@ def test_index_route_unknown_tenant_404(tmp_path):
         assert tc.get("/t/nobody/index").status_code == 404
 
 
+# ── /index.md 纯文本 route（kimi-code / OpenCode 等非 Claude runtime 消费） ────
+
+def test_index_md_route_returns_plain_text(tmp_path):
+    app = server.build_app(_data_root(tmp_path))
+    with TestClient(app) as tc:
+        r = tc.get("/t/uther/index.md")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/plain")
+        assert r.text.startswith("<memory-index>")
+        assert "seed-card" in r.text
+        # 纯文本，不是 Claude hook JSON 包裹
+        assert "hookSpecificOutput" not in r.text
+
+
+def test_index_md_route_unknown_tenant_404(tmp_path):
+    app = server.build_app(_data_root(tmp_path))
+    with TestClient(app) as tc:
+        assert tc.get("/t/nobody/index.md").status_code == 404
+
+
 def test_mcp_mounted_per_tenant(tmp_path):
     app = server.build_app(_data_root(tmp_path))
     with TestClient(app) as tc:
