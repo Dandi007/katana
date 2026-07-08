@@ -6,7 +6,7 @@
 
 | 查询意图 | 默认信息源 |
 |---------|-----------|
-| 事实核查（机器、IP、凭证、端点） | local_text（memory/ 在 search-note scope 内） |
+| 事实核查（机器、IP、凭证、端点） | katana-memory-mcp（`memory_index` L1 已随 SessionStart 注入，全文 `memory_get(id)`） |
 | 知识查找（概念、笔记、工作文档） | local_text, web |
 | 代码求真（入口、调用链、配置） | code, github, gitlab |
 | 平台搜索（飞书文档、issue、MR） | feishu, github, gitlab, linear |

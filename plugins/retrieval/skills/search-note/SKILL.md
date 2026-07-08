@@ -31,11 +31,12 @@ description: 本地知识库检索源（只读）。原子笔记/Index/工作记
 | `智元工作/工作记录/` | 排查、推进、配置、执行过程 |
 | `智元工作/op/` | One Page、跨系统汇报材料 |
 | `智元工作/具身中心工程OKR/` | OKR、团队规划 |
-| `memory/` | 操作事实（机器、repo、凭证 pointer、服务端点） |
+
+> 操作事实（机器、repo、凭证 pointer、服务端点）已迁出 vault：memory card 归 katana-memory-mcp（`memory_index` / `memory_get(id)`）管理，不在本 skill 检索面内。
 
 ## 检索
 
-优先打本机 **vault-search 服务**（常驻 svc，含 vector+keyword RRF 混合检索，质量优于裸 `query_lancedb.py`）；服务不可达时回落 CLI `query_lancedb.py`。search-note 搜**全量语料**（含 `memory/`，与 Perlite 的 `exclude:[memory]` 不同——本地 agent 用，无暴露顾虑）。
+优先打本机 **vault-search 服务**（常驻 svc，含 vector+keyword RRF 混合检索，质量优于裸 `query_lancedb.py`）；服务不可达时回落 CLI `query_lancedb.py`。search-note 搜**全量语料**。
 
 服务/索引引擎归 `Dandi007/agent-knowledge`；索引 `~/.cache/agent-knowledge/Zettelkasten/lancedb/`（不在 iCloud 内），由 `vault-indexer` svc 每晚增量保鲜。
 
