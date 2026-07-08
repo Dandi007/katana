@@ -129,3 +129,71 @@ def test_gen_id_deterministic_collision(monkeypatch):
     existing = {"m-" + COLLISION}
     result = store.gen_id(existing)
     assert result == "m-" + NEW_ID
+
+
+# ── Task 2: CRUD operations ──────────────────────────────────────────────────
+
+import os
+import pytest
+
+
+def test_create_writes_file_and_returns_id(tenant_dir):
+    c = store.create_card(tenant_dir, "my-card", "d", "body", now="2026-07-08")
+    assert store.ID_RE.fullmatch(c["id"])
+    assert c["status"] == "active" and c["last_verified"] == "2026-07-08"
+    assert os.path.isfile(os.path.join(tenant_dir, "my-card.md"))
+    assert c["changed_paths"] == [os.path.join(tenant_dir, "my-card.md")]
+
+
+def test_create_rejects_duplicate_name(seeded):
+    tenant_dir, c1, _ = seeded
+    with pytest.raises(ValueError):
+        store.create_card(tenant_dir, "card-one", "d", "b")
+
+
+def test_create_rejects_bad_name_and_type(tenant_dir):
+    with pytest.raises(ValueError):
+        store.create_card(tenant_dir, "Bad Name!", "d", "b")
+    with pytest.raises(ValueError):
+        store.create_card(tenant_dir, "ok-name", "d", "b", type="nope")
+
+
+def test_list_and_get(seeded):
+    tenant_dir, c1, c2 = seeded
+    listed = store.list_cards(tenant_dir)
+    assert {c["id"] for c in listed["cards"]} == {c1["id"], c2["id"]}
+    got = store.get_card(tenant_dir, c1["id"])
+    assert got["name"] == "card-one" and "## Fact" in got["body"]
+    assert store.get_card(tenant_dir, "m-ffffff") is None
+
+
+def test_list_skips_unparseable_and_id_less(tenant_dir, seeded):
+    with open(os.path.join(tenant_dir, "legacy.md"), "w") as f:
+        f.write("---\nname: legacy\ndescription: no id yet\n---\nbody\n")
+    listed = store.list_cards(tenant_dir)
+    assert any(p.endswith("legacy.md") for p in listed["skipped"])
+
+
+def test_update_fields_and_rename(seeded):
+    tenant_dir, c1, _ = seeded
+    u = store.update_card(tenant_dir, c1["id"], name="card-renamed", status="stale")
+    assert u["name"] == "card-renamed" and u["status"] == "stale"
+    assert os.path.isfile(os.path.join(tenant_dir, "card-renamed.md"))
+    assert not os.path.exists(os.path.join(tenant_dir, "card-one.md"))
+    # id 不变，仍可按 id 找到
+    assert store.get_card(tenant_dir, c1["id"])["name"] == "card-renamed"
+
+
+def test_update_rejects_bad_status(seeded):
+    tenant_dir, c1, _ = seeded
+    with pytest.raises(ValueError):
+        store.update_card(tenant_dir, c1["id"], status="gone")
+
+
+def test_delete(seeded):
+    tenant_dir, c1, _ = seeded
+    d = store.delete_card(tenant_dir, c1["id"])
+    assert d["id"] == c1["id"]
+    assert store.get_card(tenant_dir, c1["id"]) is None
+    with pytest.raises(KeyError):
+        store.delete_card(tenant_dir, c1["id"])

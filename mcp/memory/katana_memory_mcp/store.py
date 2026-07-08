@@ -4,6 +4,9 @@
 - id 为系统身份（m-<6hex>，tenant 内唯一，永不变更）；name 是可读别名兼文件名。
 - 序列化保留未知 frontmatter 键（extra），避免 update 丢字段。
 """
+import datetime
+import glob
+import os
 import re
 import secrets
 
@@ -74,3 +77,128 @@ def gen_id(existing: set[str]) -> str:
         i = "m-" + secrets.token_hex(3)
         if i not in existing:
             return i
+
+
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def _today() -> str:
+    return datetime.date.today().isoformat()
+
+
+def _read(path: str) -> dict | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            meta = parse_card(f.read())
+    except OSError:
+        return None
+    if meta is not None:
+        meta["path"] = path
+    return meta
+
+
+def _scan(tenant_dir: str) -> tuple[list[dict], list[str]]:
+    cards, skipped = [], []
+    for path in sorted(glob.glob(os.path.join(tenant_dir, "*.md"))):
+        meta = _read(path)
+        if meta is None or not meta.get("id") or not meta.get("name") or not meta.get("description"):
+            skipped.append(path)
+            continue
+        cards.append(meta)
+    return cards, skipped
+
+
+def _l1(meta: dict) -> dict:
+    return {k: meta.get(k) for k in ("id", "name", "description", "status", "type", "last_verified")}
+
+
+def list_cards(tenant_dir: str) -> dict:
+    cards, skipped = _scan(tenant_dir)
+    return {"cards": [_l1(c) for c in cards], "skipped": skipped}
+
+
+def _find(tenant_dir: str, card_id: str) -> dict | None:
+    cards, _ = _scan(tenant_dir)
+    for c in cards:
+        if c["id"] == card_id:
+            return c
+    return None
+
+
+def get_card(tenant_dir: str, card_id: str) -> dict | None:
+    c = _find(tenant_dir, card_id)
+    if c is None:
+        return None
+    out = _l1(c)
+    out["body"] = c["body"]
+    out["path"] = c["path"]
+    return out
+
+
+def _validate(name=None, status=None, type=None) -> None:
+    if name is not None and not NAME_RE.fullmatch(name):
+        raise ValueError(f"invalid name (kebab-case required): {name!r}")
+    if status is not None and status not in STATUSES:
+        raise ValueError(f"invalid status: {status!r} (allowed: {sorted(STATUSES)})")
+    if type is not None and type not in TYPES:
+        raise ValueError(f"invalid type: {type!r} (allowed: {sorted(TYPES)})")
+
+
+def create_card(tenant_dir: str, name: str, description: str, body: str,
+                type: str | None = None, now: str | None = None) -> dict:
+    _validate(name=name, type=type)
+    if not description.strip():
+        raise ValueError("description is required")
+    path = os.path.join(tenant_dir, f"{name}.md")
+    if os.path.exists(path):
+        raise ValueError(f"card name already exists: {name}")
+    cards, _ = _scan(tenant_dir)
+    meta = {
+        "id": gen_id({c["id"] for c in cards}),
+        "name": name, "description": description,
+        "status": "active", "last_verified": now or _today(),
+        "type": type, "extra": {},
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(serialize_card(meta, body))
+    out = _l1(meta)
+    out["changed_paths"] = [path]
+    return out
+
+
+def update_card(tenant_dir: str, card_id: str, *, name: str | None = None,
+                description: str | None = None, body: str | None = None,
+                status: str | None = None, type: str | None = None,
+                last_verified: str | None = None) -> dict:
+    _validate(name=name, status=status, type=type)
+    cur = _find(tenant_dir, card_id)
+    if cur is None:
+        raise KeyError(f"card not found: {card_id}")
+    old_path = cur["path"]
+    changed = [old_path]
+    for k, v in (("name", name), ("description", description), ("status", status),
+                 ("type", type), ("last_verified", last_verified)):
+        if v is not None:
+            cur[k] = v
+    new_body = body if body is not None else cur["body"]
+    new_path = os.path.join(tenant_dir, f"{cur['name']}.md")
+    if new_path != old_path:
+        if os.path.exists(new_path):
+            raise ValueError(f"card name already exists: {cur['name']}")
+        os.rename(old_path, new_path)
+        changed.append(new_path)
+    with open(new_path, "w", encoding="utf-8") as f:
+        f.write(serialize_card(cur, new_body))
+    out = _l1(cur)
+    out["changed_paths"] = changed
+    return out
+
+
+def delete_card(tenant_dir: str, card_id: str) -> dict:
+    cur = _find(tenant_dir, card_id)
+    if cur is None:
+        raise KeyError(f"card not found: {card_id}")
+    os.remove(cur["path"])
+    out = _l1(cur)
+    out["changed_paths"] = [cur["path"]]
+    return out
