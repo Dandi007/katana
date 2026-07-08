@@ -64,3 +64,68 @@ def test_gen_id_format_and_collision():
     assert store.ID_RE.fullmatch(i)
     existing = {i}
     assert store.gen_id(existing) not in existing
+
+
+# ── Fix: 字符类 `!-` 回归测试 ──────────────────────────────────────────────
+
+def test_scalar_risky_leading_chars():
+    """行首 `!` 和 `-` 都应被引号包裹；中间的 `-` 不应触发引号。"""
+    assert store._scalar("!x").startswith('"')
+    assert store._scalar("-lead").startswith('"')
+    assert store._scalar("a: b # c").startswith('"')
+    # 中间的 `-` 不 risky（正则只对行首 ^ 生效）
+    assert store._scalar("plain-word") == "plain-word"
+
+
+# ── Fix: serialize_card body.rstrip("\n") 尾部换行规约 ─────────────────────
+
+def test_serialize_body_trailing_newlines_roundtrip():
+    """body 以多个换行结尾时，roundtrip 后 body 内容不丢，尾部规约为单换行。
+
+    serialize_card 用 body.rstrip("\n") + "\n" 规约尾部，
+    parse_card 不剥末尾换行，所以 roundtrip 后 body 以恰好一个 "\n" 结尾。
+    """
+    meta = {"id": "m-aabbcc", "name": "t", "description": "d", "status": "active"}
+    body_with_trailing = "some content\n\n\n"
+    out = store.serialize_card(meta, body_with_trailing)
+    c = store.parse_card(out)
+    # 内容不变（去掉尾部所有换行后相同），且尾部规约为恰好一个换行
+    assert c["body"].rstrip("\n") == body_with_trailing.rstrip("\n")
+    assert c["body"].endswith("\n") and not c["body"].endswith("\n\n")
+
+
+# ── Fix: parse_card 结束 fence 边界 ────────────────────────────────────────
+
+def test_parse_card_fence_not_confused_by_partial_fence():
+    """frontmatter 内含 `---x` 开头行不被当作结束 fence；body 里含 `---x` 行也不影响。"""
+    card_text = (
+        "---\n"
+        "id: m-112233\n"
+        "name: tricky\n"
+        "description: '---not a fence'\n"
+        "status: active\n"
+        "---\n"
+        "\n"
+        "body line\n"
+        "---x not a fence in body\n"
+        "more body\n"
+    )
+    c = store.parse_card(card_text)
+    assert c is not None
+    assert c["id"] == "m-112233"
+    assert c["description"] == "---not a fence"
+    assert "---x not a fence in body" in c["body"]
+
+
+# ── Fix: gen_id 碰撞测试改为确定性 ────────────────────────────────────────
+
+def test_gen_id_deterministic_collision(monkeypatch):
+    """用 monkeypatch 替换 secrets.token_hex，前两次返回碰撞值，第三次返回新值。"""
+    COLLISION = "aaaaaa"
+    NEW_ID = "bbbbbb"
+    calls = iter([COLLISION, COLLISION, NEW_ID])
+    monkeypatch.setattr(store.secrets, "token_hex", lambda n: next(calls))
+
+    existing = {"m-" + COLLISION}
+    result = store.gen_id(existing)
+    assert result == "m-" + NEW_ID

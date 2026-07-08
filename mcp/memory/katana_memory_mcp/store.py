@@ -14,20 +14,25 @@ STATUSES = {"active", "stale", "deprecated"}
 TYPES = {"user", "feedback", "project", "reference"}
 _CANONICAL = ("id", "name", "description", "status", "last_verified")
 
+# 匹配结束 fence：\n--- 后紧跟换行或文件尾（允许行尾空白）
+_FENCE_RE = re.compile(r"\n---[ \t]*(?:\n|$)")
+
 
 def parse_card(text: str) -> dict | None:
     if not text.startswith("---\n"):
         return None
-    end = text.find("\n---", 4)
-    if end == -1:
+    m = _FENCE_RE.search(text, 4)
+    if m is None:
         return None
+    end = m.start()          # \n 的位置
+    fence_end = m.end()      # fence 行之后的位置
     try:
         fm = yaml.safe_load(text[4:end + 1])
     except yaml.YAMLError:
         return None
     if not isinstance(fm, dict):
         return None
-    body = text[end + 4:].lstrip("\n")
+    body = text[fence_end:].lstrip("\n")
     meta = {k: _as_str(fm.pop(k, None)) for k in _CANONICAL}
     metadata = fm.pop("metadata", None) or {}
     meta["type"] = _as_str(metadata.get("type")) if isinstance(metadata, dict) else None
@@ -43,6 +48,7 @@ def _as_str(v) -> str | None:
 
 
 def _scalar(v: str) -> str:
+    # 字符类中 `-` 放末尾，避免 `!-` 被解释为字符范围
     if re.search(r'(: )|( #)|^[\s"\'#&*?|>%@`\[\]{},!-]|\s$|^$', v):
         return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
     return v
@@ -51,16 +57,16 @@ def _scalar(v: str) -> str:
 def serialize_card(meta: dict, body: str) -> str:
     lines = ["---"]
     for k in _CANONICAL:
-        if meta.get(k):
+        if meta.get(k) is not None:
             lines.append(f"{k}: {_scalar(meta[k])}")
-    if meta.get("type"):
+    if meta.get("type") is not None:
         lines.append("metadata:")
         lines.append(f"  type: {meta['type']}")
     extra = meta.get("extra") or {}
     if extra:
         lines.append(yaml.safe_dump(extra, allow_unicode=True, sort_keys=True).rstrip("\n"))
     lines.append("---")
-    return "\n".join(lines) + "\n\n" + body.strip() + "\n"
+    return "\n".join(lines) + "\n\n" + body.rstrip("\n") + "\n"
 
 
 def gen_id(existing: set[str]) -> str:
