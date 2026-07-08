@@ -7,6 +7,7 @@ Claude Code plugin：operational memory system。
 - **数据存储**：memory cards 保存在 `KATANA_MEMORY_DIR` 指向的独立 git repo（默认 `/data/memory`），按多租户目录组织（`<KATANA_MEMORY_DIR>/<tenant>/`）
 - **服务**：`katana-memory-mcp` 运行在 `:5605`（FastMCP），统一暴露 5 个 MCP tool（`memory_index` / `memory_get` / `memory_create` / `memory_update` / `memory_delete`）
 - **SessionStart hook** 是一个带降级的 curl——向服务 `GET /t/<tenant>/index` 拉取 `<memory-index>` hook JSON，服务不可达时注入降级提示，退出码始终为 0
+- **多 runtime 注入**：服务另提供 `GET /t/<tenant>/index.md`（纯文本 `<memory-index>`），供非 Claude runtime 消费；kimi-code 与 OpenCode 的注入客户端在 `runtimes/`（见 `runtimes/README.md`），安装走 `runtimes/install.sh`
 - **所有读写走 MCP tools（id 寻址）**：skills 不直接操作文件系统；数据访问 100% 收敛到服务端
 - **L2 正文**不注入到 session context，需要时用 `memory_get(id)` 读取具体 card
 

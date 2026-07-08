@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# kimi-code UserPromptSubmit hook：每个 session 首个 prompt 注入一次 <memory-index>。
+#
+# 为什么不用 SessionStart：kimi-code 的 SessionStart hook 是 observation-only
+# （triggerSessionStart 不取结果，stdout 不进 context）；UserPromptSubmit 的
+# stdout 会以 <hook_result> 注入 context，且空输出不注入。stdin JSON 带
+# session_id（snake_case），用 per-session marker 实现"只注入一次"，
+# 等价 Claude Code 的 SessionStart 注入语义。
+set -euo pipefail
+
+URL="${KATANA_MEMORY_MCP_URL:-http://127.0.0.1:5605}"
+TENANT="${KATANA_MEMORY_TENANT:-uther}"
+
+session_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null || true)"
+# 拿不到 session_id 时宁可不注入，避免每个 prompt 重复注入
+[ -n "$session_id" ] || exit 0
+
+marker_dir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/katana-memory-kimi"
+mkdir -p "$marker_dir"
+marker="$marker_dir/${session_id}.injected"
+[ -e "$marker" ] && exit 0
+
+# 服务不可达/空索引时不落 marker，下个 prompt 自动重试
+if out="$(curl -fsS --max-time 3 "${URL}/t/${TENANT}/index.md" 2>/dev/null)" && [ -n "$out" ]; then
+    : > "$marker"
+    printf '%s\n' "$out"
+fi
