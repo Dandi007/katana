@@ -1,46 +1,13 @@
 #!/usr/bin/env bash
-# SessionStart hook: scan memory cards and inject the <memory-index> as
-# additionalContext. Pure shell + awk — no compiled binary, no download, no
-# build step, so it ships intact in the npm package and runs anywhere bash+awk
-# exist. (Replaces the former Rust `claude-memory-scan` binary; see
-# docs/specs/2026-06-08-shell-rewrite.md.)
+# SessionStart hook: 从 katana-memory-mcp 服务拉取 <memory-index> hook JSON 注入。
+# 数据访问 100% 收敛到 MCP 服务；本 hook 只是一个带降级的 curl。
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "${SCRIPT_DIR}/katana-config.sh"
+URL="${KATANA_MEMORY_MCP_URL:-http://127.0.0.1:5604}"
+TENANT="${KATANA_MEMORY_TENANT:-uther}"
 
-AWK_PROG="${SCRIPT_DIR}/scan-memory.awk"
-
-# Memory paths: env > .katana > default. System memory is user-level and stays
-# anchored at ~/.claude/memory. Project memory defaults to "<kb-root>/memory"
-# (not "<cwd>/memory") so it points at the KB regardless of cwd; a relative
-# config/env value is resolved against kb-root too (absolute values pass
-# through unchanged, preserving CLAUDE_MEMORY_PROJECT_DIR priority).
-SYSTEM_MEMORY="${CLAUDE_MEMORY_SYSTEM_DIR:-${HOME}/.claude/memory}"
-PROJECT_MEMORY="$(katana_config_get "memory_project_dir" "$(katana_kb_root)/memory" "CLAUDE_MEMORY_PROJECT_DIR")"
-PROJECT_MEMORY="$(katana_resolve_path "$PROJECT_MEMORY")"
-
-# Collect byte-sorted *.md lists (parity with the Rust PathBuf sort). A missing
-# directory simply yields no files — the scanner then emits nothing for it.
-sysfiles=(); projfiles=()
-if [ -d "$SYSTEM_MEMORY" ]; then
-    while IFS= read -r -d '' f; do sysfiles+=("$f"); done \
-        < <(find "$SYSTEM_MEMORY" -maxdepth 1 -name '*.md' -print0 2>/dev/null | LC_ALL=C sort -z)
+if out="$(curl -fsS --max-time 3 "${URL}/t/${TENANT}/index" 2>/dev/null)" && [ -n "$out" ]; then
+    printf '%s\n' "$out"
+else
+    printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"<memory-index>\\nmemory service unavailable at %s (tenant=%s) — memory_* tools 与索引本 session 不可用\\n</memory-index>"}}\n' "$URL" "$TENANT"
 fi
-if [ -d "$PROJECT_MEMORY" ]; then
-    while IFS= read -r -d '' f; do projfiles+=("$f"); done \
-        < <(find "$PROJECT_MEMORY" -maxdepth 1 -name '*.md' -print0 2>/dev/null | LC_ALL=C sort -z)
-fi
-
-# No cards anywhere → emit nothing (never block the session).
-if [ "${#sysfiles[@]}" -eq 0 ] && [ "${#projfiles[@]}" -eq 0 ]; then
-    exit 0
-fi
-
-# Note: `${arr[@]+"${arr[@]}"}` safely expands to nothing for an empty array
-# under `set -u` on macOS bash 3.2 (plain `"${arr[@]}"` would error there).
-exec awk \
-    -v nsys="${#sysfiles[@]}" \
-    -v sysdir="$SYSTEM_MEMORY" \
-    -v projdir="$PROJECT_MEMORY" \
-    -f "$AWK_PROG" -- ${sysfiles[@]+"${sysfiles[@]}"} ${projfiles[@]+"${projfiles[@]}"}

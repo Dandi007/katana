@@ -15,17 +15,6 @@ description: 核验 memory cards 是否仍与事实(SSoT)一致——结构体�
 - 用户说"深度扫描 / 深度核验 / 仔细查一遍" → 启用 **L3 深度模式**
 - 定期维护、怀疑某些 card 过期时
 
-## 配置
-
-Memory 存储路径可通过以下方式覆盖（优先级从高到低）：
-
-| Level | 默认路径 | 环境变量 | .katana key |
-|-------|---------|---------|-------------|
-| Project | `<project-root>/memory/` | `CLAUDE_MEMORY_PROJECT_DIR` | `memory_project_dir` |
-| System | `~/.claude/memory/` | `CLAUDE_MEMORY_SYSTEM_DIR` | — |
-
-如果项目 `.katana` 文件或环境变量指定了路径，以那个为准，忽略默认值。System 级只走环境变量（机器维度，不进 .katana）。
-
 ## 分层核验（深度由用户输入决定）
 
 | 层 | 何时跑 | 范围 | 做什么 |
@@ -40,54 +29,46 @@ Memory 存储路径可通过以下方式覆盖（优先级从高到低）：
 
 ## 流程
 
-1. **确定 scope**
-   - 默认验证当前 project-level memory 目录
-   - 用户指定 `--system` 时验证 system-level
-   - 用户指定 `--all` 时两层都验证
+1. **确定 scope 与深度**
+   - 调用 `memory_index` 获取全量 card 列表（含 id、name、description、status、last_verified）
+   - 用户提到"深度/仔细/彻底/逐条核实" → 深度模式（含 L3）；否则默认模式（L1 + L2）
+   - 若找不到 `memory_index` 等 MCP tool，提示用户检查 katana-memory-mcp 服务是否在运行（默认 `http://127.0.0.1:5604`，tenant `uther`）
 
-2. **确定深度**
-   - 用户提到"深度/仔细/彻底/逐条核实" → 深度模式（含 L3）
-   - 否则默认模式（L1 + L2）
-
-3. **扫描所有 card 文件**
-   - 遍历 `<memory-dir>/*.md`，解析 YAML frontmatter
-
-4. **L1 结构检查**
-   - 必须有: name, description, status, last_verified → 缺失记为 `incomplete`
+2. **L1 结构检查**
+   - 对 `memory_index` 返回的每张 card，检查必要字段：name, description, status, last_verified → 缺失记为 `incomplete`
    - `last_verified` 超过 30 天 → 记 `stale (time)`（仅提示，不等于错误）
    - `status: deprecated` → 报告但不动
 
-5. **L2 命令核验**（对有 `How to Verify` 段的 card）
-   - 执行该段命令，按输出判定：成立 / 矛盾 / 跑不动
+3. **L2 命令核验**（对有 `How to Verify` 段的 card）
+   - 调用 `memory_get(id)` 读取 card 全文
+   - 执行 `How to Verify` 段中的命令，按输出判定：成立 / 矛盾 / 跑不动
    - 命令本身失效（路径/工具已不存在）也视为信号，记入报告
 
-6. **L3 SSoT 重核**（深度模式）
-   - 对每张 card：定位其 SSoT（card 里引用的代码路径、`# References`、官方文档），重新推导事实
+4. **L3 SSoT 重核**（深度模式）
+   - 对每张 card：调用 `memory_get(id)` 读取全文，定位其 SSoT（card 里引用的代码路径、`# References`、官方文档），重新推导事实
    - 与 card 正文逐条 diff，找出**矛盾点**（正文称 X，SSoT 实为 Y）
    - 无 How to Verify 的 card 同样在此处理：靠读现状 + 自身认知判断
 
-7. **裁决 → 动作（统一为"报告 + 建议"，不自动改写）**
+5. **裁决 → 动作（统一为"报告 + 建议"，不自动改写）**
 
    | 裁决 | 含义 | 动作 |
    |------|------|------|
-   | `verified` | 与 SSoT 一致 | **建议**把 `last_verified` 更新为今天（列入报告，不自动改） |
-   | `contradicted` | 与 SSoT 矛盾 | 报告矛盾点 + 给**修正建议 / 建议 patch**；不自动改正文、不自动改 status |
+   | `verified` | 与 SSoT 一致 | **建议**调用 `memory_update(id, last_verified=今天)`（列入报告，不自动执行） |
+   | `contradicted` | 与 SSoT 矛盾 | 报告矛盾点 + 给**修正建议**；不自动改正文、不自动改 status |
    | `unverifiable` | 无 SSoT / 太主观 | 报告为待人工判断，不动 |
    | `stale (time)` | 仅超 30 天未核验 | 提示，建议安排核验 |
    | `incomplete` | frontmatter 缺字段 | 报告缺哪些字段 |
 
-   **硬约束：本 skill 默认不修改任何 card 文件。** 发现问题只报告 + 建议；是否按建议改写 / 降级 status，交用户确认后再做（或用户显式说"顺手改掉"时才改）。
+   **硬约束：本 skill 默认不修改任何 card。** 发现问题只报告 + 建议；是否按建议调用 `memory_update(id, ...)` 改写，交用户确认后再做（或用户显式说"顺手改掉"时才改）。
 
-8. **输出报告**（见下）
+6. **输出报告**（见下）
 
-**不要更新 MEMORY.md 或任何 INDEX 文件。** SessionStart hook 从 frontmatter 动态扫描生成注入内容，不依赖索引。
-
-> 提示：把 card 标成 `status: stale`/`deprecated` 会让它**立即从 session 注入中消失**（hook 只注入 active）。这是止血手段，但本 skill 不自动执行——交用户决定。
+> 提示：把 card status 改为 `stale`/`deprecated` 会让它**立即从 session 注入中消失**（hook 只注入 active）。这是止血手段，但本 skill 不自动执行——交用户决定后调用 `memory_update(id, status=deprecated)`。
 
 ## 报告格式
 
 ```
-## Memory Validate Report (mode: default | deep, scope: project | system | all)
+## Memory Validate Report (mode: default | deep)
 
 | 裁决 | 数量 |
 |------|------|
@@ -98,18 +79,18 @@ Memory 存储路径可通过以下方式覆盖（优先级从高到低）：
 | incomplete   | N |
 
 ### ⚠️ Contradicted（与 SSoT 矛盾，建议修正）
-- <card-name>: 正文称「X」；SSoT(<source/path>) 实为「Y」
-  - 建议: <怎么改 / patch>
+- <card-name> (id: <id>): 正文称「X」；SSoT(<source/path>) 实为「Y」
+  - 建议: <怎么改 / memory_update 调用示例>
 
 ### Verified（建议刷新 last_verified → 今天）
-- <card-name> (last_verified: YYYY-MM-DD)
+- <card-name> (id: <id>, last_verified: YYYY-MM-DD)
 
 ### Unverifiable（无核验手段，待人工）
-- <card-name>: <原因>
+- <card-name> (id: <id>): <原因>
 
 ### Stale (time) — last_verified > 30 天
-- <card-name> (last verified: YYYY-MM-DD, N days ago)
+- <card-name> (id: <id>, last verified: YYYY-MM-DD, N days ago)
 
 ### Incomplete（frontmatter 缺字段）
-- <card-name>: missing [field1, field2]
+- <card-name> (id: <id>): missing [field1, field2]
 ```
