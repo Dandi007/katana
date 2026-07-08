@@ -17,8 +17,8 @@ Claude Code plugin：operational memory system。
 | `KATANA_MEMORY_MCP_URL` | `http://127.0.0.1:5604` | MCP 服务地址 |
 | `KATANA_MEMORY_TENANT` | `uther` | 租户标识，决定 card 存储子目录 |
 | `KATANA_MEMORY_DIR` | `/data/memory` | 独立 git repo 根目录 |
-| `HOST` | `0.0.0.0` | 服务监听地址 |
-| `PORT` | `5604` | 服务监听端口 |
+| `KATANA_MEMORY_MCP_HOST` | `127.0.0.1` | 服务监听地址 |
+| `KATANA_MEMORY_MCP_PORT` | `5604` | 服务监听端口 |
 
 ## Card 格式
 
@@ -57,8 +57,11 @@ metadata:
 ## 开发
 
 ```bash
-# 启动服务（开发模式）
+# 运行 mcp 测试套件
 PYTHON=~/.cache/katana-mcp/venv/bin/python bash mcp/run-tests.sh
+
+# 本地前台起服务
+~/.cache/katana-mcp/venv/bin/python -m katana_memory_mcp.server
 
 # hook 降级路径回归测试（服务不可达时 fallback JSON 验证）
 bash plugins/memory/tests/session-start.test.sh

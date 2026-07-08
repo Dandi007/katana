@@ -25,7 +25,7 @@ description: 创建或更新 memory card（本地可验证事实），通过 MCP
    - 已存在 → 更新模式：调用 `memory_get(id)` 读取全文，再调用 `memory_update(id, ...)` 更新内容 + `last_verified`
    - 不存在 → 新建模式：调用 `memory_create(name, description, body, type?)`
 
-2. **生成 card 内容**（用下面的 canonical 模板）
+2. **生成 card 内容**（更新模式：在 Step 1 读取的旧内容基础上生成变更；新建模式：从零构建完整 body）
    - name: kebab-case slug，简短唯一
    - description: 一行描述，这是 L1 注入内容——要让 agent 在没有上下文时看到这一行就知道这张 card 大概关于什么
    - last_verified: 今天日期
