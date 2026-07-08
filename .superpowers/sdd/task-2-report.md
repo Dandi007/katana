@@ -1,30 +1,33 @@
-# Task 2 报告：模型配置干净化 + gpt 通用修
+# Task 2 Report: store CRUD（list/get/create/update/delete）
 
-**status:** DONE
-**commit:** f323b8c
-**branch:** feat/e2e-harness-v2
+**Status:** DONE
+**Commit:** c9f1ea6
+**Branch:** feat/memory-mcp
 
-## pytest 汇总
+## Test Summary
 
 ```
-tests/unit/test_model.py        2 passed in 0.04s
-plugins/jury/engine/test_panel.py  8 passed in 1.44s
+18 passed in 0.02s
+  - 10 existing Task 1 tests (all green)
+  - 8 new Task 2 tests (all green)
 ```
 
-## 落地内容
+## Implementation
 
-| 文件 | 动作 | 说明 |
+| File | Action | Details |
 |---|---|---|
-| `tests/models.yaml` | 新建 | roles + jury-roster，全显式 model；gpt=gpt/gpt-5.5 |
-| `tests/harness/model.py` | 新建 | `load_models`/`build_env`（回收 ANTHROPIC_*/CLAUDE_CODE_* env）/`role` |
-| `tests/unit/test_model.py` | 新建 | 2 个单元测试（build_env 收 env；roster gpt model 显式） |
-| `plugins/jury/engine/panel.py` | 改 DEFAULT_ROSTER | gpt `""`→`"gpt/gpt-5.5"`；deepseek→`"lingzhi/deepseek-v4-pro"`；qwen→`"lingzhi/qwen3.7-max"`；opus 保持 `"opus"` |
+| `mcp/memory/katana_memory_mcp/store.py` | Modified | Added: `list_cards`, `get_card`, `create_card`, `update_card`, `delete_card` + helpers (`_today`, `_read`, `_scan`, `_l1`, `_find`, `_validate`, `NAME_RE`) |
+| `mcp/memory/tests/test_store.py` | Modified | Added: 8 new CRUD tests (create, list, get, update, delete validation) |
+| `mcp/memory/tests/conftest.py` | Created | Pytest fixtures: `tenant_dir`, `seeded` with 2 pre-created cards |
 
-## G5 约束满足
+## Test Coverage
 
-- `build_env` 仅回收 setter 产生的 `ANTHROPIC_*`/`CLAUDE_CODE_*` env，不做任何 model 决策。
-- panel.py `run_model` 内 `model_arg` 逻辑不变（`member.get("model")` 非空才传 `--model`）；现在 roster 四项全非空，gpt 从此显式传 `gpt/gpt-5.5` 而非裸继承 setter 环境中的 5.4 主槽。
+- **create_card**: writes file, returns id with changed_paths, rejects duplicate names, validates kebab-case name + type
+- **list_cards**: returns cards list + skipped paths for unparseable/id-less files
+- **get_card**: retrieves full metadata + body + path, returns None for missing id
+- **update_card**: updates fields, renames file on name change, tracks old+new paths in changed_paths, validates status/type
+- **delete_card**: removes file, returns deleted metadata with changed_paths, raises KeyError for missing
 
-## concern / 偏离
+## Concerns
 
-无。test_panel.py 存量测试 `test_run_model_records_ccs_base_url` 用了 `"model": ""` 构造非显式场景，属测试内部 fixture 构造，不影响 DEFAULT_ROSTER 语义，保留原样（plan Step5 说"model 非空只是多传 --model，不破坏现有测试"——确实全绿）。
+None. All Task 1 tests remain green. TDD flow completed as specified (write tests → confirm fail → implement → confirm pass → commit).
