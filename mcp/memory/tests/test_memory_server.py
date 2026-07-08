@@ -3,6 +3,7 @@ import subprocess
 
 import pytest
 from fastmcp import Client
+from starlette.testclient import TestClient
 
 from katana_memory_mcp import server, store
 
@@ -14,6 +15,12 @@ def _init_repo(tmp_path):
     d = tmp_path / "uther"
     d.mkdir()
     return str(tmp_path), str(d)
+
+
+def _data_root(tmp_path):
+    repo, tdir = _init_repo(tmp_path)
+    store.create_card(tdir, "seed-card", "seed desc", "## Fact\nx\n\n## How to Verify\ny", now="2026-07-08")
+    return repo
 
 
 def _call(mcp, tool, args=None):
@@ -55,3 +62,28 @@ def test_get_unknown_id_is_tool_error(srv):
     mcp, _, _ = srv
     with pytest.raises(Exception):
         _call(mcp, "memory_get", {"id": "m-ffffff"})
+
+
+# ── Task 6: build_app 多租户组装 + /index hook route ──────────────────────────
+
+def test_index_route_returns_hook_json(tmp_path):
+    app = server.build_app(_data_root(tmp_path))
+    with TestClient(app) as tc:
+        r = tc.get("/t/uther/index")
+        assert r.status_code == 200
+        payload = r.json()
+        ac = payload["hookSpecificOutput"]["additionalContext"]
+        assert "<memory-index>" in ac and "seed-card" in ac
+
+
+def test_index_route_unknown_tenant_404(tmp_path):
+    app = server.build_app(_data_root(tmp_path))
+    with TestClient(app) as tc:
+        assert tc.get("/t/nobody/index").status_code == 404
+
+
+def test_mcp_mounted_per_tenant(tmp_path):
+    app = server.build_app(_data_root(tmp_path))
+    with TestClient(app) as tc:
+        # streamable-http endpoint 存在（非 404）；MCP 握手细节不在此测
+        assert tc.post("/t/uther/mcp", json={}).status_code != 404

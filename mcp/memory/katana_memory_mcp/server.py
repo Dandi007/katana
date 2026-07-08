@@ -5,11 +5,17 @@
   tenant 由 URL 绑定，不进 tool 签名。
 - id 寻址：所有 tool 以 m-<6hex> 的 id 为接口；name 只是可读别名兼文件名。
 """
+import contextlib
 import os
+from pathlib import Path
 
+import uvicorn
 from fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route
 
-from katana_memory_mcp import gitops, store
+from katana_memory_mcp import gitops, index as index_mod, store
 
 
 def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP:
@@ -84,3 +90,52 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
         return _commit("delete", store.delete_card(tenant_dir, id))
 
     return m
+
+
+def _tenants(data_root: str) -> list[str]:
+    root = Path(data_root)
+    if not root.is_dir():
+        return []
+    return sorted(d.name for d in root.iterdir()
+                  if d.is_dir() and not d.name.startswith("."))
+
+
+def build_app(data_root: str) -> Starlette:
+    tenants = _tenants(data_root)
+    sub_apps: list = []
+    mounts: list = []
+    for t in tenants:
+        m = build_tenant_server(t, os.path.join(data_root, t), data_root)
+        sub = m.http_app(path="/mcp")
+        sub_apps.append(sub)
+        mounts.append(Mount(f"/t/{t}", app=sub))
+
+    async def index_endpoint(request):
+        tenant = request.path_params["tenant"]
+        if tenant not in tenants:
+            return JSONResponse({"error": f"unknown tenant: {tenant}"}, status_code=404)
+        cards = store.list_cards(os.path.join(data_root, tenant))["cards"]
+        return JSONResponse(index_mod.hook_payload(cards, tenant))
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        async with contextlib.AsyncExitStack() as stack:
+            for sub in sub_apps:
+                await stack.enter_async_context(sub.router.lifespan_context(sub))
+            yield
+
+    return Starlette(
+        routes=[Route("/t/{tenant}/index", index_endpoint), *mounts],
+        lifespan=lifespan,
+    )
+
+
+def main() -> None:
+    data_root = os.environ.get("KATANA_MEMORY_DIR", "/data/memory")
+    host = os.environ.get("KATANA_MEMORY_MCP_HOST", "127.0.0.1")
+    port = int(os.environ.get("KATANA_MEMORY_MCP_PORT", "5604"))
+    uvicorn.run(build_app(data_root), host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()
