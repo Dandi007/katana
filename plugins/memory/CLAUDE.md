@@ -4,26 +4,29 @@ Claude Code plugin：operational memory system。
 
 ## 机制
 
-- **SessionStart hook** 用纯 shell + awk (`hooks/scan-memory.awk`) 动态扫描所有 memory card 的 YAML frontmatter，注入到 context
-- **L2 正文**不注入，需要时用 Read 工具读取具体 card 文件
-- 无 INDEX 文件——frontmatter 即唯一数据源，零漂移
-- **无构建、无二进制、无下载**：hook 是文本脚本，随包发布即可运行，到处有 `bash` + `awk` 就能跑（不再依赖 Rust binary / cargo / GitHub Release 预编译）
+- **数据存储**：memory cards 保存在 `KATANA_MEMORY_DIR` 指向的独立 git repo（默认 `/data/memory`），按多租户目录组织（`<KATANA_MEMORY_DIR>/<tenant>/`）
+- **服务**：`katana-memory-mcp` 运行在 `:5604`（FastMCP），统一暴露 5 个 MCP tool（`memory_index` / `memory_get` / `memory_create` / `memory_update` / `memory_delete`）
+- **SessionStart hook** 是一个带降级的 curl——向服务 `GET /t/<tenant>/index` 拉取 `<memory-index>` hook JSON，服务不可达时注入降级提示，退出码始终为 0
+- **所有读写走 MCP tools（id 寻址）**：skills 不直接操作文件系统；数据访问 100% 收敛到服务端
+- **L2 正文**不注入到 session context，需要时用 `memory_get(id)` 读取具体 card
 
-## 存储路径
+## 环境变量
 
-| Level | 默认路径 | 环境变量覆盖 |
-|-------|---------|-------------|
-| Project | `<project-root>/memory/` | `CLAUDE_MEMORY_PROJECT_DIR` |
-| System | `~/.claude/memory/` | `CLAUDE_MEMORY_SYSTEM_DIR` |
-
-Hook 自动合并两层注入。
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `KATANA_MEMORY_MCP_URL` | `http://127.0.0.1:5604` | MCP 服务地址 |
+| `KATANA_MEMORY_TENANT` | `uther` | 租户标识，决定 card 存储子目录 |
+| `KATANA_MEMORY_DIR` | `/data/memory` | 独立 git repo 根目录 |
+| `KATANA_MEMORY_MCP_HOST` | `127.0.0.1` | 服务监听地址 |
+| `KATANA_MEMORY_MCP_PORT` | `5604` | 服务监听端口 |
 
 ## Card 格式
 
 ```yaml
 ---
+id: <服务生成的唯一 id>
 name: kebab-case-slug
-description: one-liner（即 L1，注入到 context）
+description: one-liner（即 L1，注入到 session context）
 status: active | stale | deprecated
 last_verified: YYYY-MM-DD
 metadata:
@@ -31,32 +34,38 @@ metadata:
 ---
 ```
 
-正文必含 `## How to Verify` 段（可执行命令或可核对的 SSoT 路径），供 `memory:validate` 核验事实是否仍成立。canonical 模板见 `skills/remember/SKILL.md`。
-
-注：hook 只注入 `status: active`（或缺省）的 card；`stale` / `deprecated` 不注入。
-
-### Frontmatter 解析约定（与 scanner 对齐）
-
-scanner 是逐行解析（非完整 YAML parser），覆盖 `memory:remember` 写出的稳定格式：
-
-- `name` / `description` / `status` / `metadata.type` 均为单行 scalar
-- plain scalar 中的 ` #`（空格+井号）按 YAML 规则视为行内注释并剥除；需要保留井号请用引号包裹整个值
-- 值里若要出现 ASCII `: `（冒号+空格），必须加引号，否则不符合约定
+- `id`：由服务端生成，skills 通过 id 寻址（`memory_get` / `memory_update` / `memory_delete`）
+- 正文必含 `## How to Verify` 段（可执行命令或可核对的 SSoT 路径），供 `memory:validate` 核验事实是否仍成立
+- hook 只注入 `status: active`（或缺省）的 card；`stale` / `deprecated` 不注入
+- canonical 模板见 `skills/remember/SKILL.md`
 
 ## Skills
 
-- `memory:remember` — 创建/更新 card（How to Verify 为必填段）
-- `memory:validate` — 核验 card 健康与事实正确性：L1 结构 + L2 命令核验（默认），L3 SSoT 深度重核（用户要求深度时）；发现矛盾报告 + 给修正建议，不自动改写
+- `memory:remember` — 通过 `memory_create` / `memory_update` 创建/更新 card（How to Verify 为必填段）
+- `memory:validate` — 通过 `memory_index` + `memory_get` 核验 card 健康与事实正确性：L1 结构 + L2 命令核验（默认），L3 SSoT 深度重核（用户要求深度时）；发现矛盾报告 + 给修正建议，不自动改写
+
+## MCP Tools（服务暴露）
+
+| tool | 签名 | 说明 |
+|------|------|------|
+| `memory_index` | `()` | 返回当前租户全量 card 列表（id / name / description / status / last_verified） |
+| `memory_get` | `(id)` | 读取指定 card 全文（含 frontmatter + body） |
+| `memory_create` | `(name, description, body, type?)` | 新建 card，服务生成 id，写入 git repo |
+| `memory_update` | `(id, description?, body?, last_verified?, status?)` | 更新 card 指定字段 |
+| `memory_delete` | `(id)` | 删除 card（git rm + commit） |
 
 ## 开发
 
 ```bash
-# 单独测试 hook（模拟真实调用）
-CLAUDE_PROJECT_DIR=/path/to/project bash hooks/session-start
+# 运行 mcp 测试套件
+PYTHON=~/.cache/katana-mcp/venv/bin/python bash mcp/run-tests.sh
 
-# 自定义路径测试
-CLAUDE_MEMORY_PROJECT_DIR=/custom/path bash hooks/session-start
+# 本地前台起服务
+~/.cache/katana-mcp/venv/bin/python -m katana_memory_mcp.server
 
-# 字节级回归测试（scanner 输出对齐 golden）
-bash tests/scan-memory.test.sh
+# hook 降级路径回归测试（服务不可达时 fallback JSON 验证）
+bash plugins/memory/tests/session-start.test.sh
+
+# 验证 hook 降级输出（手动）
+KATANA_MEMORY_MCP_URL=http://127.0.0.1:1 bash plugins/memory/hooks/session-start
 ```
