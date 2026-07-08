@@ -156,6 +156,13 @@ def test_create_rejects_bad_name_and_type(tenant_dir):
         store.create_card(tenant_dir, "Bad Name!", "d", "b")
     with pytest.raises(ValueError):
         store.create_card(tenant_dir, "ok-name", "d", "b", type="nope")
+    # Reject trailing/leading hyphens in name
+    with pytest.raises(ValueError):
+        store.create_card(tenant_dir, "bad-", "d", "b")
+    with pytest.raises(ValueError):
+        store.create_card(tenant_dir, "-bad", "d", "b")
+    # Single character names should be valid
+    assert store.NAME_RE.fullmatch("a") is not None
 
 
 def test_list_and_get(seeded):

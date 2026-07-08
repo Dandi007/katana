@@ -13,6 +13,7 @@ import secrets
 import yaml
 
 ID_RE = re.compile(r"m-[0-9a-f]{6}")
+NAME_RE = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?")
 STATUSES = {"active", "stale", "deprecated"}
 TYPES = {"user", "feedback", "project", "reference"}
 _CANONICAL = ("id", "name", "description", "status", "last_verified")
@@ -77,9 +78,6 @@ def gen_id(existing: set[str]) -> str:
         i = "m-" + secrets.token_hex(3)
         if i not in existing:
             return i
-
-
-NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 
 def _today() -> str:
