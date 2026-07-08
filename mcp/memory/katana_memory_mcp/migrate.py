@@ -2,6 +2,11 @@
 
 唯一内容改动 = 在 frontmatter 首行 `---` 之后插入 `id: m-xxxxxx`；
 其余字节保持原样（存量卡 frontmatter 含非 canonical 字段，不做重序列化）。
+
+CRLF 处理决策：
+- body 含 CRLF（frontmatter 为 LF）：binary 写出保证字节 100% 原样。
+- frontmatter 本身为 CRLF（`---\r\n` 开头）：parse_card 返回 None → skipped，
+  需人工处理。
 """
 import argparse
 import glob
@@ -16,8 +21,10 @@ def _existing_ids(*dirs: str) -> set[str]:
     for d in dirs:
         for p in glob.glob(os.path.join(d, "*.md")):
             try:
-                meta = store.parse_card(open(p, encoding="utf-8").read())
-            except OSError:
+                with open(p, "rb") as f:
+                    raw = f.read()
+                meta = store.parse_card(raw.decode("utf-8"))
+            except (OSError, UnicodeDecodeError):
                 continue
             if meta and meta.get("id"):
                 ids.add(meta["id"])
@@ -30,7 +37,13 @@ def migrate(src_dirs: list[str], dest_dir: str) -> dict:
     migrated, skipped, collisions = 0, [], []
     for src in src_dirs:
         for path in sorted(glob.glob(os.path.join(src, "*.md"))):
-            text = open(path, encoding="utf-8").read()
+            try:
+                with open(path, "rb") as f:
+                    raw = f.read()
+                text = raw.decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                skipped.append(path)
+                continue
             meta = store.parse_card(text)
             if meta is None or not meta.get("name") or not meta.get("description"):
                 skipped.append(path)
@@ -42,11 +55,14 @@ def migrate(src_dirs: list[str], dest_dir: str) -> dict:
             if meta.get("id"):
                 shutil.copyfile(path, dest)
             else:
+                if not raw.startswith(b"---\n"):
+                    # frontmatter 本身是 CRLF 或其他异常前缀，跳过
+                    skipped.append(path)
+                    continue
                 new_id = store.gen_id(ids)
                 ids.add(new_id)
-                assert text.startswith("---\n")
-                with open(dest, "w", encoding="utf-8") as f:
-                    f.write(f"---\nid: {new_id}\n" + text[4:])
+                with open(dest, "wb") as f:
+                    f.write(b"---\nid: " + new_id.encode() + b"\n" + raw[4:])
             migrated += 1
     return {"migrated": migrated, "skipped": skipped, "collisions": collisions}
 
