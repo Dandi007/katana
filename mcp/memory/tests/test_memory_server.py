@@ -109,3 +109,38 @@ def test_mcp_mounted_per_tenant(tmp_path):
     with TestClient(app) as tc:
         # streamable-http endpoint 存在（非 404）；MCP 握手细节不在此测
         assert tc.post("/t/uther/mcp", json={}).status_code != 404
+
+
+# ── memory_read / memory_edit 工具（FS-Read/Edit 语义） ──────────────────────
+
+def test_memory_read_then_edit_then_get(srv):
+    mcp, tdir, repo = srv
+    cid = _call(mcp, "memory_create",
+                {"name": "r-card", "description": "d",
+                 "body": "## Fact\nx\n\n## How to Verify\ny"})["id"]
+    rd = _call(mcp, "memory_read", {"id": cid})
+    assert rd["content"].splitlines()[0] == "1\t---"
+    assert "## Fact" in rd["content"]
+    assert "path" not in rd
+    ed = _call(mcp, "memory_edit",
+               {"id": cid, "old_string": "## Fact\nx", "new_string": "## Fact\nz"})
+    assert ed["git"]["committed"] is True
+    assert "## Fact\nz" in _call(mcp, "memory_get", {"id": cid})["body"]
+
+
+def test_memory_read_offset_limit(srv):
+    mcp, tdir, repo = srv
+    cid = _call(mcp, "memory_create",
+                {"name": "p-card", "description": "d",
+                 "body": "## Fact\nx\n\n## How to Verify\ny"})["id"]
+    rd = _call(mcp, "memory_read", {"id": cid, "offset": 1, "limit": 1})
+    assert rd["content"].splitlines() == ["1\t---"]
+
+
+def test_memory_edit_error_is_tool_error(srv):
+    mcp, _, _ = srv
+    cid = _call(mcp, "memory_create",
+                {"name": "e-card", "description": "d",
+                 "body": "## Fact\nx\n\n## How to Verify\ny"})["id"]
+    with pytest.raises(Exception):
+        _call(mcp, "memory_edit", {"id": cid, "old_string": "absent", "new_string": "z"})

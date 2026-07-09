@@ -23,8 +23,11 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
         f"katana-memory-mcp[{tenant}]",
         instructions=(
             "可验证事实卡库（memory card）的唯一数据入口。"
-            "memory_index 看 L1 清单，memory_get(id) 读全文；"
-            "创建/更新走 memory_create/memory_update（正文必含 '## How to Verify' 段）。"
+            "读：memory_index 看 L1 清单；memory_get(id) 取结构化整卡；"
+            "memory_read(id) 取原始文件文本（FS-Read 语义，cat -n + offset/limit，"
+            "构造 memory_edit 的 old_string 前先用它拿精确文本）。"
+            "写：memory_create/memory_update（整字段替换，正文必含 '## How to Verify'）；"
+            "局部改用 memory_edit（FS-Edit 语义，old_string→new_string，先 memory_read，比整篇重写省 token）。"
         ),
     )
 
@@ -89,6 +92,40 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
             id: card id。
         """
         return _commit("delete", store.delete_card(tenant_dir, id))
+
+    @m.tool()
+    async def memory_read(id: str, offset: int | None = None, limit: int | None = None) -> dict:
+        """按 id 读卡的原始文件文本（frontmatter + body），cat -n 行号，支持 offset/limit 分页。
+
+        语义同 FS Read，入参为 card id（非路径）。读大卡可只取片段。
+        构造 memory_edit 的 old_string 前，先用它拿到精确文本（含 frontmatter）。
+        与 memory_get 区别：get 返回结构化字段，read 返回原始文本。
+
+        Args:
+            id: card id。
+            offset: 1-based 起始行（默认 1）。
+            limit: 读取行数（默认到文件尾）。
+        """
+        return store.read_card_raw(tenant_dir, id, offset=offset, limit=limit)
+
+    @m.tool()
+    async def memory_edit(id: str, old_string: str, new_string: str,
+                          replace_all: bool = False) -> dict:
+        """按 id 对卡做精确字符串替换（old_string→new_string），语义同 FS Edit，入参 card id。
+
+        先 memory_read 拿精确文本。old_string 须精确匹配（空白敏感）且唯一；
+        多次命中需 replace_all=True。改 body 局部用它，比 memory_update 整篇重写省 token。
+        写走治理路径（校验结果可解析 + id 不可变 + 原子写 + git commit）。
+        改 name 字段会同步 rename 文件；改 id 会被拒。
+
+        Args:
+            id: card id。
+            old_string: 要替换的精确子串（唯一，或 replace_all）。
+            new_string: 替换为的文本。
+            replace_all: True 时替换全部命中。
+        """
+        return _commit("edit", store.edit_card(
+            tenant_dir, id, old_string, new_string, replace_all=replace_all))
 
     return m
 
