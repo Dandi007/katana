@@ -8,10 +8,18 @@ source "${SCRIPT_DIR}/katana-config.sh"
 WRITING_DIR="$(katana_config_get "writing_dir" "" "KATANA_WRITING_DIR")"
 [ -z "$WRITING_DIR" ] && exit 0
 
-# 安全校验：拒绝路径穿越与非法字符
-if [[ ! "$WRITING_DIR" =~ ^[a-zA-Z0-9/_.一-鿿~\ \-]+$ ]] || [[ "$WRITING_DIR" == *".."* ]]; then
-    echo "Error: writing_dir invalid: $WRITING_DIR" >&2; exit 1
-fi
+# 安全校验：locale 无关的黑名单。
+# 拒绝路径穿越与 shell 危险字符，放行字母数字 / _ . - 空格 ~ 及任意非 ASCII（如中文）路径。
+# 早期版本用含 CJK 范围 `一-鿿` 的白名单 ERE：`[[ =~ ]]` 走 glibc regcomp，在 UTF-8
+# locale 下该多字节范围触发 "Invalid collation character"，导致合法 writing_dir 被误拒。
+# `case` glob 字节级、locale 无关；`~` 保留以供下方 katana_resolve_path 做 home 展开。
+case "$WRITING_DIR" in
+    *".."* | *'`'* | *'$'* | *';'* | *'&'* | *'|'* | *'<'* | *'>'* \
+    | *'('* | *')'* | *'{'* | *'}'* | *'['* | *']'* | *'*'* | *'?'* \
+    | *'!'* | *'"'* | *"'"* | *'\'* | *$'\n'* | *$'\r'* | *$'\t'*)
+        echo "Error: writing_dir invalid: $WRITING_DIR" >&2; exit 1
+        ;;
+esac
 # 解析为绝对路径：~ 展开 / 绝对原样 / 相对则 join kb_root（基准从 cwd 变 kb_root）
 WRITING_DIR="$(katana_resolve_path "$WRITING_DIR")"
 
