@@ -305,3 +305,90 @@ def test_update_rejects_empty_description(seeded):
     tenant_dir, c1, _ = seeded
     with pytest.raises(ValueError, match="empty"):
         store.update_card(tenant_dir, c1["id"], description="")
+
+
+# ── memory_read / memory_edit: FS-Read/Edit 语义，card id 代替路径 ───────────
+
+def test_read_card_raw_line_numbered(seeded):
+    tenant_dir, c1, _ = seeded
+    out = store.read_card_raw(tenant_dir, c1["id"])
+    assert out["total_lines"] > 0
+    assert out["content"].splitlines()[0] == "1\t---"
+    assert "## Fact" in out["content"]
+    # 不泄露 path（与 memory_get 一致）
+    assert "path" not in out
+
+
+def test_read_card_raw_offset_limit(seeded):
+    tenant_dir, c1, _ = seeded
+    out = store.read_card_raw(tenant_dir, c1["id"], offset=2, limit=2)
+    lines = out["content"].splitlines()
+    assert lines[0].startswith("2\t") and lines[1].startswith("3\t")
+    assert len(lines) == 2
+
+
+def test_read_card_raw_not_found(tenant_dir):
+    with pytest.raises(KeyError):
+        store.read_card_raw(tenant_dir, "m-ffffff")
+
+
+def test_edit_card_replaces_unique_substring(seeded):
+    tenant_dir, c1, _ = seeded
+    out = store.edit_card(tenant_dir, c1["id"], "## Fact\nA", "## Fact\nA edited")
+    assert out["id"] == c1["id"] and out["changed_paths"]
+    assert "A edited" in store.get_card(tenant_dir, c1["id"])["body"]
+
+
+def test_edit_card_old_not_found_raises(seeded):
+    tenant_dir, c1, _ = seeded
+    with pytest.raises(ValueError, match="not found"):
+        store.edit_card(tenant_dir, c1["id"], "nope-not-here", "x")
+
+
+def test_edit_card_non_unique_requires_replace_all(seeded):
+    tenant_dir, c1, _ = seeded
+    # "## " 在 body 中出现多次（Fact + How to Verify）
+    with pytest.raises(ValueError, match="matches"):
+        store.edit_card(tenant_dir, c1["id"], "## ", "XX ")
+    # replace_all 通过
+    store.edit_card(tenant_dir, c1["id"], "## ", "XX ", replace_all=True)
+    assert "XX Fact" in store.get_card(tenant_dir, c1["id"])["body"]
+
+
+def test_edit_card_id_immutable(seeded):
+    tenant_dir, c1, _ = seeded
+    with pytest.raises(ValueError, match="immutable"):
+        store.edit_card(tenant_dir, c1["id"], f"id: {c1['id']}", "id: m-999999")
+
+
+def test_edit_card_rejects_unparseable(seeded):
+    tenant_dir, c1, _ = seeded
+    # 删掉 frontmatter 结束 fence → 不可解析；不落盘
+    with pytest.raises(ValueError):
+        store.edit_card(tenant_dir, c1["id"], "  type: reference\n---", "  type: reference")
+    # 原文件未被动过
+    assert "## Fact" in store.get_card(tenant_dir, c1["id"])["body"]
+
+
+def test_edit_card_name_change_renames_file(seeded):
+    tenant_dir, c1, _ = seeded
+    old = os.path.join(tenant_dir, "card-one.md")
+    assert os.path.isfile(old)
+    store.edit_card(tenant_dir, c1["id"], "name: card-one", "name: card-renamed")
+    assert os.path.isfile(os.path.join(tenant_dir, "card-renamed.md"))
+    assert not os.path.exists(old)
+    assert store.get_card(tenant_dir, c1["id"])["name"] == "card-renamed"
+
+
+def test_edit_card_noop_rejected(seeded):
+    tenant_dir, c1, _ = seeded
+    with pytest.raises(ValueError, match="differ"):
+        store.edit_card(tenant_dir, c1["id"], "## Fact", "## Fact")
+
+
+def test_edit_card_multiline_description_rejected(seeded):
+    tenant_dir, c1, _ = seeded
+    # description 改成跨行 → 不可解析（parse 阶段先于 _validate 拦下），编辑被拒、不落盘
+    with pytest.raises(ValueError):
+        store.edit_card(tenant_dir, c1["id"], "description: desc one", "description: desc\none")
+    assert store.get_card(tenant_dir, c1["id"])["description"] == "desc one"

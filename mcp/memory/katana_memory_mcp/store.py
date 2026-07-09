@@ -226,3 +226,87 @@ def delete_card(tenant_dir: str, card_id: str) -> dict:
     out = _l1(cur)
     out["changed_paths"] = [cur["path"]]
     return out
+
+
+# ── FS-Read/Edit 语义，入参 card id 代替文件路径（memory_read / memory_edit） ──
+
+def read_card_raw(tenant_dir: str, card_id: str, *, offset: int | None = None,
+                  limit: int | None = None) -> dict:
+    """按 id 读卡的原始文件文本（frontmatter + body），cat -n 行号；FS-Read 语义。
+
+    入参为 card id（非文件路径）。offset 为 1-based 起始行，limit 为行数；
+    返回的 content 为 ``{lineno}\\t{line}`` 逐行拼接，便于定位、构造 edit 的 old_string。
+    与 memory_get 的区别：get 返回结构化字段，read 返回原始文本（含 frontmatter）。
+    """
+    cur = _find(tenant_dir, card_id)
+    if cur is None:
+        raise KeyError(f"card not found: {card_id}")
+    with open(cur["path"], encoding="utf-8") as f:
+        text = f.read()
+    lines = text.split("\n")
+    total = len(lines)
+    start = max(1, offset or 1)
+    last = min(total, start + limit - 1) if limit is not None else total
+    if start > total or start > last:
+        rendered = ""
+    else:
+        rendered = "\n".join(f"{i}\t{lines[i - 1]}" for i in range(start, last + 1))
+    return {
+        "id": card_id, "name": cur["name"], "total_lines": total,
+        "offset": start, "limit": limit, "content": rendered,
+    }
+
+
+def edit_card(tenant_dir: str, card_id: str, old_string: str, new_string: str,
+              *, replace_all: bool = False) -> dict:
+    """按 id 对卡做精确字符串替换（old_string→new_string）；FS-Edit 语义。
+
+    old_string 须精确匹配（含空白敏感）且唯一；多次命中需 replace_all=True。
+    结果须仍可解析为合法卡（id/name/description 齐全）且 **id 不变**（id 不可变）；
+    改 name 字段会同步 rename 文件（写前查重）。**verbatim 写**——只动匹配区域，
+    不重排其余 frontmatter。返回 changed_paths 供上层 _commit 走 git。
+
+    与 memory_update 的区别：update 是整字段替换（改 body 须重发整篇），edit 是
+    子串级外科改（大卡小改省 token）。
+    """
+    if not old_string:
+        raise ValueError("old_string must be non-empty")
+    if old_string == new_string:
+        raise ValueError("old_string must differ from new_string")
+    cur = _find(tenant_dir, card_id)
+    if cur is None:
+        raise KeyError(f"card not found: {card_id}")
+    old_path = cur["path"]
+    with open(old_path, encoding="utf-8") as f:
+        text = f.read()
+    count = text.count(old_string)
+    if count == 0:
+        raise ValueError(f"old_string not found in card {card_id}")
+    if count > 1 and not replace_all:
+        raise ValueError(
+            f"old_string matches {count} times in card {card_id}; "
+            "narrow it or pass replace_all=True"
+        )
+    new_text = text.replace(old_string, new_string) if replace_all \
+        else text.replace(old_string, new_string, 1)
+    parsed = parse_card(new_text)
+    if parsed is None or not parsed.get("id") or not parsed.get("name") \
+            or not parsed.get("description"):
+        raise ValueError("edit would produce an unparseable/invalid card; aborted (no write)")
+    if parsed["id"] != card_id:
+        raise ValueError("id is immutable; edits that change the id field are rejected")
+    _validate(name=parsed["name"], status=parsed["status"], type=parsed["type"],
+              description=parsed["description"], last_verified=parsed["last_verified"])
+    # name 改动 → 文件 rename（写前查重，避免半写状态）
+    new_path = os.path.join(tenant_dir, f"{parsed['name']}.md")
+    if new_path != old_path and os.path.exists(new_path):
+        raise ValueError(f"card name already exists: {parsed['name']}")
+    with open(old_path, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    changed = [old_path]
+    if new_path != old_path:
+        os.rename(old_path, new_path)
+        changed.append(new_path)
+    out = _l1(parsed)
+    out["changed_paths"] = changed
+    return out
