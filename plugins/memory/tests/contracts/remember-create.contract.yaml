@@ -1,0 +1,27 @@
+# memory:remember — 当前 MCP semantics 契约。
+# 成功条件是 card 经 MCP tool 落库（服务端持久化），而非文件系统 scanner 写盘。
+# 数据写入 katana-memory-mcp 的独立 git repo（KATANA_MEMORY_DIR），不落 cwd，
+# 故确定性锚用 process.skill_loaded；MCP 写入行为交语义轴核验。
+# 需 claude + 运行中的 memory 服务；缺任一则 SKIP（不靠永久 exemption 掩盖）。
+skill: memory:remember
+setup:
+  fixture: kb
+  requires: [cmd:claude, cmd:curl]
+trigger:
+  prompt: |
+    请用 /memory:remember 记住这条事实：本仓库 memory 数据访问 100% 收敛到
+    katana-memory-mcp 服务（默认 http://127.0.0.1:5605，tenant uther），
+    skills 不直接读写文件系统。给出 How to Verify 段。记完后把服务返回的
+    card id 与当前 active 卡总数写入 ./remember-result.txt。
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
+expect:
+  process:
+    - skill_loaded: memory:remember
+  filesystem:
+    - created: "remember-result.txt"
+    - unchanged_outside: true
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/memory-remember-create.md
+    inputs:
+      - "{case_trace}"
+      - "{created:remember-result.txt}"

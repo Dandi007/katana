@@ -1,0 +1,26 @@
+# memory:validate — 当前 MCP semantics 契约。
+# 通过 memory_index + memory_get 核验 card 健康与事实正确性（L1 结构 + L2 命令），
+# 默认不改写任何 card（报告 + 建议）。核验对象来自服务端，不是文件系统 scanner。
+# 需 claude + 运行中的 memory 服务；缺任一则 SKIP。
+skill: memory:validate
+setup:
+  fixture: kb
+  requires: [cmd:claude, cmd:curl]
+trigger:
+  prompt: |
+    请用 /memory:validate 对当前租户（uther）的 memory cards 做一次默认模式
+    健康检查（L1 结构 + L2 命令核验）。核验完后把裁决统计表（verified /
+    contradicted / unverifiable / stale / incomplete 各自数量）写入
+    ./validate-report.txt，并说明你是否修改了任何 card。
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
+expect:
+  process:
+    - skill_loaded: memory:validate
+  filesystem:
+    - created: "validate-report.txt"
+    - unchanged_outside: true
+  semantic:
+    rubric: ../../../../tests/judge/case-rubrics/memory-validate-health.md
+    inputs:
+      - "{case_trace}"
+      - "{created:validate-report.txt}"
