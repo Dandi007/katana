@@ -15,7 +15,13 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
+from katana_kb_mcp_shared.kernel import (
+    Catalog, GovernedVFS, KernelError, TransactionEngine,
+)
+from katana_kb_mcp_shared.kernel.policy import AppComposition
+
 from katana_memory_mcp import gitops, index as index_mod, store
+from katana_memory_mcp.policy import ID_PREFIX, MemoryPolicy
 
 
 def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP:
@@ -35,6 +41,24 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
         msg = f"chore(memory): [{tenant}] {action} {result['id']} ({result['name']})"
         result["git"] = gitops.commit(repo_root, msg, result.pop("changed_paths"))
         return result
+
+    # Governed Full VFS composition root (design §4.2/§5.2): fs_* shares the same
+    # policy → transaction pipeline as the 7 domain tools; no raw bypass (INV-10).
+    _composition = AppComposition(MemoryPolicy())
+    _engine = TransactionEngine(repo_root, domain="memory",
+                                policy_version=_composition.policy.policy_version)
+    _catalog = Catalog(repo_root, id_prefix=ID_PREFIX)
+    _vfs = GovernedVFS(_engine, _catalog, _composition.policy)
+
+    def _scoped(path: str) -> str:
+        return path if path == tenant or path.startswith(f"{tenant}/") \
+            else f"{tenant}/{path}"
+
+    def _guard(fn, *a, **k):
+        try:
+            return fn(*a, **k)
+        except KernelError as e:
+            raise ValueError(e.to_envelope()) from e
 
     @m.tool()
     async def memory_index() -> dict:
@@ -127,7 +151,41 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
         return _commit("edit", store.edit_card(
             tenant_dir, id, old_string, new_string, replace_all=replace_all))
 
+    # ── Governed Full VFS façade (fs_*) ──────────────────────────────────────
+    @m.tool()
+    async def fs_read(virtual_path: str, offset: int | None = None,
+                      limit: int | None = None) -> dict:
+        """治理 VFS 读（canonical tree，cat -n）；path 相对 tenant 根。"""
+        return _guard(_vfs.fs_read, virtual_path=_scoped(virtual_path),
+                      offset=offset, limit=limit)
+
+    @m.tool()
+    async def fs_list(virtual_path: str = "") -> list[dict]:
+        """列出 tenant 子树节点（reserved namespace 隐藏）。"""
+        return _guard(_vfs.fs_list,
+                      _scoped(virtual_path) if virtual_path else tenant)
+
+    @m.tool()
+    async def fs_stat(virtual_path: str) -> dict:
+        """节点统一 descriptor（id/path/hash/revision/snapshot commit）。"""
+        return _guard(_vfs.fs_stat, virtual_path=_scoped(virtual_path))
+
+    @m.tool()
+    async def fs_create(virtual_path: str, content: str) -> dict:
+        """治理写：创建对象（铸 id + policy 校验 + 单 repo 事务提交）。"""
+        return _guard(_vfs.fs_create, virtual_path=_scoped(virtual_path),
+                      content=content)
+
+    @m.tool()
+    async def fs_edit(virtual_path: str, old_string: str, new_string: str,
+                      replace_all: bool = False) -> dict:
+        """治理写：精确子串替换（与 memory_edit 同一 policy → transaction 管线）。"""
+        return _guard(_vfs.fs_edit, virtual_path=_scoped(virtual_path),
+                      old_string=old_string, new_string=new_string,
+                      replace_all=replace_all)
+
     return m
+
 
 
 def _tenants(data_root: str) -> list[str]:
