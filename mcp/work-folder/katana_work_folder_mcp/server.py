@@ -13,8 +13,13 @@ import os
 from fastmcp import FastMCP
 
 from katana_kb_mcp_shared import config, vault_search
+from katana_kb_mcp_shared.kernel import (
+    Catalog, GovernedVFS, KernelError, TransactionEngine,
+)
+from katana_kb_mcp_shared.kernel.policy import AppComposition
 from katana_work_folder_mcp import lifecycle as _lifecycle
 from katana_work_folder_mcp import reindex as _reindex
+from katana_work_folder_mcp.policy import ID_PREFIX, WorkFolderPolicy
 
 mcp = FastMCP(
     "katana-work-folder-mcp",
@@ -26,6 +31,7 @@ mcp = FastMCP(
 
 _scope: str | None = None
 _wf_root: str | None = None
+_vfs: GovernedVFS | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -69,9 +75,29 @@ def compute_scope(work_folder_path: str, kb_root: str) -> str | None:
 
 
 def configure(work_folder_path: str, kb_root: str) -> None:
-    global _scope, _wf_root
+    global _scope, _wf_root, _vfs
     _scope = compute_scope(work_folder_path, kb_root)
     _wf_root = work_folder_path
+    # Governed Full VFS composition root (design §4.2/§5.2): fs_* shares the same
+    # policy → transaction pipeline as the domain tools; no raw bypass (INV-10).
+    composition = AppComposition(WorkFolderPolicy())
+    engine = TransactionEngine(work_folder_path, domain="work-folder",
+                               policy_version=composition.policy.policy_version)
+    catalog = Catalog(work_folder_path, id_prefix=ID_PREFIX)
+    _vfs = GovernedVFS(engine, catalog, composition.policy)
+
+
+def _require_vfs() -> GovernedVFS:
+    if _vfs is None:
+        raise ValueError("work-folder VFS not configured; call configure() first")
+    return _vfs
+
+
+def _guard(fn, *a, **k):
+    try:
+        return fn(*a, **k)
+    except KernelError as e:
+        raise ValueError(e.to_envelope()) from e
 
 
 def _do_search(query: str, top_k: int, scope: str | None) -> list[dict]:
@@ -185,6 +211,45 @@ async def wf_reindex(dry_run: bool = False) -> dict:
         dry_run: True 时不写文件，返回 preview 字段含将生成的 INDEX 内容。
     """
     return _reindex.reindex(_wf_root or ".", dry_run=dry_run)
+
+
+
+# ── Governed Full VFS façade (fs_*) — design §5.2 ────────────────────────────
+
+@mcp.tool()
+async def fs_read(virtual_path: str, offset: int | None = None,
+                  limit: int | None = None) -> dict:
+    """治理 VFS 读（canonical tree，cat -n），path 相对 work_folder_root。"""
+    return _guard(_require_vfs().fs_read, virtual_path=virtual_path,
+                  offset=offset, limit=limit)
+
+
+@mcp.tool()
+async def fs_list(virtual_path: str = "") -> list[dict]:
+    """列出 work-folder 子树节点（reserved namespace 隐藏）。"""
+    return _guard(_require_vfs().fs_list, virtual_path)
+
+
+@mcp.tool()
+async def fs_stat(virtual_path: str) -> dict:
+    """节点统一 descriptor（id/path/hash/revision/snapshot commit）。"""
+    return _guard(_require_vfs().fs_stat, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_create(virtual_path: str, content: str) -> dict:
+    """治理写：创建对象（铸 id + _brief schema 校验 + 单 repo 事务提交）。"""
+    return _guard(_require_vfs().fs_create, virtual_path=virtual_path,
+                  content=content)
+
+
+@mcp.tool()
+async def fs_edit(virtual_path: str, old_string: str, new_string: str,
+                  replace_all: bool = False) -> dict:
+    """治理写：精确子串替换（与 domain tools 同一 policy → transaction 管线）。"""
+    return _guard(_require_vfs().fs_edit, virtual_path=virtual_path,
+                  old_string=old_string, new_string=new_string,
+                  replace_all=replace_all)
 
 
 def main() -> None:
