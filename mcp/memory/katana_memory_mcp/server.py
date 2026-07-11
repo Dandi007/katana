@@ -212,25 +212,32 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
         return _guard(_vfs.fs_stat, virtual_path=_scoped(virtual_path))
 
     @m.tool()
-    async def fs_create(virtual_path: str, content: str) -> dict:
-        """治理写：创建对象（铸 id + policy 校验 + 单 repo 事务提交）。"""
+    async def fs_create(virtual_path: str, content: str,
+                        mutation_id: str | None = None) -> dict:
+        """治理写：创建对象（铸 id + policy 校验 + 单 repo 事务提交）。
+
+        mutation_id 为幂等键：同 id 同 payload 重放返回原 receipt，同 id 不同
+        payload 返回 IDEMPOTENCY_CONFLICT（design §6.3）。"""
         return _guard(_vfs.fs_create, virtual_path=_scoped(virtual_path),
-                      content=content)
+                      content=content, mutation_id=mutation_id)
 
     @m.tool()
     async def fs_edit(virtual_path: str, old_string: str, new_string: str,
-                      replace_all: bool = False) -> dict:
+                      replace_all: bool = False,
+                      mutation_id: str | None = None) -> dict:
         """治理写：精确子串替换（与 memory_edit 同一 policy → transaction 管线）。"""
         return _guard(_vfs.fs_edit, virtual_path=_scoped(virtual_path),
                       old_string=old_string, new_string=new_string,
-                      replace_all=replace_all)
+                      replace_all=replace_all, mutation_id=mutation_id)
 
     @m.tool()
     async def fs_write(virtual_path: str, content: str,
-                       expected_base_commit: str | None = None) -> dict:
+                       expected_base_commit: str | None = None,
+                       mutation_id: str | None = None) -> dict:
         """治理写：整文件覆盖（不隐式创建，带 CAS；同一 policy→transaction 管线）。"""
         return _guard(_vfs.fs_write, virtual_path=_scoped(virtual_path),
-                      content=content, expected_base_commit=expected_base_commit)
+                      content=content, expected_base_commit=expected_base_commit,
+                      mutation_id=mutation_id)
 
     @m.tool()
     async def fs_mkdir(virtual_path: str) -> dict:
@@ -256,10 +263,12 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
 
     @m.tool()
     async def fs_batch(changes: list[dict],
-                       expected_base_commit: str | None = None) -> dict:
+                       expected_base_commit: str | None = None,
+                       mutation_id: str | None = None) -> dict:
         """治理写：单 repo all-or-nothing 批量事务（design §5.2 fs_batch）。"""
         return _guard(_vfs.fs_batch, changes,
-                      expected_base_commit=expected_base_commit)
+                      expected_base_commit=expected_base_commit,
+                      mutation_id=mutation_id)
 
     @m.tool()
     async def fs_resolve(virtual_path: str) -> dict:

@@ -108,6 +108,40 @@ class GovernedVFS:
         self.catalog.load_canonical(blob)
 
     # ── helpers ───────────────────────────────────────────────────────
+    def _replay(self, mutation_id: str | None, request_hash: str | None):
+        """Return the original result for a replayed create, or None.
+
+        Delegates idempotency detection to the engine (same id + same hash →
+        original receipt; same id + different hash → IDEMPOTENCY_CONFLICT) and
+        reshapes the stored receipt into the fs_create result envelope so a
+        lost-response retry returns the same commit without a second effect.
+        """
+        if not mutation_id:
+            return None
+        receipt = self.engine.check_idempotent(mutation_id, request_hash)
+        if receipt is None:
+            return None
+        changes = receipt.get("changes") or [{}]
+        first = changes[0] if changes else {}
+        return {
+            "resource_id": first.get("resource_id"),
+            "virtual_path": first.get("after_path"),
+            "commit_sha": receipt.get("commit_sha"),
+            "no_change": False,
+        }
+
+    def _auto_hash(self, op: str, rel: str, content: bytes) -> str:
+        """Deterministic request hash for idempotency when the client omits one.
+
+        A replayed request with the same op/path/payload maps to the same hash,
+        so a lost-response retry returns the original committed receipt; a
+        same-mutation_id request with a different payload trips
+        IDEMPOTENCY_CONFLICT (design §6.2/§6.3, operator P1 #7).
+        """
+        return vfs.identity.request_hash(
+            f"{self.engine.domain}\x00{op}\x00{rel}\x00"
+            f"{vfs.identity.content_hash(content)}")
+
     def _canonical_or_mint(self, rel: str, content: bytes) -> str:
         """Adopt the domain-canonical id for content, else mint a fresh one.
 
@@ -360,15 +394,25 @@ class GovernedVFS:
 
     # ── create / write / edit / mkdir ─────────────────────────────────
     def fs_create(self, *, virtual_path: str, content: str,
-                  mutation_id: str | None = None) -> dict:
+                  mutation_id: str | None = None,
+                  request_hash: str | None = None) -> dict:
         self._refresh_catalog()
         rel = paths.confine(virtual_path)
+        raw0 = content.encode("utf-8")
+        rh = request_hash or self._auto_hash("create", rel, raw0)
+        # Idempotent replay short-circuits BEFORE stateful pre-checks (design
+        # §6.3): a lost-response retry must not fail on "path exists" now that
+        # the original create already committed the file.
+        replay = self._replay(mutation_id, rh)
+        if replay is not None:
+            return replay
         if self._exists(rel):
             raise KernelError(POLICY_VIOLATION, f"path exists: {rel}",
                               virtual_path=rel)
-        raw = content.encode("utf-8")
+        raw = raw0
         rid = self._canonical_or_mint(rel, raw)
-        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id)
+        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
+                              request_hash=rh)
         batch.add(Change(op=Op.CREATE, resource_id=rid, after_path=rel,
                          after_content=raw, after_hash=vfs.identity.content_hash(raw)))
         res = self._commit(batch, f"feat({self.engine.domain}): fs_create {rel} ({rid})")
@@ -377,7 +421,8 @@ class GovernedVFS:
     def fs_write(self, *, resource_id: str | None = None,
                  virtual_path: str | None = None, content: str,
                  expected_base_commit: str | None = None,
-                 mutation_id: str | None = None) -> dict:
+                 mutation_id: str | None = None,
+                 request_hash: str | None = None) -> dict:
         self._refresh_catalog()
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
@@ -388,6 +433,8 @@ class GovernedVFS:
         before = self._read_bytes(rel)
         raw = content.encode("utf-8")
         batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
+                              request_hash=request_hash or self._auto_hash(
+                                  "write", rel, raw),
                               expected_base_commit=expected_base_commit)
         batch.add(Change(op=Op.WRITE, resource_id=rid or "", after_path=rel,
                          after_content=raw, before_content=before))
@@ -397,7 +444,8 @@ class GovernedVFS:
     def fs_edit(self, *, resource_id: str | None = None,
                 virtual_path: str | None = None, old_string: str,
                 new_string: str, replace_all: bool = False,
-                mutation_id: str | None = None) -> dict:
+                mutation_id: str | None = None,
+                request_hash: str | None = None) -> dict:
         self._refresh_catalog()
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
@@ -420,7 +468,9 @@ class GovernedVFS:
                               "pass replace_all", virtual_path=rel)
         new_text = (text.replace(old_string, new_string) if replace_all
                     else text.replace(old_string, new_string, 1))
-        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id)
+        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
+                              request_hash=request_hash or self._auto_hash(
+                                  "edit", rel, new_text.encode("utf-8")))
         batch.add(Change(op=Op.EDIT, resource_id=rid or "", after_path=rel,
                          after_content=new_text.encode("utf-8"),
                          before_content=raw))
@@ -496,9 +546,15 @@ class GovernedVFS:
     # ── batch ─────────────────────────────────────────────────────────
     def fs_batch(self, changes: list[dict], *,
                  expected_base_commit: str | None = None,
-                 mutation_id: str | None = None) -> dict:
+                 mutation_id: str | None = None,
+                 request_hash: str | None = None) -> dict:
         self._refresh_catalog()
+        import json as _json
+        auto = self._auto_hash("batch", "",
+                               _json.dumps(changes, sort_keys=True,
+                                           ensure_ascii=False).encode("utf-8"))
         batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
+                              request_hash=request_hash or auto,
                               expected_base_commit=expected_base_commit)
         for spec in changes:
             op = Op(spec["op"])
