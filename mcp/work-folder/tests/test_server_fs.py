@@ -74,3 +74,33 @@ def test_fs_create_document_passes(wf_repo):
 def test_fs_traversal_rejected(wf_repo):
     with pytest.raises(Exception):
         _call("fs_read", {"virtual_path": "../../etc/passwd"})
+
+
+def test_fs_write_brief_id_immutable_via_real_tool(wf_repo):
+    """Governed fs_write cannot change a brief's aggregate id (design §5.6)."""
+    brief = _brief.render_brief(
+        id="wf-aaaaaa", title="t", status="active",
+        created="2026-07-11", updated="2026-07-11", goal="g", summary="s")
+    _call("fs_create", {"virtual_path": "2026/07/11/y/_brief.md",
+                        "content": brief})
+    tampered = _brief.render_brief(
+        id="wf-bbbbbb", title="t", status="active",
+        created="2026-07-11", updated="2026-07-12", goal="g", summary="s")
+    with pytest.raises(Exception) as ei:
+        _call("fs_write", {"virtual_path": "2026/07/11/y/_brief.md",
+                           "content": tampered})
+    assert "brief id changed" in str(ei.value)
+
+
+def test_fs_golden_order_append_only_via_real_tool(wf_repo):
+    """Governed edits to golden-order.md may only extend it (design §5.6)."""
+    _call("fs_create", {"virtual_path": "2026/07/11/z/golden-order.md",
+                        "content": "- 用户拍板 A\n"})
+    # Appending is allowed.
+    _call("fs_write", {"virtual_path": "2026/07/11/z/golden-order.md",
+                       "content": "- 用户拍板 A\n- 用户拍板 B\n"})
+    # Rewriting existing content is rejected.
+    with pytest.raises(Exception) as ei:
+        _call("fs_write", {"virtual_path": "2026/07/11/z/golden-order.md",
+                           "content": "- 完全改写\n"})
+    assert "golden-order not append-only" in str(ei.value)
