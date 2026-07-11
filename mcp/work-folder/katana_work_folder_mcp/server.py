@@ -100,6 +100,38 @@ def _guard(fn, *a, **k):
         raise ValueError(e.to_envelope()) from e
 
 
+def _govern(message: str, folder: str | None, names, extra_abs=None):
+    """Publish already-written WF artifacts through the governed pipeline.
+
+    The lifecycle helpers (do_create/do_save/do_resume) and reindex do the
+    domain-specific projection into the working tree; this compiles the touched
+    files into ONE MutationBatch and publishes through the SAME WorkFolderPolicy
+    + TransactionEngine as fs_* (design §4.4, INV-5). There is no separate WF
+    write/commit chain. Only real files under the configured repo root are
+    published, so routing unit tests (which fake the lifecycle) are unaffected.
+    """
+    if _vfs is None:
+        return None
+    root = os.path.abspath(_vfs.repo_root)
+    abs_paths = list(extra_abs or [])
+    if folder:
+        for n in (names or []):
+            abs_paths.append(os.path.join(folder, n))
+    rels = []
+    for ap in abs_paths:
+        ap = os.path.abspath(ap)
+        if ap != root and not ap.startswith(root + os.sep):
+            continue
+        if not os.path.isfile(ap):
+            continue
+        rel = os.path.relpath(ap, root).replace(os.sep, "/")
+        if rel not in rels:
+            rels.append(rel)
+    if not rels:
+        return None
+    return _guard(_vfs.commit_materialized, message=message, writes=rels)
+
+
 def _do_search(query: str, top_k: int, scope: str | None) -> list[dict]:
     resp = vault_search.search(query, top_k=top_k, dir=scope)
     return [
@@ -136,7 +168,10 @@ async def wf_create(topic: str) -> dict:
     Args:
         topic: 工作主题，用于生成 slug 和初始 goal 说明。
     """
-    return _lifecycle.do_create(_wf_root or ".", topic, now_fn=_now)
+    result = _lifecycle.do_create(_wf_root or ".", topic, now_fn=_now)
+    _govern(f"feat(work-folder): create {result.get('path','')}",
+            result.get("path"), result.get("seeded"))
+    return result
 
 
 @mcp.tool()
@@ -175,7 +210,7 @@ async def wf_save(
         golden_order_additions: 追加到 golden-order.md 的文字块（仅追加，不覆盖）。
         findings_addition:      追加到 findings.md 的文字块（仅追加，不覆盖）。
     """
-    return _lifecycle.do_save(
+    result = _lifecycle.do_save(
         _resolve_folder(folder),
         now_fn=_now,
         summary=summary,
@@ -184,6 +219,9 @@ async def wf_save(
         golden_order_additions=golden_order_additions,
         findings_addition=findings_addition,
     )
+    _govern(f"chore(work-folder): save {result.get('folder','')}",
+            result.get("folder"), result.get("written"))
+    return result
 
 
 @mcp.tool()
@@ -197,7 +235,11 @@ async def wf_resume(folder: str) -> dict:
     Args:
         folder: work-folder 路径（绝对或相对 work_folder_root）。
     """
-    return _lifecycle.do_resume(_resolve_folder(folder), now_fn=_now)
+    result = _lifecycle.do_resume(_resolve_folder(folder), now_fn=_now)
+    if result.get("ok"):
+        _govern(f"chore(work-folder): resume {result.get('folder','')}",
+                result.get("folder"), ["progress.md", "_brief.md"])
+    return result
 
 
 @mcp.tool()
@@ -210,7 +252,11 @@ async def wf_reindex(dry_run: bool = False) -> dict:
     Args:
         dry_run: True 时不写文件，返回 preview 字段含将生成的 INDEX 内容。
     """
-    return _reindex.reindex(_wf_root or ".", dry_run=dry_run)
+    result = _reindex.reindex(_wf_root or ".", dry_run=dry_run)
+    if not dry_run and result.get("index_path"):
+        _govern("chore(work-folder): reindex INDEX.md", None, None,
+                extra_abs=[result["index_path"]])
+    return result
 
 
 
@@ -250,6 +296,78 @@ async def fs_edit(virtual_path: str, old_string: str, new_string: str,
     return _guard(_require_vfs().fs_edit, virtual_path=virtual_path,
                   old_string=old_string, new_string=new_string,
                   replace_all=replace_all)
+
+
+@mcp.tool()
+async def fs_write(virtual_path: str, content: str,
+                   expected_base_commit: str | None = None) -> dict:
+    """治理写：整文件覆盖（不隐式创建，带 CAS）。"""
+    return _guard(_require_vfs().fs_write, virtual_path=virtual_path,
+                  content=content, expected_base_commit=expected_base_commit)
+
+
+@mcp.tool()
+async def fs_mkdir(virtual_path: str) -> dict:
+    """治理写：创建目录（.gitkeep 落盘）。"""
+    return _guard(_require_vfs().fs_mkdir, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_copy(virtual_path: str, new_path: str) -> dict:
+    """治理写：复制对象（铸新 id）。"""
+    return _guard(_require_vfs().fs_copy, virtual_path=virtual_path,
+                  new_path=new_path)
+
+
+@mcp.tool()
+async def fs_rename(virtual_path: str, new_path: str) -> dict:
+    """治理写：重命名/移动（保 id；catalog 同批更新）。"""
+    return _guard(_require_vfs().fs_rename, virtual_path=virtual_path,
+                  new_path=new_path)
+
+
+@mcp.tool()
+async def fs_delete(virtual_path: str) -> dict:
+    """治理写：删除（留 tombstone，id 不复用）。"""
+    return _guard(_require_vfs().fs_delete, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_batch(changes: list[dict],
+                   expected_base_commit: str | None = None) -> dict:
+    """治理写：单 repo all-or-nothing 批量事务（design §5.2 fs_batch）。"""
+    return _guard(_require_vfs().fs_batch, changes,
+                  expected_base_commit=expected_base_commit)
+
+
+@mcp.tool()
+async def fs_resolve(virtual_path: str) -> dict:
+    """path → resource_id/exists 解析（不落盘）。"""
+    return _guard(_require_vfs().fs_resolve, virtual_path)
+
+
+@mcp.tool()
+async def fs_glob(pattern: str) -> list[str]:
+    """glob 枚举（reserved namespace 隐藏）。"""
+    return _guard(_require_vfs().fs_glob, pattern)
+
+
+@mcp.tool()
+async def fs_changes(since: str | None = None) -> dict:
+    """自某 snapshot commit 起的已提交变更。"""
+    return _guard(_require_vfs().fs_changes, since=since)
+
+
+@mcp.tool()
+async def fs_capabilities() -> dict:
+    """协议版本 + 支持的 operations + 特性发现（design §5.1）。"""
+    return _guard(_require_vfs().fs_capabilities)
+
+
+@mcp.tool()
+async def fs_status() -> dict:
+    """异步 push/projection freshness + checkpoint（design §6.5-6.8）。"""
+    return _guard(_require_vfs().fs_status)
 
 
 def main() -> None:

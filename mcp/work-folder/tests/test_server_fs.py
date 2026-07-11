@@ -42,9 +42,9 @@ def test_six_domain_tools_plus_fs_facade(wf_repo):
     names = _tool_names()
     domain = {"wf_search", "wf_create", "wf_list", "wf_save", "wf_resume",
               "wf_reindex"}
-    fs = {"fs_read", "fs_list", "fs_stat", "fs_create", "fs_edit"}
+    from katana_kb_mcp_shared.kernel.facade import FS_FACADE
     assert domain <= names, f"missing: {domain - names}"
-    assert fs <= names, f"missing: {fs - names}"
+    assert FS_FACADE <= names, f"missing fs_*: {FS_FACADE - names}"
 
 
 def test_fs_create_brief_and_read(wf_repo):
