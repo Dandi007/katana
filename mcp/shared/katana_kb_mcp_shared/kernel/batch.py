@@ -66,9 +66,21 @@ class MutationBatch:
     scopes: list[str] = field(default_factory=lambda: ["mutate"])
     warnings: list[str] = field(default_factory=list)
     projection_events: list[dict] = field(default_factory=list)
+    # Server-managed canonical files (identity/link catalogs) committed
+    # ATOMICALLY with content in the same transaction (design 6.1/6.2, INV-6).
+    # Maps a reserved-namespace path -> bytes (or None to delete). Never policy-
+    # validated as domain content and never listed in manifest changes[].
+    reserved: dict = field(default_factory=dict)
+    # True when a domain tool already projected the post-state into the working
+    # tree; the engine then validates+publishes rather than re-projecting.
+    already_materialized: bool = False
 
     def add(self, change: Change) -> "MutationBatch":
         self.changes.append(change)
+        return self
+
+    def add_reserved(self, path: str, content: bytes | None) -> "MutationBatch":
+        self.reserved[path] = content
         return self
 
     @property
@@ -81,4 +93,7 @@ class MutationBatch:
             for p in (c.before_path, c.after_path):
                 if p and p not in paths:
                     paths.append(p)
+        for p in self.reserved:
+            if p not in paths:
+                paths.append(p)
         return paths

@@ -13,11 +13,12 @@ depends only on the ``DomainPolicy`` protocol in :mod:`.policy`.
 from . import errors, identity, manifest, paths, vfs
 from .batch import Change, MutationBatch, Op
 from .catalog import Catalog
-from .facade import GovernedVFS
+from .facade import FS_FACADE, GovernedVFS
 from .errors import KernelError
 from .gitrepo import GitRepo
 from .manifest import Manifest, build_receipt
 from .policy import AppComposition, DomainPolicy
+from .projection import ProjectionTracker
 from .transaction import TransactionEngine, TransactionResult
 from .vfs import NodeDescriptor, describe, render_lines
 
@@ -26,7 +27,7 @@ __all__ = [
     "KernelError", "Change", "MutationBatch", "Op",
     "GitRepo", "Manifest", "build_receipt",
     "AppComposition", "DomainPolicy",
-    "Catalog", "GovernedVFS",
+    "Catalog", "GovernedVFS", "FS_FACADE", "ProjectionTracker",
     "TransactionEngine", "TransactionResult",
     "NodeDescriptor", "describe", "render_lines",
 ]
