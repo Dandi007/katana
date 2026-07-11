@@ -1,5 +1,4 @@
-"""Wiki domain policy tests (design §5.6): schema hard-gate + raw exemption +
-no-regression on non-typed content."""
+"""Wiki domain policy tests (design §5.6): schema hard-gate + raw immutability."""
 import pytest
 
 from katana_kb_mcp_shared.kernel.batch import Change, MutationBatch, Op
@@ -32,15 +31,16 @@ def test_typed_page_missing_outlink_rejected():
     assert ei.value.violations
 
 
-def test_raw_zone_is_exempt():
-    # Raw immutable source: not schema-checked even if it lacks wiki schema.
-    WikiPolicy().validate(_batch("plain raw text\n", path="raw/report.md"))
-    WikiPolicy().validate(_batch("plain\n", path="转换文档/x.md"))
+def test_raw_zone_is_immutable():
+    with pytest.raises(KernelError) as ei:
+        WikiPolicy().validate(_batch("plain raw text\n", path="raw/report.md"))
+    assert ei.value.code == INVALID_CONTENT
 
 
-def test_non_typed_markdown_is_no_regression():
-    # A markdown file that doesn't declare 类型 is not hard-gated (no-regression).
-    WikiPolicy().validate(_batch("no frontmatter, just prose\n"))
+def test_non_typed_markdown_is_rejected_on_create():
+    with pytest.raises(KernelError) as ei:
+        WikiPolicy().validate(_batch("no frontmatter, just prose\n"))
+    assert ei.value.code == INVALID_CONTENT
 
 
 def test_delete_skips_validation():

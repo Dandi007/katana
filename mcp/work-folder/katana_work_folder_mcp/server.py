@@ -17,6 +17,7 @@ from katana_kb_mcp_shared.kernel import (
     Catalog, GovernedVFS, KernelError, TransactionEngine,
 )
 from katana_kb_mcp_shared.kernel.policy import AppComposition
+from katana_kb_mcp_shared.kernel import paths as paths_mod
 from katana_work_folder_mcp import lifecycle as _lifecycle
 from katana_work_folder_mcp import reindex as _reindex
 from katana_work_folder_mcp.policy import ID_PREFIX, WorkFolderPolicy
@@ -85,6 +86,13 @@ def configure(work_folder_path: str, kb_root: str) -> None:
                                policy_version=composition.policy.policy_version)
     catalog = Catalog(work_folder_path, id_prefix=ID_PREFIX)
     _vfs = GovernedVFS(engine, catalog, composition.policy)
+    if os.path.isdir(work_folder_path):
+        engine.reconcile()
+        remote = os.environ.get("KATANA_WORK_FOLDER_REMOTE")
+        try:
+            engine.drain_remote_once(remote)
+        except KernelError:
+            pass
 
 
 def _require_vfs() -> GovernedVFS:
@@ -101,18 +109,23 @@ def _guard(fn, *a, **k):
 
 
 def _rel_to_root_of(root: str, path: str) -> str:
-    """Path relative to a given root (accepts absolute or relative)."""
+    """Confined path relative to a given root (accepts absolute or relative)."""
+    root_abs = os.path.abspath(root)
     if os.path.isabs(path):
-        return os.path.relpath(path, os.path.abspath(root)).replace(os.sep, "/")
-    return path.replace(os.sep, "/")
+        real = os.path.realpath(path)
+        root_real = os.path.realpath(root_abs)
+        if real != root_real and not real.startswith(root_real + os.sep):
+            raise KernelError("INVALID_PATH", "path escapes work-folder root",
+                              virtual_path=path)
+        rel = os.path.relpath(real, root_real).replace(os.sep, "/")
+    else:
+        rel = path.replace(os.sep, "/")
+    return paths_mod.confine(rel)
 
 
 def _rel_to_root(path: str) -> str:
-    """Path relative to the configured wf root (accepts absolute or relative)."""
-    root = os.path.abspath(_wf_root or ".")
-    if os.path.isabs(path):
-        return os.path.relpath(path, root).replace(os.sep, "/")
-    return path.replace(os.sep, "/")
+    """Confined path relative to the configured wf root."""
+    return _rel_to_root_of(os.path.abspath(_wf_root or "."), path)
 
 
 def _govern_staged(stg, message: str, staged_abs, extra_rel=None):
@@ -129,14 +142,17 @@ def _govern_staged(stg, message: str, staged_abs, extra_rel=None):
     if _vfs is None:
         return None
     root = os.path.abspath(stg.root)
-    rels = list(extra_rel or [])
+    rels = [paths_mod.confine(r) for r in (extra_rel or [])]
     for ap in (staged_abs or []):
         ap = os.path.abspath(ap)
-        if ap != root and not ap.startswith(root + os.sep):
+        real_ap = os.path.realpath(ap)
+        real_root = os.path.realpath(root)
+        if real_ap != real_root and not real_ap.startswith(real_root + os.sep):
+            raise KernelError("INVALID_PATH", "staged path escapes root",
+                              virtual_path=ap)
+        if not os.path.isfile(ap) or os.path.islink(ap):
             continue
-        if not os.path.isfile(ap):
-            continue
-        rel = os.path.relpath(ap, root).replace(os.sep, "/")
+        rel = paths_mod.confine(os.path.relpath(ap, root).replace(os.sep, "/"))
         if rel not in rels:
             rels.append(rel)
     if not rels:

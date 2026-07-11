@@ -16,7 +16,7 @@ import os
 import subprocess
 import tempfile
 
-from .errors import COMMIT_FAILED, KernelError
+from .errors import COMMIT_FAILED, INVALID_PATH, KernelError
 
 _NULL_SHA = "0" * 40
 
@@ -129,21 +129,37 @@ class GitRepo:
             return None
         return proc.stdout
 
-    def object_type_at(self, commit: str, path: str) -> str | None:
-        """Return the Git object type at ``commit:path`` — "blob"/"tree"/None.
-
-        Reads come from an immutable Git snapshot, never the mutable working
-        tree (design §5.2/§6.1). A path is a canonical file iff it is a blob in
-        the pinned tree; symlinks and host paths cannot appear as tracked blobs,
-        so this also fails closed on symlink/host-path escape.
-        """
+    def tree_entry_at(self, commit: str, path: str) -> tuple[str, str] | None:
+        """Return (mode, object_type) for a path in a canonical tree."""
         if not path:
-            return "tree"
-        proc = self._run("cat-file", "-t", f"{commit}:{path}", check=False)
+            return ("040000", "tree")
+        proc = self._run("ls-tree", commit, "--", path, check=False)
         if proc.returncode != 0:
             return None
-        t = proc.stdout.decode("utf-8", "replace").strip()
-        return t or None
+        line = proc.stdout.decode("utf-8", "replace").splitlines()
+        if not line:
+            return None
+        meta = line[0].split("	", 1)[0].split()
+        if len(meta) < 2:
+            return None
+        return meta[0], meta[1]
+
+    def object_type_at(self, commit: str, path: str) -> str | None:
+        """Return "blob"/"tree"/None; reject Git symlinks fail-closed.
+
+        Git stores symlinks as mode ``120000`` blobs. They are unsupported
+        canonical nodes in Katana because exporting/materialising them can make
+        later ordinary file IO follow a host path. Treat them as INVALID_PATH
+        everywhere instead of returning their target string.
+        """
+        ent = self.tree_entry_at(commit, path)
+        if ent is None:
+            return None
+        mode, obj_type = ent
+        if mode == "120000":
+            raise KernelError(INVALID_PATH, f"symlink is unsupported: {path}",
+                              virtual_path=path)
+        return obj_type
 
     def list_tree_at(self, commit: str, path: str = "") -> list[tuple[str, str]]:
         """Direct children of ``commit:path`` as (name, node_type).
@@ -168,6 +184,9 @@ class GitRepo:
             fields = meta.split()
             if len(fields) < 2:
                 continue
+            if fields[0] == "120000":
+                raise KernelError(INVALID_PATH, f"symlink is unsupported: {name}",
+                                  virtual_path=name)
             node_type = "dir" if fields[1] == "tree" else "file"
             out.append((name, node_type))
         return out
@@ -177,8 +196,14 @@ class GitRepo:
         proc = self._run("ls-tree", "-r", "--name-only", commit, check=False)
         if proc.returncode != 0:
             return []
-        return [ln for ln in proc.stdout.decode("utf-8", "replace").splitlines()
-                if ln.strip()]
+        paths = [ln for ln in proc.stdout.decode("utf-8", "replace").splitlines()
+                 if ln.strip()]
+        for rel in paths:
+            ent = self.tree_entry_at(commit, rel)
+            if ent is not None and ent[0] == "120000":
+                raise KernelError(INVALID_PATH, f"symlink is unsupported: {rel}",
+                                  virtual_path=rel)
+        return paths
 
     def export_head_to(self, dest: str) -> None:
         """Populate ``dest`` with a private copy of the HEAD tree.
@@ -192,21 +217,28 @@ class GitRepo:
         os.makedirs(dest, exist_ok=True)
         if not self.has_commits():
             return
-        import tarfile
         import io
+        import tarfile
         proc = self._run("archive", "--format=tar", "HEAD")
         with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tf:
+            members = tf.getmembers()
+            for member in members:
+                if member.issym() or member.islnk():
+                    raise KernelError(INVALID_PATH,
+                                      f"symlink/hardlink unsupported in canonical export: {member.name}",
+                                      virtual_path=member.name)
+                if not (member.isfile() or member.isdir()):
+                    raise KernelError(INVALID_PATH,
+                                      f"unsupported archive member: {member.name}",
+                                      virtual_path=member.name)
             tf.extractall(dest)
 
     def checkout_head(self) -> None:
-        """Force working tree + index to match HEAD (post-crash recovery).
-
-        Recalibrates the working tree to the canonical commit after a crash
-        between ref publish and materialize (design §6.6 "重启后 working
-        tree=HEAD").
-        """
+        """Force working tree + index to match HEAD (post-crash recovery)."""
         if not self.has_commits():
             return
+        # Fail closed before checkout-index can materialize unsupported symlinks.
+        self.list_tree_recursive(self.head())
         self._run("read-tree", "HEAD")
         self._run("checkout-index", "-a", "-f")
 
@@ -286,13 +318,24 @@ class GitRepo:
         through the working tree) see committed content. Never called on the
         failure path.
         """
+        real_root = os.path.realpath(self.root)
+        def _target(path: str) -> str:
+            target = os.path.abspath(os.path.join(self.root, path))
+            parent = os.path.dirname(target) or self.root
+            real_parent = os.path.realpath(parent)
+            if real_parent != real_root and not real_parent.startswith(real_root + os.sep):
+                raise KernelError(INVALID_PATH, f"materialize path escapes repo: {path}",
+                                  virtual_path=path)
+            return target
         for path in deletes:
-            target = os.path.join(self.root, path)
-            if os.path.exists(target):
+            target = _target(path)
+            if os.path.lexists(target):
                 os.remove(target)
         for path, data in writes.items():
-            target = os.path.join(self.root, path)
+            target = _target(path)
             os.makedirs(os.path.dirname(target) or self.root, exist_ok=True)
+            if os.path.islink(target):
+                os.unlink(target)
             with open(target, "wb") as f:
                 f.write(data)
 

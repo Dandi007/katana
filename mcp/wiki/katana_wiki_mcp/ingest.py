@@ -8,6 +8,8 @@ apply() — 校验不变量 → 拒（零落盘）或写页 + 自动反链 + log
 
 from __future__ import annotations
 
+from katana_kb_mcp_shared.kernel import paths as _kb_paths
+
 # ---------------------------------------------------------------------------
 # Knowledge constants — distilled from ingest skill references
 # ---------------------------------------------------------------------------
@@ -146,6 +148,13 @@ def apply(
     # ---- Phase 1: validate ALL pages first (atomic: no partial writes) ----
     rejected: dict[str, list[str]] = {}
     for page in new_pages:
+        try:
+            page["path"] = _kb_paths.confine(page.get("path", ""))
+            for bu in page.get("back_updates", []):
+                bu["path"] = _kb_paths.confine(bu.get("path", ""))
+        except Exception as e:
+            rejected[str(page.get("path", ""))] = [str(e)]
+            continue
         fm = page.get("frontmatter", {})
         body = page.get("body", "")
         errs = validate_fn(fm, body, require_summary=require_summary, require_sources=require_sources)
@@ -161,13 +170,13 @@ def apply(
     backlinked: list[str] = []
 
     for page in new_pages:
-        abs_path = str(Path(wiki_root) / page["path"])
+        abs_path = _kb_paths.confined_join(wiki_root, page["path"])
         write_fn(abs_path, page["frontmatter"], page["body"])
         written.append(page["path"])
 
     for page in new_pages:
         for bu in page.get("back_updates", []):
-            bu_abs = str(Path(wiki_root) / bu["path"])
+            bu_abs = _kb_paths.confined_join(wiki_root, bu["path"])
             backlink_fn(bu_abs, bu["title"])
             if bu["path"] not in backlinked:
                 backlinked.append(bu["path"])

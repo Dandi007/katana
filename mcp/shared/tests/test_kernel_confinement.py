@@ -145,9 +145,9 @@ def test_fs_batch_delete_from_path_confined(vfs, tmp_path):
 def test_fs_read_symlink_does_not_deref_host_file(vfs, tmp_path):
     """A committed symlink is never dereferenced to host content (P0 #1).
 
-    Canonical reads serve the blob at the pinned snapshot. Git stores a symlink
-    as a mode-120000 blob whose bytes are the *target path string*, so fs_read
-    returns the link text, never the dereferenced host-file content.
+    Canonical reads reject Git mode-120000 symlinks fail-closed. Returning the
+    link target string is not enough because staging export/materialize would
+    make later ordinary file IO follow a host path.
     """
     import os
     import subprocess
@@ -161,5 +161,35 @@ def test_fs_read_symlink_does_not_deref_host_file(vfs, tmp_path):
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "symlink"],
                    check=True, capture_output=True)
 
-    rd = vfs.fs_read(virtual_path="escape")
-    assert "TOP SECRET" not in rd.get("content", "")
+    with pytest.raises(KernelError) as ei:
+        vfs.fs_read(virtual_path="escape")
+    assert ei.value.code == "INVALID_PATH"
+
+
+def test_staging_export_rejects_committed_symlink(vfs, tmp_path):
+    import os
+    import subprocess
+
+    vfs.fs_create(virtual_path="a.md", content="x\n")
+    os.symlink(str(tmp_path.parent / "host-secret.txt"), str(tmp_path / "escape"))
+    subprocess.run(["git", "-C", str(tmp_path), "add", "escape"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "symlink"],
+                   check=True, capture_output=True)
+
+    with pytest.raises(KernelError) as ei:
+        with vfs.staging():
+            pass
+    assert ei.value.code == "INVALID_PATH"
+
+
+def test_staging_abspath_rejects_symlink_parent(vfs, tmp_path):
+    import os
+
+    sentinel = tmp_path.parent / "sentinel.txt"
+    sentinel.write_text("keep\n", encoding="utf-8")
+    with vfs.staging() as stg:
+        os.symlink(str(tmp_path.parent), os.path.join(stg.root, "link-parent"))
+        with pytest.raises(KernelError):
+            stg.abspath("link-parent/sentinel.txt")
+    assert sentinel.read_text(encoding="utf-8") == "keep\n"

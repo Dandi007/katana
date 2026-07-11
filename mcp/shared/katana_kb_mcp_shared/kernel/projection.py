@@ -105,10 +105,12 @@ class ProjectionTracker:
 
     # ── async workers (deterministic, testable) ───────────────────────
     def push_once(self, *, fail: bool = False) -> dict:
-        """Attempt to push the oldest pending commit (fast-forward only).
+        """Attempt to drain the oldest pending push entry.
 
         ``fail=True`` models a network failure: the attempt is recorded and the
         entry stays pending for retry (exponential backoff is the caller's job).
+        App composition roots call this worker tick when no real remote is
+        configured, making push/projection service runnable in M1.
         """
         pending = [e for e in self._state.push_queue if not e.pushed]
         if not pending:
@@ -123,6 +125,16 @@ class ProjectionTracker:
         self._save()
         return {"pushed": None if fail else entry.commit_sha,
                 "pending": sum(1 for e in self._state.push_queue if not e.pushed)}
+
+    def record_push_failure(self, error: str) -> dict:
+        """Record a real push worker failure on the oldest pending entry."""
+        pending = [e for e in self._state.push_queue if not e.pushed]
+        if pending:
+            pending[0].attempts += 1
+            pending[0].last_error = error
+        self._save()
+        return {"pending": sum(1 for e in self._state.push_queue if not e.pushed),
+                "last_error": error}
 
     def mark_pushed_through(self, head: str, repo) -> dict:
         """Mark every pending commit that is an ancestor of ``head`` as pushed.
@@ -140,11 +152,12 @@ class ProjectionTracker:
         return {"pending": sum(1 for e in self._state.push_queue if not e.pushed)}
 
     def apply_projection(self, name: str, commit_sha: str, *,
-                         fail: bool = False) -> dict:
-        """Advance one projection checkpoint to ``commit_sha`` (or record error).
+                         fail: bool = False, repo=None) -> dict:
+        """Advance one projection checkpoint in first-parent order.
 
-        A failed generation is discarded (checkpoint unchanged); the worker
-        never claims a higher checkpoint after a failed commit (design §6.8).
+        When ``repo`` is supplied, the requested commit must be the next
+        first-parent event after the current checkpoint (or the first event from
+        genesis). This rejects arbitrary checkpoint jumps.
         """
         if name not in PROJECTIONS:
             raise ValueError(f"unknown projection {name!r}")
@@ -153,6 +166,20 @@ class ProjectionTracker:
             self._save()
             return {"name": name, "checkpoint": self._state.checkpoints.get(name),
                     "applied": False}
+        if repo is not None:
+            ordered = list(reversed(repo.first_parent_commits()))
+            current = self._state.checkpoints.get(name)
+            if current is None:
+                expected = ordered[0] if ordered else None
+            else:
+                try:
+                    expected = ordered[ordered.index(current) + 1]
+                except (ValueError, IndexError):
+                    expected = None
+            if commit_sha != expected:
+                self._state.errors[name] = "projection checkpoint out of order"
+                self._save()
+                raise ValueError("projection checkpoint must advance by next first-parent commit")
         self._state.checkpoints[name] = commit_sha
         self._state.generations[name] = self._state.generations.get(name, 0) + 1
         self._state.errors[name] = None
@@ -182,6 +209,9 @@ class ProjectionTracker:
 
     def status(self, head: str | None) -> dict:
         pend = [e for e in self._state.push_queue if not e.pushed]
+        projections = self.projection_status()
+        unhealthy = any(v.get("last_error") for v in projections.values()) or \
+            any(e.last_error for e in pend)
         return {
             "canonical_head": head,
             "sync_status": self.sync_status(),
@@ -189,6 +219,12 @@ class ProjectionTracker:
                 "pending_commits": len(pend),
                 "oldest_pending_age": self.oldest_pending_age(),
                 "last_error": (pend[0].last_error if pend else None),
+                "attempts": (pend[0].attempts if pend else 0),
             },
-            "projections": self.projection_status(),
+            "projections": projections,
+            "lag": {
+                name: (0 if data.get("indexed_through_commit") == head else 1)
+                for name, data in projections.items()
+            },
+            "health": "degraded" if unhealthy else "ok",
         }

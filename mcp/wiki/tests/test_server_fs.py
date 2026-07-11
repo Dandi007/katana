@@ -63,10 +63,10 @@ def test_fs_create_bad_page_rejected(wiki_repo):
         _call("fs_create", {"virtual_path": "Zettelkasten/bad.md", "content": bad})
 
 
-def test_fs_create_raw_zone_exempt(wiki_repo):
-    r = _call("fs_create", {"virtual_path": "raw/report.md",
+def test_fs_create_raw_zone_rejected(wiki_repo):
+    with pytest.raises(Exception):
+        _call("fs_create", {"virtual_path": "raw/report.md",
                             "content": "plain raw text\n"})
-    assert r["commit_sha"]
 
 
 def test_fs_traversal_rejected(wiki_repo):

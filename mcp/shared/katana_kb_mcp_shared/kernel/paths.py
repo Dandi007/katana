@@ -68,3 +68,25 @@ def confine(path: str) -> str:
     if is_reserved(cleaned):
         raise _reject(path, "reserved namespace")
     return cleaned
+
+
+def confined_join(root: str, path: str) -> str:
+    """Return an absolute path for a confined virtual path under ``root``.
+
+    This is for writer-private staging/domain helper IO. It rejects absolute
+    paths/traversal via :func:`confine` and then verifies the real parent stays
+    under the real staging root so an existing symlink parent cannot redirect a
+    write outside the repo.
+    """
+    import os
+
+    rel = confine(path)
+    real_root = os.path.realpath(root)
+    target = os.path.abspath(os.path.join(root, rel))
+    parent = os.path.dirname(target) or root
+    real_parent = os.path.realpath(parent)
+    if real_parent != real_root and not real_parent.startswith(real_root + os.sep):
+        raise _reject(path, "symlink parent escapes root")
+    if os.path.islink(target):
+        raise _reject(path, "symlink target")
+    return target

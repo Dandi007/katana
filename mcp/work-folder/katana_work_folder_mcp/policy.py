@@ -44,6 +44,18 @@ class WorkFolderPolicy:
 
     def validate(self, batch: MutationBatch) -> None:
         for change in batch.changes:
+            path = change.after_path or change.before_path or ""
+            if change.op is Op.DELETE and (path.endswith(_brief.BRIEF_NAME) or path.endswith("INDEX.md")):
+                raise KernelError(INVALID_CONTENT,
+                                  f"cannot delete work-folder control file {path}",
+                                  virtual_path=path, violations=["control file delete"])
+            if change.op is Op.RENAME and change.before_path and change.before_path.endswith(_brief.BRIEF_NAME):
+                expected = change.before_path.rsplit("/", 1)[0] + "/" + _brief.BRIEF_NAME
+                if change.after_path != expected:
+                    raise KernelError(INVALID_CONTENT,
+                                      f"cannot rename _brief.md away from aggregate root",
+                                      virtual_path=change.before_path,
+                                      violations=["brief rename"])
             if change.op is Op.DELETE or change.after_content is None:
                 continue
             path = change.after_path or ""
@@ -64,6 +76,12 @@ class WorkFolderPolicy:
             raise KernelError(INVALID_CONTENT,
                               f"{path} is not a valid _brief.md",
                               virtual_path=path, violations=problems)
+        after_id = _brief_id(text)
+        if change.resource_id and after_id and change.resource_id != after_id:
+            raise KernelError(INVALID_CONTENT,
+                              f"catalog resource_id {change.resource_id!r} does not match brief id {after_id!r}",
+                              virtual_path=path, resource_id=change.resource_id,
+                              violations=["aggregate identity mismatch"])
         # Stable aggregate identity: id is immutable across updates.
         if change.before_content is not None:
             try:

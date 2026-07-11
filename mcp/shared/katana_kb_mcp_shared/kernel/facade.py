@@ -41,11 +41,11 @@ class _Staging:
         self.base = base
 
     def abspath(self, rel: str) -> str:
-        return os.path.join(self.root, rel)
+        return paths.confined_join(self.root, rel)
 
     def read(self, rel: str) -> bytes | None:
         p = self.abspath(rel)
-        if not os.path.isfile(p):
+        if not os.path.isfile(p) or os.path.islink(p):
             return None
         with open(p, "rb") as f:
             return f.read()
@@ -121,14 +121,34 @@ class GovernedVFS:
         receipt = self.engine.check_idempotent(mutation_id, request_hash)
         if receipt is None:
             return None
+        return self._replay_result(receipt)
+
+    def _replay_result(self, receipt: dict) -> dict:
         changes = receipt.get("changes") or [{}]
         first = changes[0] if changes else {}
         return {
             "resource_id": first.get("resource_id"),
-            "virtual_path": first.get("after_path"),
+            "virtual_path": first.get("after_path") or first.get("before_path"),
             "commit_sha": receipt.get("commit_sha"),
             "no_change": False,
         }
+
+    def _check_expected(self, rel: str, raw: bytes | None, *,
+                        expected_resource_revision: str | None = None,
+                        expected_content_revision: str | None = None) -> None:
+        if expected_resource_revision is None and expected_content_revision is None:
+            return
+        desc = self._descriptor(self.catalog.id_of(rel), rel, raw or b"").to_dict()
+        if expected_resource_revision is not None and \
+                desc["resource_revision"] != expected_resource_revision:
+            raise KernelError(RESOURCE_REPLACED,
+                              "expected_resource_revision does not match",
+                              virtual_path=rel)
+        if expected_content_revision is not None and \
+                desc["content_revision"] != expected_content_revision:
+            raise KernelError(RESOURCE_REPLACED,
+                              "expected_content_revision does not match",
+                              virtual_path=rel)
 
     def _auto_hash(self, op: str, rel: str, content: bytes) -> str:
         """Deterministic request hash for idempotency when the client omits one.
@@ -422,19 +442,27 @@ class GovernedVFS:
                  virtual_path: str | None = None, content: str,
                  expected_base_commit: str | None = None,
                  mutation_id: str | None = None,
-                 request_hash: str | None = None) -> dict:
+                 request_hash: str | None = None,
+                 expected_resource_revision: str | None = None,
+                 expected_content_revision: str | None = None) -> dict:
         self._refresh_catalog()
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
+        raw = content.encode("utf-8")
+        rh = request_hash or self._auto_hash("write", rel, raw)
+        replay = self._replay(mutation_id, rh)
+        if replay is not None:
+            return replay
         if not self._exists(rel):
             raise KernelError(NOT_FOUND,
                               "fs_write does not implicitly create; use fs_create",
                               virtual_path=rel)
         before = self._read_bytes(rel)
-        raw = content.encode("utf-8")
+        self._check_expected(rel, before,
+                             expected_resource_revision=expected_resource_revision,
+                             expected_content_revision=expected_content_revision)
         batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
-                              request_hash=request_hash or self._auto_hash(
-                                  "write", rel, raw),
+                              request_hash=rh,
                               expected_base_commit=expected_base_commit)
         batch.add(Change(op=Op.WRITE, resource_id=rid or "", after_path=rel,
                          after_content=raw, before_content=before))
@@ -445,11 +473,23 @@ class GovernedVFS:
                 virtual_path: str | None = None, old_string: str,
                 new_string: str, replace_all: bool = False,
                 mutation_id: str | None = None,
-                request_hash: str | None = None) -> dict:
+                request_hash: str | None = None,
+                expected_resource_revision: str | None = None,
+                expected_content_revision: str | None = None) -> dict:
         self._refresh_catalog()
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
+        import json as _json
+        rh = request_hash or self._auto_hash(
+            "edit", rel, _json.dumps([old_string, new_string, replace_all],
+                                     ensure_ascii=False).encode("utf-8"))
+        replay = self._replay(mutation_id, rh)
+        if replay is not None:
+            return replay
         raw = self._read_bytes(rel)
+        self._check_expected(rel, raw,
+                             expected_resource_revision=expected_resource_revision,
+                             expected_content_revision=expected_content_revision)
         if raw is None:
             raise KernelError(NOT_FOUND, f"no such file: {rel}", virtual_path=rel)
         text = raw.decode("utf-8")
@@ -469,18 +509,23 @@ class GovernedVFS:
         new_text = (text.replace(old_string, new_string) if replace_all
                     else text.replace(old_string, new_string, 1))
         batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
-                              request_hash=request_hash or self._auto_hash(
-                                  "edit", rel, new_text.encode("utf-8")))
+                              request_hash=rh)
         batch.add(Change(op=Op.EDIT, resource_id=rid or "", after_path=rel,
                          after_content=new_text.encode("utf-8"),
                          before_content=raw))
         res = self._commit(batch, f"chore({self.engine.domain}): fs_edit {rel}")
         return self._result(res, rid, rel)
 
-    def fs_mkdir(self, *, virtual_path: str) -> dict:
+    def fs_mkdir(self, *, virtual_path: str, mutation_id: str | None = None,
+                 request_hash: str | None = None) -> dict:
         self._refresh_catalog()
         rel = paths.confine(virtual_path)
-        batch = MutationBatch(domain=self.engine.domain)
+        rh = request_hash or self._auto_hash("mkdir", rel, b"")
+        replay = self._replay(mutation_id, rh)
+        if replay is not None:
+            return replay
+        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
+                              request_hash=rh)
         batch.add(Change(op=Op.MKDIR, resource_id="", after_path=rel,
                          after_content=b""))
         res = self._commit(batch, f"chore({self.engine.domain}): fs_mkdir {rel}")
@@ -489,18 +534,30 @@ class GovernedVFS:
     # ── structure ─────────────────────────────────────────────────────
     def fs_rename(self, *, resource_id: str | None = None,
                   virtual_path: str | None = None, new_path: str,
-                  mutation_id: str | None = None) -> dict:
+                  mutation_id: str | None = None,
+                  request_hash: str | None = None,
+                  expected_resource_revision: str | None = None,
+                  expected_content_revision: str | None = None) -> dict:
         self._refresh_catalog()
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
         dst = paths.confine(new_path)
+        rh = request_hash or self._auto_hash("rename", rel, dst.encode("utf-8"))
+        replay = self._replay(mutation_id, rh)
+        if replay is not None:
+            return replay
+        before = self._read_bytes(rel)
+        self._check_expected(rel, before,
+                             expected_resource_revision=expected_resource_revision,
+                             expected_content_revision=expected_content_revision)
         if self._exists(dst):
             raise KernelError(POLICY_VIOLATION, f"destination exists: {dst}",
                               virtual_path=dst)
         # Rebind catalog IN the same transaction (INV-6): rename keeps the id.
         if rid:
             self.catalog.rebind(rid, dst)
-        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id)
+        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
+                              request_hash=rh)
         batch.add(Change(op=Op.RENAME, resource_id=rid or "",
                          before_path=rel, after_path=dst))
         res = self._commit(batch, f"chore({self.engine.domain}): fs_rename {rel} -> {dst}")
@@ -508,19 +565,31 @@ class GovernedVFS:
 
     def fs_copy(self, *, resource_id: str | None = None,
                 virtual_path: str | None = None, new_path: str,
-                mutation_id: str | None = None) -> dict:
+                mutation_id: str | None = None,
+                request_hash: str | None = None,
+                expected_resource_revision: str | None = None,
+                expected_content_revision: str | None = None) -> dict:
         self._refresh_catalog()
         rel, _ = self._resolve_target(resource_id=resource_id,
                                       virtual_path=virtual_path)
         dst = paths.confine(new_path)
+        rh = request_hash or self._auto_hash("copy", rel, dst.encode("utf-8"))
+        replay = self._replay(mutation_id, rh)
+        if replay is not None:
+            return replay
         raw = self._read_bytes(rel)
         if raw is None:
             raise KernelError(NOT_FOUND, f"no such file: {rel}", virtual_path=rel)
+        self._check_expected(rel, raw,
+                             expected_resource_revision=expected_resource_revision,
+                             expected_content_revision=expected_content_revision)
         if self._exists(dst):
             raise KernelError(POLICY_VIOLATION, f"destination exists: {dst}",
                               virtual_path=dst)
-        new_rid = self.catalog.mint(dst)  # copy mints a NEW id
-        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id)
+        raw = self._copy_content_for_new_identity(dst, raw)
+        new_rid = self._canonical_or_mint(dst, raw)
+        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
+                              request_hash=rh)
         batch.add(Change(op=Op.COPY, resource_id=new_rid, after_path=dst,
                          after_content=raw))
         res = self._commit(batch, f"chore({self.engine.domain}): fs_copy {rel} -> {dst}")
@@ -528,16 +597,28 @@ class GovernedVFS:
 
     def fs_delete(self, *, resource_id: str | None = None,
                   virtual_path: str | None = None,
-                  mutation_id: str | None = None) -> dict:
+                  mutation_id: str | None = None,
+                  request_hash: str | None = None,
+                  expected_resource_revision: str | None = None,
+                  expected_content_revision: str | None = None) -> dict:
         self._refresh_catalog()
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
+        rh = request_hash or self._auto_hash("delete", rel, b"")
+        replay = self._replay(mutation_id, rh)
+        if replay is not None:
+            return {**replay, "deleted": True}
+        before = self._read_bytes(rel)
+        self._check_expected(rel, before,
+                             expected_resource_revision=expected_resource_revision,
+                             expected_content_revision=expected_content_revision)
         if not self._exists(rel):
             raise KernelError(NOT_FOUND, f"no such file: {rel}", virtual_path=rel)
         # Tombstone IN the same transaction (INV-6): id never reused.
         if rid:
             self.catalog.tombstone(rid)
-        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id)
+        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
+                              request_hash=rh)
         batch.add(Change(op=Op.DELETE, resource_id=rid or "", before_path=rel))
         res = self._commit(batch, f"chore({self.engine.domain}): fs_delete {rel}")
         return {"resource_id": rid, "virtual_path": rel,
@@ -553,8 +634,13 @@ class GovernedVFS:
         auto = self._auto_hash("batch", "",
                                _json.dumps(changes, sort_keys=True,
                                            ensure_ascii=False).encode("utf-8"))
+        rh = request_hash or auto
+        receipt = self.engine.check_idempotent(mutation_id, rh) if mutation_id else None
+        if receipt is not None:
+            return {"commit_sha": receipt.get("commit_sha"), "no_change": False,
+                    "changes": receipt.get("changes") or []}
         batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
-                              request_hash=request_hash or auto,
+                              request_hash=rh,
                               expected_base_commit=expected_base_commit)
         for spec in changes:
             op = Op(spec["op"])
@@ -568,19 +654,42 @@ class GovernedVFS:
             rid = spec.get("resource_id")
             content = spec.get("content")
             raw = content.encode("utf-8") if content is not None else None
+            if op is Op.COPY:
+                src = from_path or (paths.confine(spec["source_path"])
+                                    if spec.get("source_path") else None)
+                if raw is None and src:
+                    raw = self._read_bytes(src)
+                if raw is not None and rel:
+                    raw = self._copy_content_for_new_identity(rel, raw)
             if op in (Op.CREATE, Op.COPY) and rel and not rid:
-                rid = self.catalog.mint(rel)
+                rid = self._canonical_or_mint(rel, raw or b"")
             elif op is Op.RENAME and rid and rel:
                 self.catalog.rebind(rid, rel)
             elif op is Op.DELETE and rid:
                 self.catalog.tombstone(rid)
+            before_path = from_path
+            after_path = rel
+            if op is Op.DELETE and before_path is None:
+                before_path = rel
+                after_path = None
             batch.add(Change(op=op, resource_id=rid or "",
-                             before_path=from_path,
-                             after_path=rel, after_content=raw))
+                             before_path=before_path,
+                             after_path=after_path, after_content=raw))
         res = self._commit(batch, f"chore({self.engine.domain}): fs_batch "
                                   f"{len(changes)} change(s)")
         return {"commit_sha": res.commit_sha, "no_change": res.no_change,
                 "changes": [c.to_manifest_entry() for c in batch.changes]}
+
+
+    def _copy_content_for_new_identity(self, dst: str, raw: bytes) -> bytes:
+        """Let a domain policy rewrite copied content to a fresh canonical id."""
+        hook = getattr(self.policy, "prepare_copy", None)
+        if hook is None:
+            return raw
+        try:
+            return hook(dst, raw)
+        except TypeError:
+            return raw
 
     # ── writer-private staging for domain tools (design §5.5 step 5) ──
     @contextlib.contextmanager
@@ -633,6 +742,10 @@ class GovernedVFS:
             request_hash=request_hash,
             expected_base_commit=expected_base_commit
             if expected_base_commit is not None else base)
+
+        writes = [paths.confine(p) for p in writes]
+        deletes = [paths.confine(p) for p in deletes]
+        renames = [(paths.confine(a), paths.confine(b)) for a, b in renames]
 
         for old_rel, new_rel in renames:
             raw = staging.read(new_rel) or b""

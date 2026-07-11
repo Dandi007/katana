@@ -45,6 +45,12 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
                                 policy_version=_composition.policy.policy_version)
     _catalog = Catalog(repo_root, id_prefix=ID_PREFIX)
     _vfs = GovernedVFS(_engine, _catalog, _composition.policy)
+    _engine.reconcile()
+    remote = os.environ.get("KATANA_MEMORY_REMOTE")
+    try:
+        _engine.drain_remote_once(remote)
+    except KernelError:
+        pass
 
     def _rel(abs_path: str, root: str) -> str:
         return os.path.relpath(abs_path, root).replace(os.sep, "/")
@@ -92,8 +98,39 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
             return result
 
     def _scoped(path: str) -> str:
-        return path if path == tenant or path.startswith(f"{tenant}/") \
-            else f"{tenant}/{path}"
+        from katana_kb_mcp_shared.kernel import paths as _paths
+        rel = _paths.confine(path)
+        if rel == tenant or rel.startswith(f"{tenant}/"):
+            return rel
+        top = rel.split("/", 1)[0]
+        if top != tenant and os.path.isdir(os.path.join(repo_root, top)):
+            raise KernelError("INVALID_PATH", "cross-tenant path is forbidden",
+                              virtual_path=path)
+        return f"{tenant}/{rel}"
+
+    def _unscoped(node: dict) -> dict:
+        if isinstance(node, dict) and isinstance(node.get("virtual_path"), str):
+            pref = f"{tenant}/"
+            if node["virtual_path"] == tenant:
+                node = dict(node); node["virtual_path"] = ""
+            elif node["virtual_path"].startswith(pref):
+                node = dict(node); node["virtual_path"] = node["virtual_path"][len(pref):]
+        return node
+
+    def _tenant_changes(out: dict) -> dict:
+        pref = f"{tenant}/"
+        changes = []
+        for c in out.get("changes", []):
+            paths = [c.get("before_path"), c.get("after_path")]
+            if any(p and (p == tenant or p.startswith(pref)) for p in paths):
+                cc = dict(c)
+                for k in ("before_path", "after_path"):
+                    p = cc.get(k)
+                    if isinstance(p, str) and p.startswith(pref):
+                        cc[k] = p[len(pref):]
+                changes.append(cc)
+        out = dict(out); out["changes"] = changes
+        return out
 
     def _guard(fn, *a, **k):
         try:
@@ -197,19 +234,19 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
     async def fs_read(virtual_path: str, offset: int | None = None,
                       limit: int | None = None) -> dict:
         """治理 VFS 读（canonical tree，cat -n）；path 相对 tenant 根。"""
-        return _guard(_vfs.fs_read, virtual_path=_scoped(virtual_path),
-                      offset=offset, limit=limit)
+        return _unscoped(_guard(_vfs.fs_read, virtual_path=_scoped(virtual_path),
+                      offset=offset, limit=limit))
 
     @m.tool()
     async def fs_list(virtual_path: str = "") -> list[dict]:
         """列出 tenant 子树节点（reserved namespace 隐藏）。"""
-        return _guard(_vfs.fs_list,
-                      _scoped(virtual_path) if virtual_path else tenant)
+        return [_unscoped(n) for n in _guard(_vfs.fs_list,
+                      _scoped(virtual_path) if virtual_path else tenant)]
 
     @m.tool()
     async def fs_stat(virtual_path: str) -> dict:
         """节点统一 descriptor（id/path/hash/revision/snapshot commit）。"""
-        return _guard(_vfs.fs_stat, virtual_path=_scoped(virtual_path))
+        return _unscoped(_guard(_vfs.fs_stat, virtual_path=_scoped(virtual_path)))
 
     @m.tool()
     async def fs_create(virtual_path: str, content: str,
@@ -218,26 +255,26 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
 
         mutation_id 为幂等键：同 id 同 payload 重放返回原 receipt，同 id 不同
         payload 返回 IDEMPOTENCY_CONFLICT（design §6.3）。"""
-        return _guard(_vfs.fs_create, virtual_path=_scoped(virtual_path),
-                      content=content, mutation_id=mutation_id)
+        return _unscoped(_guard(_vfs.fs_create, virtual_path=_scoped(virtual_path),
+                      content=content, mutation_id=mutation_id))
 
     @m.tool()
     async def fs_edit(virtual_path: str, old_string: str, new_string: str,
                       replace_all: bool = False,
                       mutation_id: str | None = None) -> dict:
         """治理写：精确子串替换（与 memory_edit 同一 policy → transaction 管线）。"""
-        return _guard(_vfs.fs_edit, virtual_path=_scoped(virtual_path),
+        return _unscoped(_guard(_vfs.fs_edit, virtual_path=_scoped(virtual_path),
                       old_string=old_string, new_string=new_string,
-                      replace_all=replace_all, mutation_id=mutation_id)
+                      replace_all=replace_all, mutation_id=mutation_id))
 
     @m.tool()
     async def fs_write(virtual_path: str, content: str,
                        expected_base_commit: str | None = None,
                        mutation_id: str | None = None) -> dict:
         """治理写：整文件覆盖（不隐式创建，带 CAS；同一 policy→transaction 管线）。"""
-        return _guard(_vfs.fs_write, virtual_path=_scoped(virtual_path),
+        return _unscoped(_guard(_vfs.fs_write, virtual_path=_scoped(virtual_path),
                       content=content, expected_base_commit=expected_base_commit,
-                      mutation_id=mutation_id)
+                      mutation_id=mutation_id))
 
     @m.tool()
     async def fs_mkdir(virtual_path: str) -> dict:
@@ -247,14 +284,14 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
     @m.tool()
     async def fs_copy(virtual_path: str, new_path: str) -> dict:
         """治理写：复制对象（铸新 id；单 repo 事务）。"""
-        return _guard(_vfs.fs_copy, virtual_path=_scoped(virtual_path),
-                      new_path=_scoped(new_path))
+        return _unscoped(_guard(_vfs.fs_copy, virtual_path=_scoped(virtual_path),
+                      new_path=_scoped(new_path)))
 
     @m.tool()
     async def fs_rename(virtual_path: str, new_path: str) -> dict:
         """治理写：重命名/移动（保 id；catalog 同批更新）。"""
-        return _guard(_vfs.fs_rename, virtual_path=_scoped(virtual_path),
-                      new_path=_scoped(new_path))
+        return _unscoped(_guard(_vfs.fs_rename, virtual_path=_scoped(virtual_path),
+                      new_path=_scoped(new_path)))
 
     @m.tool()
     async def fs_delete(virtual_path: str) -> dict:
@@ -266,24 +303,34 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
                        expected_base_commit: str | None = None,
                        mutation_id: str | None = None) -> dict:
         """治理写：单 repo all-or-nothing 批量事务（design §5.2 fs_batch）。"""
-        return _guard(_vfs.fs_batch, changes,
-                      expected_base_commit=expected_base_commit,
-                      mutation_id=mutation_id)
+        scoped = []
+        for ch in changes:
+            cc = dict(ch)
+            if cc.get("virtual_path"):
+                cc["virtual_path"] = _scoped(cc["virtual_path"])
+            if cc.get("from_path"):
+                cc["from_path"] = _scoped(cc["from_path"])
+            scoped.append(cc)
+        out = _guard(_vfs.fs_batch, scoped,
+                     expected_base_commit=expected_base_commit,
+                     mutation_id=mutation_id)
+        return _tenant_changes(out)
 
     @m.tool()
     async def fs_resolve(virtual_path: str) -> dict:
         """path → resource_id/exists 解析（不落盘）。"""
-        return _guard(_vfs.fs_resolve, _scoped(virtual_path))
+        return _unscoped(_guard(_vfs.fs_resolve, _scoped(virtual_path)))
 
     @m.tool()
     async def fs_glob(pattern: str) -> list[dict]:
         """glob 枚举（reserved namespace 隐藏）。"""
-        return _guard(_vfs.fs_glob, pattern)
+        pat = _scoped(pattern)
+        return [_unscoped(n) for n in _guard(_vfs.fs_glob, pat)]
 
     @m.tool()
     async def fs_changes(since: str | None = None) -> dict:
         """自某 snapshot commit 起的已提交变更（绑定不可变 snapshot）。"""
-        return _guard(_vfs.fs_changes, since=since)
+        return _tenant_changes(_guard(_vfs.fs_changes, since=since))
 
     @m.tool()
     async def fs_capabilities() -> dict:

@@ -14,6 +14,7 @@ from katana_kb_mcp_shared.kernel import (
     Catalog, GovernedVFS, KernelError, TransactionEngine,
 )
 from katana_kb_mcp_shared.kernel.policy import AppComposition
+from katana_kb_mcp_shared.kernel import paths as paths_mod
 from katana_wiki_mcp import enumerate as _enumerate
 from katana_wiki_mcp import ingest as _ingest
 from katana_wiki_mcp import invariants as _inv
@@ -53,6 +54,13 @@ def configure(wiki_root: str, kb_root: str) -> None:
                                policy_version=composition.policy.policy_version)
     catalog = Catalog(wiki_root, id_prefix=ID_PREFIX)
     _vfs = GovernedVFS(engine, catalog, composition.policy)
+    if os.path.isdir(wiki_root):
+        engine.reconcile()
+        remote = os.environ.get("KATANA_WIKI_REMOTE")
+        try:
+            engine.drain_remote_once(remote)
+        except KernelError:
+            pass
 
 
 def _require_vfs() -> GovernedVFS:
@@ -72,12 +80,11 @@ def _staged_commit(staging, message: str, paths: list[str]) -> str:
     written). Returns the new commit SHA (or current head on a no-op).
     """
     vfs = _require_vfs()
-    import os as _os
     rels = []
     for p in paths:
-        ap = p if _os.path.isabs(p) else _os.path.join(staging.root, p)
-        rel = _os.path.relpath(ap, staging.root).replace(_os.sep, "/")
-        if _os.path.isfile(ap) and rel not in rels:
+        rel = paths_mod.confine(p)
+        ap = paths_mod.confined_join(staging.root, rel)
+        if os.path.isfile(ap) and not os.path.islink(ap) and rel not in rels:
             rels.append(rel)
     res = vfs.commit_staged(staging, message=message, writes=rels)
     return res.commit_sha or (vfs.engine.repo.head() or "")

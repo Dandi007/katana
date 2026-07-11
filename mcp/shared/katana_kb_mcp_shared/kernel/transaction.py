@@ -121,8 +121,9 @@ class TransactionEngine:
         deletes: list[str] = []
         for c in batch.changes:
             if c.op is Op.DELETE:
-                if c.before_path:
-                    deletes.append(c.before_path)
+                target = c.before_path or c.after_path
+                if target:
+                    deletes.append(target)
                 continue
             if c.op is Op.MKDIR:
                 # Git does not track empty dirs; a keep marker makes it durable.
@@ -285,11 +286,27 @@ class TransactionEngine:
         and pauses further pushes (no automatic merge/rebase/force-push). Marks
         every pending commit up to the pushed head as synced in the tracker.
         """
-        result = self.repo.push_fast_forward(remote)
+        try:
+            result = self.repo.push_fast_forward(remote)
+        except KernelError as e:
+            self._tracker().record_push_failure(str(e))
+            raise
         pushed = result.get("pushed")
         if pushed and result.get("status") in ("synced", "already_synced"):
             self._tracker().mark_pushed_through(pushed, self.repo)
         return result
+
+    def drain_remote_once(self, remote: str | None = None) -> dict:
+        """Run one app-level async push worker tick.
+
+        If a Git remote is configured, perform a real fast-forward-only push and
+        record failures for retry/status. Without a remote (common in M1 tests and
+        local apps), mark one queued item as locally drained via the tracker so
+        the service path is still runnable and observable.
+        """
+        if remote:
+            return self.push_remote(remote)
+        return self._tracker().push_once()
 
     # ── startup reconciliation (design §6.1, §6.6) ────────────────────
     def reconcile(self) -> dict:

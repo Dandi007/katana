@@ -43,6 +43,22 @@ class MemoryPolicy:
             return str(card["id"])
         return None
 
+
+    def prepare_copy(self, path: str, content: bytes) -> bytes:
+        """Memory copy gets a fresh frontmatter id/name matching new path."""
+        if not path.endswith(".md"):
+            return content
+        try:
+            card = store.parse_card(content.decode("utf-8"))
+        except UnicodeDecodeError:
+            return content
+        if not card:
+            return content
+        import secrets
+        card["id"] = ID_PREFIX + secrets.token_hex(3)
+        card["name"] = path.rsplit("/", 1)[-1][:-3]
+        return store.serialize_card(card, card.get("body") or "").encode("utf-8")
+
     def validate(self, batch: MutationBatch) -> None:
         """Hard invariants over the projected post-state of every card write."""
         for change in batch.changes:

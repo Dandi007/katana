@@ -40,10 +40,10 @@ def _is_raw(path: str) -> bool:
 
 
 def _errors_for(text: str) -> list[str]:
-    """Hard-invariant errors for a governed page body, or [] if not governed."""
+    """Hard-invariant errors for a wiki page body."""
     fm, body = _pages.parse_page(text)
     if not fm or "类型" not in fm:
-        return []  # not a governed page → not hard-gated (no-regression)
+        return ["missing 类型"]
     return _inv.validate_page(fm, body, require_summary=False,
                               require_sources=False)
 
@@ -55,10 +55,15 @@ class WikiPolicy:
 
     def validate(self, batch: MutationBatch) -> None:
         for change in batch.changes:
+            path = change.after_path or change.before_path or ""
+            if _is_raw(path) and change.op in {Op.CREATE, Op.WRITE, Op.EDIT, Op.COPY, Op.RENAME, Op.DELETE}:
+                raise KernelError(INVALID_CONTENT,
+                                  f"raw wiki zone is immutable: {path}",
+                                  virtual_path=path, violations=["raw immutable"])
             if change.op is Op.DELETE or change.after_content is None:
                 continue
             path = change.after_path or ""
-            if not path.endswith(".md") or _is_raw(path):
+            if path == "log.md" or not path.endswith(".md"):
                 continue
             try:
                 text = change.after_content.decode("utf-8")

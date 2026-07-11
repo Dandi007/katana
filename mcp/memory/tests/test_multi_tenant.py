@@ -84,3 +84,32 @@ def test_tenant_glob_scoped(two_tenants):
     paths = {n["virtual_path"] for n in hits}
     assert any(p.endswith("mine.md") for p in paths)
     assert all(not p.startswith("bob/") for p in paths)
+
+
+def test_tenant_all_fs_ops_cannot_touch_other_tenant(two_tenants):
+    root, alice, bob, tmp_path = two_tenants
+    _call(alice, "memory_create",
+          {"name": "mine", "description": "d", "body": "b"})
+    _call(bob, "memory_create",
+          {"name": "secret", "description": "d", "body": "b"})
+
+    attacks = [
+        ("fs_read", {"virtual_path": "bob/secret.md"}),
+        ("fs_stat", {"virtual_path": "bob/secret.md"}),
+        ("fs_resolve", {"virtual_path": "bob/secret.md"}),
+        ("fs_write", {"virtual_path": "bob/secret.md", "content": "x"}),
+        ("fs_edit", {"virtual_path": "bob/secret.md", "old_string": "b", "new_string": "x"}),
+        ("fs_copy", {"virtual_path": "mine.md", "new_path": "bob/copy.md"}),
+        ("fs_rename", {"virtual_path": "mine.md", "new_path": "bob/renamed.md"}),
+        ("fs_delete", {"virtual_path": "bob/secret.md"}),
+        ("fs_batch", {"changes": [{"op": "delete", "virtual_path": "bob/secret.md"}]}),
+    ]
+    for tool, args in attacks:
+        with pytest.raises(Exception):
+            _call(alice, tool, args)
+
+    hits = _call(alice, "fs_glob", {"pattern": "**/*.md"})
+    assert all(not n["virtual_path"].startswith("bob/") for n in hits)
+    changes = _call(alice, "fs_changes")
+    assert "bob/" not in json.dumps(changes, ensure_ascii=False)
+    assert (tmp_path / "bob" / "secret.md").exists()
