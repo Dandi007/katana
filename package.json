@@ -8,6 +8,7 @@
     "parity/adapter/opencode/**",
     "parity/contracts/**",
     "plugins/*/hooks/**",
+    "plugins/*/runtimes/**",
     "plugins/*/skills/**",
     "plugins/*/rules/**",
     "plugins/*/.claude-plugin/plugin.json",

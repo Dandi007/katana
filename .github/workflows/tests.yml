@@ -9,8 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: memory scanner byte-parity (golden)
-        run: bash plugins/memory/tests/scan-memory.test.sh
+      - name: memory shell regressions (current MCP/runtime paths)
+        run: |
+          bash plugins/memory/tests/session-start.test.sh
+          bash plugins/memory/tests/kimi-user-prompt-hook.test.sh
 
   pack-parity:
     # Guards the "published artifact is missing runtime assets" failure class:
@@ -32,9 +34,12 @@ jobs:
         run: bun test parity/adapter/opencode/
 
   mcp-unit:
-    # Gates the MCP servers (katana-wiki-mcp + katana-work-folder-mcp): L0 单元 +
-    # 全状态图集成回归（create/save/resume MATCH/DRIFT/BROKEN/list/search）。
+    # Gates the MCP servers (katana-wiki-mcp + katana-work-folder-mcp +
+    # katana-memory-mcp): L0 单元 + 全状态图集成回归（create/save/resume
+    # MATCH/DRIFT/BROKEN/list/search，memory CRUD/index/migrate）。
     # 无 svc / 无 LLM / 无网络；把原先只能手跑的 live e2e 固化成确定性 merge gate。
+    # clean venv 必须安装 run-tests.sh 实际执行的全部 MCP 包（含 memory），
+    # 否则 mcp/memory/tests 因缺 fastmcp / katana_memory_mcp import 而报错。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,5 +47,5 @@ jobs:
       - name: install mcp packages + run unit/integration tests
         run: |
           uv venv
-          uv pip install -e mcp/shared -e mcp/wiki -e mcp/work-folder pytest
+          uv pip install -e mcp/shared -e mcp/wiki -e mcp/work-folder -e mcp/memory pytest
           PYTHON=.venv/bin/python bash mcp/run-tests.sh
