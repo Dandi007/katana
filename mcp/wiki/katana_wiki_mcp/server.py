@@ -10,12 +10,17 @@ import os
 from fastmcp import FastMCP
 
 from katana_kb_mcp_shared import config, vault_search
+from katana_kb_mcp_shared.kernel import (
+    Catalog, GovernedVFS, KernelError, TransactionEngine,
+)
+from katana_kb_mcp_shared.kernel.policy import AppComposition
 from katana_wiki_mcp import enumerate as _enumerate
 from katana_wiki_mcp import ingest as _ingest
 from katana_wiki_mcp import invariants as _inv
 from katana_wiki_mcp import lint as _lint
 from katana_wiki_mcp import pages as _pages
 from katana_wiki_mcp import query as _query
+from katana_wiki_mcp.policy import ID_PREFIX, WikiPolicy
 
 mcp = FastMCP(
     "katana-wiki-mcp",
@@ -28,6 +33,7 @@ mcp = FastMCP(
 
 _scope: str | None = None
 _wiki_root: str | None = None
+_vfs: GovernedVFS | None = None
 
 
 def compute_scope(wiki_root: str, kb_root: str) -> str | None:
@@ -37,9 +43,29 @@ def compute_scope(wiki_root: str, kb_root: str) -> str | None:
 
 
 def configure(wiki_root: str, kb_root: str) -> None:
-    global _scope, _wiki_root
+    global _scope, _wiki_root, _vfs
     _scope = compute_scope(wiki_root, kb_root)
     _wiki_root = wiki_root
+    # Governed Full VFS composition root (design §4.2/§5.2): fs_* shares the same
+    # policy → transaction pipeline as the domain tools; no raw bypass (INV-10).
+    composition = AppComposition(WikiPolicy())
+    engine = TransactionEngine(wiki_root, domain="wiki",
+                               policy_version=composition.policy.policy_version)
+    catalog = Catalog(wiki_root, id_prefix=ID_PREFIX)
+    _vfs = GovernedVFS(engine, catalog, composition.policy)
+
+
+def _require_vfs() -> GovernedVFS:
+    if _vfs is None:
+        raise ValueError("wiki VFS not configured; call configure() first")
+    return _vfs
+
+
+def _guard(fn, *a, **k):
+    try:
+        return fn(*a, **k)
+    except KernelError as e:
+        raise ValueError(e.to_envelope()) from e
 
 
 def _do_search(query: str, top_k: int, scope: str | None) -> list[dict]:
@@ -123,6 +149,45 @@ async def wiki_lint_mechanical(path: str | None = None, zone: str | None = None)
     Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "Zettelkasten"），跨页基线只在该 zone 内算。
     """
     return _lint.lint_mechanical(_wiki_root or ".", path, zone=zone)
+
+
+
+# ── Governed Full VFS façade (fs_*) — design §5.2 ────────────────────────────
+
+@mcp.tool()
+async def fs_read(virtual_path: str, offset: int | None = None,
+                  limit: int | None = None) -> dict:
+    """治理 VFS 读（canonical tree，cat -n），path 相对 wiki_root。"""
+    return _guard(_require_vfs().fs_read, virtual_path=virtual_path,
+                  offset=offset, limit=limit)
+
+
+@mcp.tool()
+async def fs_list(virtual_path: str = "") -> list[dict]:
+    """列出 wiki 子树节点（reserved namespace 隐藏）。"""
+    return _guard(_require_vfs().fs_list, virtual_path)
+
+
+@mcp.tool()
+async def fs_stat(virtual_path: str) -> dict:
+    """节点统一 descriptor（id/path/hash/revision/snapshot commit）。"""
+    return _guard(_require_vfs().fs_stat, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_create(virtual_path: str, content: str) -> dict:
+    """治理写：创建对象（铸 id + WIKI schema 校验 + 单 repo 事务提交）。"""
+    return _guard(_require_vfs().fs_create, virtual_path=virtual_path,
+                  content=content)
+
+
+@mcp.tool()
+async def fs_edit(virtual_path: str, old_string: str, new_string: str,
+                  replace_all: bool = False) -> dict:
+    """治理写：精确子串替换（与 domain tools 同一 policy → transaction 管线）。"""
+    return _guard(_require_vfs().fs_edit, virtual_path=virtual_path,
+                  old_string=old_string, new_string=new_string,
+                  replace_all=replace_all)
 
 
 def main() -> None:
