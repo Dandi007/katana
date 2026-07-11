@@ -67,3 +67,29 @@ class MemoryPolicy:
             except ValueError as e:
                 raise KernelError(INVALID_CONTENT, str(e),
                                   virtual_path=path) from e
+            # name/filename consistency (design §5.6): the card filename must
+            # match its name field so path and identity stay coherent.
+            filename = path.rsplit("/", 1)[-1]
+            if filename != f"{card['name']}.md":
+                raise KernelError(
+                    INVALID_CONTENT,
+                    f"card filename {filename!r} does not match name "
+                    f"{card['name']!r}", virtual_path=path,
+                    resource_id=str(card["id"]),
+                    violations=["name/filename mismatch"])
+            # ID immutability across updates (design §5.6): compare the id in
+            # the before-state (same path) with the after-state id.
+            if change.before_content is not None:
+                try:
+                    before = store.parse_card(
+                        change.before_content.decode("utf-8"))
+                except UnicodeDecodeError:
+                    before = None
+                if before and before.get("id") and \
+                        before["id"] != card["id"]:
+                    raise KernelError(
+                        INVALID_CONTENT,
+                        f"card id is immutable ({before['id']!r} -> "
+                        f"{card['id']!r})", virtual_path=path,
+                        resource_id=str(card["id"]),
+                        violations=["id changed"])

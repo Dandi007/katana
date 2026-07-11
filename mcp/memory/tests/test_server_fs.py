@@ -42,14 +42,16 @@ def _tool_names(mcp):
     return asyncio.run(go())
 
 
-def test_seven_domain_tools_plus_fs_facade(srv):
+def test_seven_domain_tools_plus_full_fs_facade(srv):
     mcp, _, _ = srv
     names = _tool_names(mcp)
+    from katana_kb_mcp_shared.kernel.facade import FS_FACADE
     domain = {"memory_index", "memory_get", "memory_create", "memory_update",
               "memory_delete", "memory_read", "memory_edit"}
-    fs = {"fs_read", "fs_list", "fs_stat", "fs_create", "fs_edit"}
     assert domain <= names, f"missing domain tools: {domain - names}"
-    assert fs <= names, f"missing fs_* tools: {fs - names}"
+    # The COMPLETE governed Full VFS surface is exposed (design §5.2), not a
+    # five-tool subset.
+    assert FS_FACADE <= names, f"missing fs_* tools: {FS_FACADE - names}"
 
 
 def test_fs_create_read_edit_roundtrip(srv):

@@ -20,7 +20,7 @@ from katana_kb_mcp_shared.kernel import (
 )
 from katana_kb_mcp_shared.kernel.policy import AppComposition
 
-from katana_memory_mcp import gitops, index as index_mod, store
+from katana_memory_mcp import index as index_mod, store
 from katana_memory_mcp.policy import ID_PREFIX, MemoryPolicy
 
 
@@ -37,18 +37,51 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
         ),
     )
 
-    def _commit(action: str, result: dict) -> dict:
-        msg = f"chore(memory): [{tenant}] {action} {result['id']} ({result['name']})"
-        result["git"] = gitops.commit(repo_root, msg, result.pop("changed_paths"))
-        return result
-
-    # Governed Full VFS composition root (design §4.2/§5.2): fs_* shares the same
-    # policy → transaction pipeline as the 7 domain tools; no raw bypass (INV-10).
+    # Single governed composition root (design §4.2/§5.2): BOTH the 7 domain
+    # tools AND fs_* compile into one MutationBatch and flow through the same
+    # MemoryPolicy → TransactionEngine pipeline; no raw bypass (INV-5/INV-10).
     _composition = AppComposition(MemoryPolicy())
     _engine = TransactionEngine(repo_root, domain="memory",
                                 policy_version=_composition.policy.policy_version)
     _catalog = Catalog(repo_root, id_prefix=ID_PREFIX)
     _vfs = GovernedVFS(_engine, _catalog, _composition.policy)
+
+    def _rel(abs_path: str) -> str:
+        return os.path.relpath(abs_path, repo_root).replace(os.sep, "/")
+
+    def _commit(action: str, result: dict) -> dict:
+        """Route a domain store mutation through the governed pipeline.
+
+        ``store.*`` did the domain-specific projection into the working tree and
+        returned the touched paths + card id; here that post-state is compiled
+        into a MutationBatch and published through the SAME MemoryPolicy +
+        TransactionEngine as fs_* (design §4.4). Policy rejection or a CAS
+        conflict rolls the working tree back — no legacy direct-commit path.
+        """
+        rels = [_rel(p) for p in result.pop("changed_paths")]
+        card_id = result["id"]
+        msg = f"chore(memory): [{tenant}] {action} {card_id} ({result['name']})"
+        writes = deletes = renames = None
+        ids = None
+        if action == "delete":
+            deletes = rels
+            ids = {rels[0]: card_id} if rels else None
+        elif len(rels) == 2:
+            renames = [(rels[0], rels[1])]
+            ids = {rels[1]: card_id}
+        else:
+            writes = rels
+            ids = {rels[0]: card_id} if rels else None
+        try:
+            res = _vfs.commit_materialized(
+                message=msg, writes=writes, deletes=deletes,
+                renames=renames, ids=ids)
+            result["git"] = {"committed": bool(res.commit_sha) and not res.no_change,
+                             "detail": res.commit_sha or "no-op",
+                             "commit_sha": res.commit_sha}
+        except KernelError as e:
+            raise ValueError(e.to_envelope()) from e
+        return result
 
     def _scoped(path: str) -> str:
         return path if path == tenant or path.startswith(f"{tenant}/") \
@@ -183,6 +216,67 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
         return _guard(_vfs.fs_edit, virtual_path=_scoped(virtual_path),
                       old_string=old_string, new_string=new_string,
                       replace_all=replace_all)
+
+    @m.tool()
+    async def fs_write(virtual_path: str, content: str,
+                       expected_base_commit: str | None = None) -> dict:
+        """治理写：整文件覆盖（不隐式创建，带 CAS；同一 policy→transaction 管线）。"""
+        return _guard(_vfs.fs_write, virtual_path=_scoped(virtual_path),
+                      content=content, expected_base_commit=expected_base_commit)
+
+    @m.tool()
+    async def fs_mkdir(virtual_path: str) -> dict:
+        """治理写：创建目录（.gitkeep 落盘，单 repo 事务）。"""
+        return _guard(_vfs.fs_mkdir, virtual_path=_scoped(virtual_path))
+
+    @m.tool()
+    async def fs_copy(virtual_path: str, new_path: str) -> dict:
+        """治理写：复制对象（铸新 id；单 repo 事务）。"""
+        return _guard(_vfs.fs_copy, virtual_path=_scoped(virtual_path),
+                      new_path=_scoped(new_path))
+
+    @m.tool()
+    async def fs_rename(virtual_path: str, new_path: str) -> dict:
+        """治理写：重命名/移动（保 id；catalog 同批更新）。"""
+        return _guard(_vfs.fs_rename, virtual_path=_scoped(virtual_path),
+                      new_path=_scoped(new_path))
+
+    @m.tool()
+    async def fs_delete(virtual_path: str) -> dict:
+        """治理写：删除（留 tombstone，id 不复用；单 repo 事务）。"""
+        return _guard(_vfs.fs_delete, virtual_path=_scoped(virtual_path))
+
+    @m.tool()
+    async def fs_batch(changes: list[dict],
+                       expected_base_commit: str | None = None) -> dict:
+        """治理写：单 repo all-or-nothing 批量事务（design §5.2 fs_batch）。"""
+        return _guard(_vfs.fs_batch, changes,
+                      expected_base_commit=expected_base_commit)
+
+    @m.tool()
+    async def fs_resolve(virtual_path: str) -> dict:
+        """path → resource_id/exists 解析（不落盘）。"""
+        return _guard(_vfs.fs_resolve, _scoped(virtual_path))
+
+    @m.tool()
+    async def fs_glob(pattern: str) -> list[str]:
+        """glob 枚举（reserved namespace 隐藏）。"""
+        return _guard(_vfs.fs_glob, pattern)
+
+    @m.tool()
+    async def fs_changes(since: str | None = None) -> dict:
+        """自某 snapshot commit 起的已提交变更（绑定不可变 snapshot）。"""
+        return _guard(_vfs.fs_changes, since=since)
+
+    @m.tool()
+    async def fs_capabilities() -> dict:
+        """协议版本 + 支持的 operations + 特性发现（design §5.1）。"""
+        return _guard(_vfs.fs_capabilities)
+
+    @m.tool()
+    async def fs_status() -> dict:
+        """异步 push/projection freshness + checkpoint（design §6.5-6.8）。"""
+        return _guard(_vfs.fs_status)
 
     return m
 
