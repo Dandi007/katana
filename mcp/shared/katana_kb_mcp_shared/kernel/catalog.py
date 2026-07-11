@@ -14,6 +14,14 @@ import json
 import os
 
 from . import identity
+from .errors import INVALID_CONTENT, KernelError
+
+class IdentityError(KernelError):
+    """Raised when an identity invariant (e.g. tombstone reuse) is violated."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(INVALID_CONTENT, message)
+
 
 KB_DIR = ".kb"
 CATALOG_REL = os.path.join(KB_DIR, "catalog.json")
@@ -132,12 +140,22 @@ class Catalog:
         return rid
 
     def bind(self, resource_id: str, virtual_path: str) -> None:
-        """Bind a caller-supplied id (e.g. a domain card id) to a path."""
+        """Bind a caller-supplied id (e.g. a domain card id) to a path.
+
+        A tombstoned id is never re-bound: identities are immutable and never
+        reused after delete, preventing ABA (design §5.3, operator P0 #6).
+        """
+        if resource_id in self._data["tombstones"]:
+            raise IdentityError(
+                f"resource_id {resource_id} is tombstoned and cannot be reused")
         if self._data["by_id"].get(resource_id) != virtual_path:
             self._data["by_id"][resource_id] = virtual_path
             self._dirty = True
 
     def rebind(self, resource_id: str, virtual_path: str) -> None:
+        if resource_id in self._data["tombstones"]:
+            raise IdentityError(
+                f"resource_id {resource_id} is tombstoned and cannot be reused")
         if self._data["by_id"].get(resource_id) != virtual_path:
             self._data["by_id"][resource_id] = virtual_path
             self._dirty = True

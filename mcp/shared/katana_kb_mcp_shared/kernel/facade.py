@@ -108,6 +108,26 @@ class GovernedVFS:
         self.catalog.load_canonical(blob)
 
     # ── helpers ───────────────────────────────────────────────────────
+    def _canonical_or_mint(self, rel: str, content: bytes) -> str:
+        """Adopt the domain-canonical id for content, else mint a fresh one.
+
+        When the policy declares a canonical identity (e.g. a Memory card's
+        frontmatter id), the catalog binds THAT id so identity never splits
+        between the catalog and the source (operator P0 #6). Otherwise a fresh
+        opaque id is minted.
+        """
+        canonical = None
+        getter = getattr(self.policy, "canonical_id", None)
+        if getter is not None:
+            try:
+                canonical = getter(rel, content)
+            except Exception:
+                canonical = None
+        if canonical:
+            self.catalog.bind(canonical, rel)
+            return canonical
+        return self.catalog.mint(rel)
+
     def _abs(self, rel: str) -> str:
         return os.path.join(self.repo_root, rel)
 
@@ -346,8 +366,8 @@ class GovernedVFS:
         if self._exists(rel):
             raise KernelError(POLICY_VIOLATION, f"path exists: {rel}",
                               virtual_path=rel)
-        rid = self.catalog.mint(rel)
         raw = content.encode("utf-8")
+        rid = self._canonical_or_mint(rel, raw)
         batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id)
         batch.add(Change(op=Op.CREATE, resource_id=rid, after_path=rel,
                          after_content=raw, after_hash=vfs.identity.content_hash(raw)))

@@ -25,6 +25,24 @@ class MemoryPolicy:
     id_prefix = ID_PREFIX
     policy_version = POLICY_VERSION
 
+    def canonical_id(self, path: str, content: bytes) -> str | None:
+        """Return the domain-canonical id for a card, or None.
+
+        For Memory the canonical identity is the card's frontmatter ``id``
+        (design §5.6). The governed façade adopts this id when a governed
+        create/write already declares one, so the catalog binding can never
+        diverge from the Markdown source (operator P0 #6).
+        """
+        if not path.endswith(".md"):
+            return None
+        try:
+            card = store.parse_card(content.decode("utf-8"))
+        except (UnicodeDecodeError, AttributeError):
+            return None
+        if card and card.get("id"):
+            return str(card["id"])
+        return None
+
     def validate(self, batch: MutationBatch) -> None:
         """Hard invariants over the projected post-state of every card write."""
         for change in batch.changes:
@@ -93,3 +111,15 @@ class MemoryPolicy:
                         f"{card['id']!r})", virtual_path=path,
                         resource_id=str(card["id"]),
                         violations=["id changed"])
+            # Canonical identity coherence (design §5.3, operator P0 #6): the
+            # catalog resource_id bound to this change MUST equal the card's
+            # frontmatter id, so identity can never split between the catalog
+            # and the Markdown source. Checked last so an id-immutability
+            # violation reports the more specific "id changed".
+            if change.resource_id and change.resource_id != str(card["id"]):
+                raise KernelError(
+                    INVALID_CONTENT,
+                    f"catalog resource_id {change.resource_id!r} does not match "
+                    f"card frontmatter id {card['id']!r}", virtual_path=path,
+                    resource_id=change.resource_id,
+                    violations=["identity split: catalog id != frontmatter id"])
