@@ -2,30 +2,35 @@
 
 Machine-checks that:
 - the 19 现役 domain tools survive (Memory 7 + Wiki 6 + Work Folder 6);
-- all three apps expose the SAME governed Full VFS (fs_*) surface;
+- all three apps expose the SAME governed Full VFS (fs_*) surface, and that
+  surface is the complete M1 operation set (design §5.2), not a 5-tool subset;
+- mutating domain tools AND fs_* enter the SAME policy → transaction pipeline
+  (there is no raw/legacy bypass — design §4.4, INV-5);
 - each app statically composes exactly one DomainPolicy.
 
-This test imports the three domain servers; the SHARED PACKAGE itself still
-imports no domain (that is enforced separately in test_kernel_boundary).
+Aggregate gate: the three domain apps MUST import. When run via the required
+``bash mcp/run-tests.sh`` (all four packages installed) an import failure is a
+hard error, not a skip (feedback: the gate must catch broken app integration).
+A standalone shared-only install may set ``KB_SHARED_ONLY=1`` to skip.
 """
 import asyncio
+import os
 import subprocess
 
 import pytest
 
-# The shared package is decoupled from domains; this cross-cutting parity anchor
-# only runs when the three domain apps are installed alongside it.
-_domains = pytest.importorskip  # noqa: N816
-try:
+from katana_kb_mcp_shared.kernel.facade import FS_FACADE
+
+_SHARED_ONLY = os.environ.get("KB_SHARED_ONLY") == "1"
+
+if not _SHARED_ONLY:
+    # Hard import (no try/except): a broken domain app fails the aggregate gate.
     import katana_memory_mcp.server  # noqa: F401
     import katana_wiki_mcp.server  # noqa: F401
     import katana_work_folder_mcp.server  # noqa: F401
-    _DOMAINS_AVAILABLE = True
-except Exception:  # pragma: no cover - standalone shared install
-    _DOMAINS_AVAILABLE = False
 
 requires_domains = pytest.mark.skipif(
-    not _DOMAINS_AVAILABLE, reason="domain apps not installed")
+    _SHARED_ONLY, reason="KB_SHARED_ONLY: standalone shared-package test mode")
 
 MEMORY_TOOLS = {"memory_index", "memory_get", "memory_create", "memory_update",
                 "memory_delete", "memory_read", "memory_edit"}
@@ -33,7 +38,6 @@ WIKI_TOOLS = {"wiki_search", "wiki_query", "wiki_ingest_plan",
               "wiki_ingest_apply", "wiki_list_docs", "wiki_lint_mechanical"}
 WF_TOOLS = {"wf_search", "wf_create", "wf_list", "wf_save", "wf_resume",
             "wf_reindex"}
-FS_FACADE = {"fs_read", "fs_list", "fs_stat", "fs_create", "fs_edit"}
 
 
 def _git_repo(tmp_path):
@@ -53,6 +57,16 @@ def test_total_domain_tools_is_nineteen():
     assert len(MEMORY_TOOLS) == 7
     assert len(WIKI_TOOLS) == 6
     assert len(WF_TOOLS) == 6
+
+
+def test_full_vfs_surface_is_complete():
+    # The M1 Full VFS operation set (design §5.2) — not a five-tool subset.
+    assert FS_FACADE >= {
+        "fs_resolve", "fs_stat", "fs_list", "fs_glob", "fs_changes",
+        "fs_read", "fs_create", "fs_write", "fs_edit", "fs_mkdir",
+        "fs_copy", "fs_rename", "fs_delete", "fs_batch",
+        "fs_capabilities", "fs_status",
+    }
 
 
 @requires_domains
@@ -90,9 +104,7 @@ def test_work_folder_surface(tmp_path):
 def test_all_apps_share_identical_fs_facade():
     # Parity: the governed façade is identical across domains (same mechanics).
     from katana_kb_mcp_shared.kernel.facade import GovernedVFS
-    for op in ("fs_read", "fs_list", "fs_stat", "fs_create", "fs_edit",
-               "fs_write", "fs_rename", "fs_copy", "fs_delete", "fs_batch",
-               "fs_mkdir", "fs_glob", "fs_resolve"):
+    for op in FS_FACADE:
         assert hasattr(GovernedVFS, op), f"kernel façade missing {op}"
 
 

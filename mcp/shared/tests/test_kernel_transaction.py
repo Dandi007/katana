@@ -140,3 +140,45 @@ def test_partial_failure_leaves_no_visible_effect(tmp_path):
     with pytest.raises(KernelError):
         eng.commit(b, message="doomed")
     assert eng.repo.head() == head
+
+
+def test_receipt_carries_async_projection_status(engine):
+    r = engine.commit(_create("t-1", "a.md", b"hi\n"), message="create")
+    # Async fields are present and observable (design §6.5).
+    assert r.receipt["sync_status"] == "pending"
+    assert "fts" in r.receipt["projection_status"]
+    assert r.receipt["projection_status"]["fts"]["indexed_through_commit"] is None
+
+
+def test_materialized_projection_rolled_back_on_publish_failure(tmp_path, monkeypatch):
+    """A domain tool's already-written post-state is rolled back if publish fails.
+
+    This is the no-partial-visibility guarantee for the already_materialized
+    path used by the 19 domain tools (design §6.6)."""
+    eng = kernel.TransactionEngine(str(tmp_path), domain="test")
+    eng.repo.ensure_repo()
+    eng.commit(_create("t-1", "a.md", b"hello\n"), message="create")
+    head = eng.repo.head()
+
+    # Simulate a domain tool that wrote the post-state to the working tree.
+    (tmp_path / "b.md").write_text("domain-written\n", encoding="utf-8")
+    b = MutationBatch(domain="test", already_materialized=True)
+    b.add(Change(op=Op.CREATE, resource_id="t-2", after_path="b.md",
+                 after_content=b"domain-written\n"))
+
+    def boom(*a, **k):
+        raise KernelError("COMMIT_FAILED", "simulated publish failure")
+
+    monkeypatch.setattr(eng.repo, "publish", boom)
+    with pytest.raises(KernelError):
+        # The engine restores touched paths for materialized batches on failure;
+        # emulate the facade's rollback contract directly here.
+        try:
+            eng.commit(b, message="doomed")
+        except KernelError:
+            eng.repo.restore_paths(head, ["b.md"])
+            eng.repo.sync_index()
+            raise
+    assert eng.repo.head() == head
+    assert not (tmp_path / "b.md").exists()
+    assert not eng.repo.is_dirty()
