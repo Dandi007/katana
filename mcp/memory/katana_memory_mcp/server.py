@@ -267,7 +267,7 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
         return _guard(_vfs.fs_resolve, _scoped(virtual_path))
 
     @m.tool()
-    async def fs_glob(pattern: str) -> list[str]:
+    async def fs_glob(pattern: str) -> list[dict]:
         """glob 枚举（reserved namespace 隐藏）。"""
         return _guard(_vfs.fs_glob, pattern)
 

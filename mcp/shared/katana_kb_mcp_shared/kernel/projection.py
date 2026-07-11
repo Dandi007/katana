@@ -85,6 +85,24 @@ class ProjectionTracker:
         self._save()
         return self.projection_status()
 
+    def rebuild_backlog(self, commit_shas: list[str]) -> dict:
+        """Rebuild the push backlog from canonical history (design §6.6/§6.7).
+
+        The push backlog's canonical definition is "committed commits not yet
+        covered by the remote" — it does not depend on any single un-loseable
+        SQLite row. After operational-mirror loss or a post-CAS crash, this
+        re-derives pending push entries from the first-parent commit list while
+        preserving any already-``pushed`` markers so a synced commit is not
+        re-enqueued.
+        """
+        pushed = {e.commit_sha for e in self._state.push_queue if e.pushed}
+        self._state.push_queue = [
+            PushEntry(commit_sha=sha, enqueued_at=self._now(), pushed=sha in pushed)
+            for sha in commit_shas
+        ]
+        self._save()
+        return {"pending": sum(1 for e in self._state.push_queue if not e.pushed)}
+
     # ── async workers (deterministic, testable) ───────────────────────
     def push_once(self, *, fail: bool = False) -> dict:
         """Attempt to push the oldest pending commit (fast-forward only).

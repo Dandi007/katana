@@ -395,7 +395,7 @@ async def fs_resolve(virtual_path: str) -> dict:
 
 
 @mcp.tool()
-async def fs_glob(pattern: str) -> list[str]:
+async def fs_glob(pattern: str) -> list[dict]:
     """glob 枚举（reserved namespace 隐藏）。"""
     return _guard(_require_vfs().fs_glob, pattern)
 

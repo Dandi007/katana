@@ -23,6 +23,7 @@ from . import paths, vfs
 from .batch import Change, MutationBatch, Op
 from .catalog import CATALOG_REL, Catalog
 from .errors import (
+    INVALID_PATH,
     KernelError,
     NOT_FOUND,
     POLICY_VIOLATION,
@@ -90,6 +91,21 @@ class GovernedVFS:
         self.catalog = catalog
         self.policy = policy
         self.repo_root = engine.repo_root
+
+    def _refresh_catalog(self) -> None:
+        """Reload the identity catalog from the canonical HEAD before minting.
+
+        Multiple in-process ``GovernedVFS`` instances can share one repo (e.g.
+        per-tenant Memory servers). Reading the committed ``.kb/catalog.json``
+        from HEAD before each mutation means a stale in-memory instance never
+        clobbers another's committed bindings; the ref CAS then serializes the
+        actual publishes (operator P0 #5).
+        """
+        if self.catalog.dirty:
+            return
+        head = self.engine.repo.head()
+        blob = self.engine.repo.read_blob_at(head, CATALOG_REL) if head else None
+        self.catalog.load_canonical(blob)
 
     # ── helpers ───────────────────────────────────────────────────────
     def _abs(self, rel: str) -> str:
@@ -325,6 +341,7 @@ class GovernedVFS:
     # ── create / write / edit / mkdir ─────────────────────────────────
     def fs_create(self, *, virtual_path: str, content: str,
                   mutation_id: str | None = None) -> dict:
+        self._refresh_catalog()
         rel = paths.confine(virtual_path)
         if self._exists(rel):
             raise KernelError(POLICY_VIOLATION, f"path exists: {rel}",
@@ -341,6 +358,7 @@ class GovernedVFS:
                  virtual_path: str | None = None, content: str,
                  expected_base_commit: str | None = None,
                  mutation_id: str | None = None) -> dict:
+        self._refresh_catalog()
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
         if not self._exists(rel):
@@ -360,6 +378,7 @@ class GovernedVFS:
                 virtual_path: str | None = None, old_string: str,
                 new_string: str, replace_all: bool = False,
                 mutation_id: str | None = None) -> dict:
+        self._refresh_catalog()
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
         raw = self._read_bytes(rel)
@@ -389,6 +408,7 @@ class GovernedVFS:
         return self._result(res, rid, rel)
 
     def fs_mkdir(self, *, virtual_path: str) -> dict:
+        self._refresh_catalog()
         rel = paths.confine(virtual_path)
         batch = MutationBatch(domain=self.engine.domain)
         batch.add(Change(op=Op.MKDIR, resource_id="", after_path=rel,
@@ -400,6 +420,7 @@ class GovernedVFS:
     def fs_rename(self, *, resource_id: str | None = None,
                   virtual_path: str | None = None, new_path: str,
                   mutation_id: str | None = None) -> dict:
+        self._refresh_catalog()
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
         dst = paths.confine(new_path)
@@ -418,6 +439,7 @@ class GovernedVFS:
     def fs_copy(self, *, resource_id: str | None = None,
                 virtual_path: str | None = None, new_path: str,
                 mutation_id: str | None = None) -> dict:
+        self._refresh_catalog()
         rel, _ = self._resolve_target(resource_id=resource_id,
                                       virtual_path=virtual_path)
         dst = paths.confine(new_path)
@@ -437,6 +459,7 @@ class GovernedVFS:
     def fs_delete(self, *, resource_id: str | None = None,
                   virtual_path: str | None = None,
                   mutation_id: str | None = None) -> dict:
+        self._refresh_catalog()
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
         if not self._exists(rel):
@@ -454,11 +477,18 @@ class GovernedVFS:
     def fs_batch(self, changes: list[dict], *,
                  expected_base_commit: str | None = None,
                  mutation_id: str | None = None) -> dict:
+        self._refresh_catalog()
         batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
                               expected_base_commit=expected_base_commit)
         for spec in changes:
             op = Op(spec["op"])
             rel = paths.confine(spec["virtual_path"]) if spec.get("virtual_path") else None
+            # Confine from_path too (operator P0 #1): an unconfined client
+            # from_path could otherwise be materialized/deleted outside the repo
+            # (``../../host-sentinel``). Reserved namespaces and traversal are
+            # rejected here, before any planning or materialize.
+            from_path = paths.confine(spec["from_path"]) \
+                if spec.get("from_path") else None
             rid = spec.get("resource_id")
             content = spec.get("content")
             raw = content.encode("utf-8") if content is not None else None
@@ -469,7 +499,7 @@ class GovernedVFS:
             elif op is Op.DELETE and rid:
                 self.catalog.tombstone(rid)
             batch.add(Change(op=op, resource_id=rid or "",
-                             before_path=spec.get("from_path"),
+                             before_path=from_path,
                              after_path=rel, after_content=raw))
         res = self._commit(batch, f"chore({self.engine.domain}): fs_batch "
                                   f"{len(changes)} change(s)")
@@ -520,6 +550,7 @@ class GovernedVFS:
         renames = list(renames or [])
         ids = dict(ids or {})
         base = staging.base
+        self._refresh_catalog()
 
         batch = MutationBatch(
             domain=self.engine.domain, mutation_id=mutation_id,

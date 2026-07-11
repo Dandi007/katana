@@ -280,18 +280,39 @@ class TransactionEngine:
 
     # ── startup reconciliation (design §6.1, §6.6) ────────────────────
     def reconcile(self) -> dict:
-        """Forward-recover operational mirrors from first-parent manifests.
+        """Forward-recover after a crash (design §6.6, operator P0 #4).
 
-        The walk stops at the first commit lacking a manifest (treated as the
-        pre-genesis / imported baseline, design §6.1).
+        The canonical ref CAS is the single linearization point. After a crash
+        at ANY point past the ref update — mid-materialize, before outbox
+        enqueue, before receipt persist — startup recovers deterministically
+        from the first-parent manifests:
+
+        1. Recalibrate the working tree/index to HEAD (a crash between ref
+           publish and materialize can leave the tree behind the committed
+           tree; §6.6 "重启后 working tree=HEAD").
+        2. Rebuild the idempotency receipts so a replay of the same
+           ``mutation_id`` returns the original commit with no second effect.
+        3. Rebuild the projection push backlog so no committed commit is lost
+           from the async push/projection queue.
+
+        The walk stops at the first commit lacking a manifest (the pre-genesis /
+        imported baseline, design §6.1).
         """
         self.repo.ensure_repo()
         if not self.repo.has_commits():
-            return {"reconciled": 0, "head": None}
+            return {"reconciled": 0, "head": None, "recalibrated": False}
+        # 1) Recalibrate the working tree to the canonical commit.
+        recalibrated = False
+        if self.repo.is_dirty() or self._worktree_behind_head():
+            self.repo.checkout_head()
+            recalibrated = True
+
         rebuilt = 0
+        # first_parent_commits is newest→oldest; rebuild the push backlog in
+        # canonical (oldest→newest) order.
+        manifests: list[tuple[str, Manifest]] = []
         for sha in self.repo.first_parent_commits():
-            msg = self.repo.show_message(sha)
-            manifest = extract_from_message(msg)
+            manifest = extract_from_message(self.repo.show_message(sha))
             if manifest is None:
                 break
             if manifest.repository_epoch != self.repository_epoch():
@@ -299,9 +320,44 @@ class TransactionEngine:
                     REPOSITORY_EPOCH_CHANGED,
                     "manifest epoch differs from configured lineage",
                     repository_epoch=self.repository_epoch())
+            manifests.append((sha, manifest))
+
+        for sha, manifest in reversed(manifests):
             if manifest.mutation_id:
                 receipt = build_receipt(manifest, sha)
                 self._store_receipt(manifest.mutation_id, receipt,
                                     manifest.request_hash)
                 rebuilt += 1
-        return {"reconciled": rebuilt, "head": self.repo.head()}
+
+        # 3) Rebuild the projection push backlog from committed history.
+        try:
+            self._tracker().rebuild_backlog([sha for sha, _ in reversed(manifests)])
+        except Exception:  # pragma: no cover - observability must not block
+            pass
+
+        return {"reconciled": rebuilt, "head": self.repo.head(),
+                "recalibrated": recalibrated}
+
+    def _worktree_behind_head(self) -> bool:
+        """True if a tracked HEAD path is missing/stale in the working tree.
+
+        Detects a crash between ref publish and materialize: the ref advanced
+        but the working tree was never updated to the committed blob.
+        """
+        head = self.repo.head()
+        if head is None:
+            return False
+        for rel in self.repo.list_tree_recursive(head):
+            if rel in GitRepo._OPERATIONAL_EXCLUDES:
+                continue
+            abs_p = os.path.join(self.repo_root, rel)
+            if not os.path.exists(abs_p):
+                return True
+            committed = self.repo.read_blob_at(head, rel)
+            try:
+                with open(abs_p, "rb") as f:
+                    if f.read() != committed:
+                        return True
+            except OSError:
+                return True
+        return False

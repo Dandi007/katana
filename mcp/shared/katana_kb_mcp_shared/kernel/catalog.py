@@ -20,14 +20,41 @@ CATALOG_REL = os.path.join(KB_DIR, "catalog.json")
 
 
 class Catalog:
-    def __init__(self, repo_root: str, *, id_prefix: str) -> None:
+    def __init__(self, repo_root: str, *, id_prefix: str,
+                 canonical_loader=None) -> None:
         self.repo_root = repo_root
         self.id_prefix = id_prefix
         self._path = os.path.join(repo_root, CATALOG_REL)
+        # Optional callable returning the canonical committed catalog bytes
+        # (e.g. the HEAD blob). When set, the catalog re-reads canonical state
+        # rather than the working-tree file, so multiple in-process instances
+        # (e.g. per-tenant Memory servers sharing one repo) never overwrite each
+        # other's committed bindings with a stale in-memory view (operator P0
+        # #5). The ref CAS still serializes concurrent publishes.
+        self._canonical_loader = canonical_loader
         self._data = self._load()
         self._dirty = False
 
+    def _parse(self, raw: bytes | str | None) -> dict | None:
+        if raw is None:
+            return None
+        try:
+            d = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(d, dict):
+            return None
+        d.setdefault("by_id", {})
+        d.setdefault("tombstones", [])
+        return d
+
     def _load(self) -> dict:
+        if self._canonical_loader is not None:
+            parsed = self._parse(self._canonical_loader())
+            if parsed is not None:
+                return parsed
+            # No committed catalog yet → empty canonical state.
+            return {"by_id": {}, "tombstones": []}
         if os.path.exists(self._path):
             try:
                 with open(self._path, encoding="utf-8") as f:
@@ -38,6 +65,29 @@ class Catalog:
             except (OSError, ValueError):
                 pass
         return {"by_id": {}, "tombstones": []}
+
+    def load_canonical(self, raw: bytes | str | None) -> None:
+        """Replace in-memory state with the given canonical committed bytes.
+
+        No-op when mid-transaction (``dirty``). ``None``/unparseable → empty
+        canonical state (no committed catalog yet).
+        """
+        if self._dirty:
+            return
+        parsed = self._parse(raw)
+        self._data = parsed if parsed is not None else {"by_id": {},
+                                                         "tombstones": []}
+
+    def refresh(self) -> None:
+        """Reload canonical committed state, discarding no pending changes.
+
+        Called at the start of a governed mutation so identity minting/rebinding
+        sees every prior commit's bindings (operator P0 #5). Only refreshes when
+        not mid-transaction (``dirty``); a dirty catalog is reloaded via
+        :meth:`reload` on abort.
+        """
+        if not self._dirty:
+            self._data = self._load()
 
     # ── transactional persistence contract ───────────────────────────
     @property
