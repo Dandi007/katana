@@ -25,7 +25,14 @@ def _run(coro):
 
 
 def _write_context(folder: str, resource_path: str, branch: str = "-") -> None:
-    """写一个带「关键路径」表的 context.md，单条资源指向 resource_path。"""
+    """Set context.md to point at a probe target — as a GOVERNED canonical edit.
+
+    The governed model fail-stops on an unknown dirty working tree, so a
+    checkpoint's context snapshot must enter the same policy → transaction
+    pipeline (operator P0 #2). We therefore publish the context via
+    ``server.wf_save(context_snapshot=...)`` rather than writing the tracked
+    file out-of-band, which the kernel now rejects as RECOVERY_REQUIRED.
+    """
     md = (
         "# Context\n\n**Updated:** 2026-06-22 14:00\n\n"
         "## 工作上下文\n- 集成测试\n\n"
@@ -35,7 +42,8 @@ def _write_context(folder: str, resource_path: str, branch: str = "-") -> None:
         f"| target | {resource_path} | {branch} | 探测目标 |\n\n"
         "## 环境信息\n- test\n"
     )
-    (Path(folder) / "context.md").write_text(md, encoding="utf-8")
+    _run(server.wf_save(folder, summary="context snapshot",
+                        context_snapshot=md))
 
 
 @pytest.fixture

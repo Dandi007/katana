@@ -46,6 +46,13 @@ class GitRepo:
         return self._run(*args, **kw).stdout.decode("utf-8", "replace")
 
     # ── initialisation ────────────────────────────────────────────────
+    # Operational mirrors that live under .kb but are NOT canonical content:
+    # they are rebuildable from Git manifests and must never be enumerated,
+    # committed as content, or treated as a dirty pre-state (design §6.6).
+    _OPERATIONAL_EXCLUDES = (
+        ".kb/receipts.json", ".kb/projection.json", ".kb/epoch",
+    )
+
     def ensure_repo(self) -> None:
         inside = subprocess.run(
             ["git", "-C", self.root, "rev-parse", "--is-inside-work-tree"],
@@ -55,6 +62,35 @@ class GitRepo:
             self._run("init", "-q")
             self._run("config", "user.email", "kernel@katana.local")
             self._run("config", "user.name", "Katana Kernel")
+        self._ensure_operational_excludes()
+
+    def _ensure_operational_excludes(self) -> None:
+        """Keep operational .kb mirrors out of Git's untracked view.
+
+        Written to ``.git/info/exclude`` (local, never a canonical file) so
+        ``git status``/``ls-files --others`` ignore them; the tracked
+        ``.kb/catalog.json`` is still committed because publish stages it by
+        explicit blob, which ignore rules do not affect.
+        """
+        try:
+            git_dir = self._out("rev-parse", "--git-dir").strip()
+        except KernelError:
+            return
+        if not os.path.isabs(git_dir):
+            git_dir = os.path.join(self.root, git_dir)
+        info = os.path.join(git_dir, "info")
+        os.makedirs(info, exist_ok=True)
+        exclude = os.path.join(info, "exclude")
+        existing = ""
+        if os.path.exists(exclude):
+            with open(exclude, encoding="utf-8") as f:
+                existing = f.read()
+        want = [e for e in self._OPERATIONAL_EXCLUDES if e not in existing]
+        if want:
+            with open(exclude, "a", encoding="utf-8") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write("\n".join(want) + "\n")
 
     def branch_ref(self) -> str:
         """Name of the branch HEAD points at (even when unborn)."""
@@ -91,6 +127,87 @@ class GitRepo:
         if proc.returncode != 0:
             return None
         return proc.stdout
+
+    def object_type_at(self, commit: str, path: str) -> str | None:
+        """Return the Git object type at ``commit:path`` — "blob"/"tree"/None.
+
+        Reads come from an immutable Git snapshot, never the mutable working
+        tree (design §5.2/§6.1). A path is a canonical file iff it is a blob in
+        the pinned tree; symlinks and host paths cannot appear as tracked blobs,
+        so this also fails closed on symlink/host-path escape.
+        """
+        if not path:
+            return "tree"
+        proc = self._run("cat-file", "-t", f"{commit}:{path}", check=False)
+        if proc.returncode != 0:
+            return None
+        t = proc.stdout.decode("utf-8", "replace").strip()
+        return t or None
+
+    def list_tree_at(self, commit: str, path: str = "") -> list[tuple[str, str]]:
+        """Direct children of ``commit:path`` as (name, node_type).
+
+        ``node_type`` is "file" for blobs and "dir" for subtrees. Reads the
+        canonical tree only — no working-tree enumeration, so out-of-band or
+        reserved host entries are never surfaced (design §5.2/§7.2).
+        """
+        spec = f"{commit}:{path.rstrip('/')}/" if path else f"{commit}:"
+        proc = self._run("ls-tree", spec.rstrip("/") if not path else spec,
+                         check=False)
+        if proc.returncode != 0:
+            # Fall back to a non-trailing-slash spec for the requested subtree.
+            proc = self._run("ls-tree", f"{commit}:{path}", check=False)
+            if proc.returncode != 0:
+                return []
+        out: list[tuple[str, str]] = []
+        for line in proc.stdout.decode("utf-8", "replace").splitlines():
+            if not line.strip():
+                continue
+            meta, _, name = line.partition("\t")
+            fields = meta.split()
+            if len(fields) < 2:
+                continue
+            node_type = "dir" if fields[1] == "tree" else "file"
+            out.append((name, node_type))
+        return out
+
+    def list_tree_recursive(self, commit: str) -> list[str]:
+        """All blob paths under ``commit`` (repo-relative POSIX). Canonical."""
+        proc = self._run("ls-tree", "-r", "--name-only", commit, check=False)
+        if proc.returncode != 0:
+            return []
+        return [ln for ln in proc.stdout.decode("utf-8", "replace").splitlines()
+                if ln.strip()]
+
+    def export_head_to(self, dest: str) -> None:
+        """Populate ``dest`` with a private copy of the HEAD tree.
+
+        This is the writer-private staging seed: domain tools do their
+        projection (create/update/rename card, ingest page + backlink + log,
+        wf lifecycle) against this throwaway copy, so the real canonical working
+        tree is never touched before the ref CAS publish (design §5.5 step 5,
+        §6.6 "publish 前失败零可见"). Empty when there are no commits yet.
+        """
+        os.makedirs(dest, exist_ok=True)
+        if not self.has_commits():
+            return
+        import tarfile
+        import io
+        proc = self._run("archive", "--format=tar", "HEAD")
+        with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tf:
+            tf.extractall(dest)
+
+    def checkout_head(self) -> None:
+        """Force working tree + index to match HEAD (post-crash recovery).
+
+        Recalibrates the working tree to the canonical commit after a crash
+        between ref publish and materialize (design §6.6 "重启后 working
+        tree=HEAD").
+        """
+        if not self.has_commits():
+            return
+        self._run("read-tree", "HEAD")
+        self._run("checkout-index", "-a", "-f")
 
     # ── writer-private publish (design §6.3) ──────────────────────────
     def publish(self, *, expected_base: str | None, message: str,

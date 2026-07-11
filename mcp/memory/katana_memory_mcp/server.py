@@ -46,42 +46,50 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
     _catalog = Catalog(repo_root, id_prefix=ID_PREFIX)
     _vfs = GovernedVFS(_engine, _catalog, _composition.policy)
 
-    def _rel(abs_path: str) -> str:
-        return os.path.relpath(abs_path, repo_root).replace(os.sep, "/")
+    def _rel(abs_path: str, root: str) -> str:
+        return os.path.relpath(abs_path, root).replace(os.sep, "/")
 
-    def _commit(action: str, result: dict) -> dict:
-        """Route a domain store mutation through the governed pipeline.
+    def _staged(action: str, op):
+        """Run a Memory store mutation in writer-private staging, then publish.
 
-        ``store.*`` did the domain-specific projection into the working tree and
-        returned the touched paths + card id; here that post-state is compiled
-        into a MutationBatch and published through the SAME MemoryPolicy +
-        TransactionEngine as fs_* (design §4.4). Policy rejection or a CAS
-        conflict rolls the working tree back — no legacy direct-commit path.
+        ``op(staging_tenant_dir)`` performs the domain-specific projection
+        (create/update/delete/edit) against a private copy of HEAD — never the
+        canonical working tree (operator P0 #2; design §5.5 step 5, §6.6). The
+        resulting touched paths + card id are compiled into ONE MutationBatch
+        and published through the SAME MemoryPolicy + TransactionEngine as fs_*
+        (design §4.4). A mid-projection failure or policy rejection leaves zero
+        client-visible effect because only staging was touched.
         """
-        rels = [_rel(p) for p in result.pop("changed_paths")]
-        card_id = result["id"]
-        msg = f"chore(memory): [{tenant}] {action} {card_id} ({result['name']})"
-        writes = deletes = renames = None
-        ids = None
-        if action == "delete":
-            deletes = rels
-            ids = {rels[0]: card_id} if rels else None
-        elif len(rels) == 2:
-            renames = [(rels[0], rels[1])]
-            ids = {rels[1]: card_id}
-        else:
-            writes = rels
-            ids = {rels[0]: card_id} if rels else None
-        try:
-            res = _vfs.commit_materialized(
-                message=msg, writes=writes, deletes=deletes,
-                renames=renames, ids=ids)
-            result["git"] = {"committed": bool(res.commit_sha) and not res.no_change,
-                             "detail": res.commit_sha or "no-op",
-                             "commit_sha": res.commit_sha}
-        except KernelError as e:
-            raise ValueError(e.to_envelope()) from e
-        return result
+        with _vfs.staging() as stg:
+            stg_tenant = os.path.join(stg.root, tenant)
+            os.makedirs(stg_tenant, exist_ok=True)
+            result = op(stg_tenant)
+            rels = [_rel(p, stg.root) for p in result.pop("changed_paths")]
+            card_id = result["id"]
+            msg = (f"chore(memory): [{tenant}] {action} {card_id} "
+                   f"({result['name']})")
+            writes = deletes = renames = None
+            ids = None
+            if action == "delete":
+                deletes = rels
+                ids = {rels[0]: card_id} if rels else None
+            elif len(rels) == 2:
+                renames = [(rels[0], rels[1])]
+                ids = {rels[1]: card_id}
+            else:
+                writes = rels
+                ids = {rels[0]: card_id} if rels else None
+            try:
+                res = _vfs.commit_staged(
+                    stg, message=msg, writes=writes, deletes=deletes,
+                    renames=renames, ids=ids)
+                result["git"] = {
+                    "committed": bool(res.commit_sha) and not res.no_change,
+                    "detail": res.commit_sha or "no-op",
+                    "commit_sha": res.commit_sha}
+            except KernelError as e:
+                raise ValueError(e.to_envelope()) from e
+            return result
 
     def _scoped(path: str) -> str:
         return path if path == tenant or path.startswith(f"{tenant}/") \
@@ -124,7 +132,7 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
             body: 正文，必含 '## Fact' 与 '## How to Verify' 段。
             type: 可选分类 user|feedback|project|reference。
         """
-        return _commit("create", store.create_card(tenant_dir, name, description, body, type=type))
+        return _staged("create", lambda d: store.create_card(d, name, description, body, type=type))
 
     @m.tool()
     async def memory_update(id: str, name: str | None = None, description: str | None = None,
@@ -137,8 +145,8 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
             status: active|stale|deprecated（软删用 deprecated）。
             last_verified: YYYY-MM-DD；重核验后记得更新。
         """
-        return _commit("update", store.update_card(
-            tenant_dir, id, name=name, description=description, body=body,
+        return _staged("update", lambda d: store.update_card(
+            d, id, name=name, description=description, body=body,
             status=status, type=type, last_verified=last_verified))
 
     @m.tool()
@@ -148,7 +156,7 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
         Args:
             id: card id。
         """
-        return _commit("delete", store.delete_card(tenant_dir, id))
+        return _staged("delete", lambda d: store.delete_card(d, id))
 
     @m.tool()
     async def memory_read(id: str, offset: int | None = None, limit: int | None = None) -> dict:
@@ -181,8 +189,8 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
             new_string: 替换为的文本。
             replace_all: True 时替换全部命中。
         """
-        return _commit("edit", store.edit_card(
-            tenant_dir, id, old_string, new_string, replace_all=replace_all))
+        return _staged("edit", lambda d: store.edit_card(
+            d, id, old_string, new_string, replace_all=replace_all))
 
     # ── Governed Full VFS façade (fs_*) ──────────────────────────────────────
     @m.tool()

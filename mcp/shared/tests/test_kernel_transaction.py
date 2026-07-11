@@ -150,35 +150,39 @@ def test_receipt_carries_async_projection_status(engine):
     assert r.receipt["projection_status"]["fts"]["indexed_through_commit"] is None
 
 
-def test_materialized_projection_rolled_back_on_publish_failure(tmp_path, monkeypatch):
-    """A domain tool's already-written post-state is rolled back if publish fails.
+def test_staged_projection_leaves_no_visible_effect_on_publish_failure(tmp_path, monkeypatch):
+    """A domain tool's writer-private projection leaves zero visible effect on
+    publish failure (design §6.6, operator P0 #2).
 
-    This is the no-partial-visibility guarantee for the already_materialized
-    path used by the 19 domain tools (design §6.6)."""
+    Governed writers project into a private staging dir, never the canonical
+    working tree, so a failed publish needs no working-tree rollback: HEAD is
+    unchanged, the canonical tree is untouched and clean, and no partial file
+    ever appears."""
+    from katana_kb_mcp_shared.kernel.catalog import Catalog
+    from katana_kb_mcp_shared.kernel.facade import GovernedVFS
+
+    class _P:
+        domain = "test"; id_prefix = "t-"; policy_version = 1
+        def validate(self, batch):
+            return None
+
     eng = kernel.TransactionEngine(str(tmp_path), domain="test")
     eng.repo.ensure_repo()
-    eng.commit(_create("t-1", "a.md", b"hello\n"), message="create")
+    vfs = GovernedVFS(eng, Catalog(str(tmp_path), id_prefix="t-"), _P())
+    vfs.fs_create(virtual_path="a.md", content="hello\n")
     head = eng.repo.head()
-
-    # Simulate a domain tool that wrote the post-state to the working tree.
-    (tmp_path / "b.md").write_text("domain-written\n", encoding="utf-8")
-    b = MutationBatch(domain="test", already_materialized=True)
-    b.add(Change(op=Op.CREATE, resource_id="t-2", after_path="b.md",
-                 after_content=b"domain-written\n"))
 
     def boom(*a, **k):
         raise KernelError("COMMIT_FAILED", "simulated publish failure")
 
     monkeypatch.setattr(eng.repo, "publish", boom)
     with pytest.raises(KernelError):
-        # The engine restores touched paths for materialized batches on failure;
-        # emulate the facade's rollback contract directly here.
-        try:
-            eng.commit(b, message="doomed")
-        except KernelError:
-            eng.repo.restore_paths(head, ["b.md"])
-            eng.repo.sync_index()
-            raise
+        with vfs.staging() as stg:
+            # Domain tool writes the post-state into PRIVATE staging.
+            (__import__("pathlib").Path(stg.root) / "b.md").write_text(
+                "domain-written\n", encoding="utf-8")
+            vfs.commit_staged(stg, message="doomed", writes=["b.md"])
+
     assert eng.repo.head() == head
     assert not (tmp_path / "b.md").exists()
     assert not eng.repo.is_dirty()

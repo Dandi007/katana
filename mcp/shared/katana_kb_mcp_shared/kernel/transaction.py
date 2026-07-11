@@ -175,9 +175,10 @@ class TransactionEngine:
 
         base = self.repo.head()
 
-        # Unknown dirty tracked working tree/index is fail-stop (design §6.6),
-        # unless the caller deliberately projected the post-state itself.
-        if not batch.already_materialized and self.repo.is_dirty():
+        # Unknown dirty tracked working tree/index is fail-stop (design §6.6).
+        # Governed writers project into writer-private staging, never the real
+        # working tree, so a dirty canonical tree is always an unknown pre-state.
+        if self.repo.is_dirty():
             raise KernelError(
                 RECOVERY_REQUIRED,
                 "canonical working tree/index is dirty; refusing to publish",
@@ -221,8 +222,6 @@ class TransactionEngine:
                 expected_base=base, message=full_message,
                 writes=writes, deletes=deletes)
         except KernelError as e:
-            if batch.already_materialized:
-                self.repo.restore_paths(base, list(writes) + deletes)
             if e.code == "COMMIT_FAILED" and "advanced" in e.message:
                 raise KernelError(BASE_COMMIT_CONFLICT, e.message,
                                   current_commit=e.current_commit,

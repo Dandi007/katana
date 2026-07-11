@@ -100,25 +100,37 @@ def _guard(fn, *a, **k):
         raise ValueError(e.to_envelope()) from e
 
 
-def _govern(message: str, folder: str | None, names, extra_abs=None):
-    """Publish already-written WF artifacts through the governed pipeline.
+def _rel_to_root_of(root: str, path: str) -> str:
+    """Path relative to a given root (accepts absolute or relative)."""
+    if os.path.isabs(path):
+        return os.path.relpath(path, os.path.abspath(root)).replace(os.sep, "/")
+    return path.replace(os.sep, "/")
 
-    The lifecycle helpers (do_create/do_save/do_resume) and reindex do the
-    domain-specific projection into the working tree; this compiles the touched
-    files into ONE MutationBatch and publishes through the SAME WorkFolderPolicy
-    + TransactionEngine as fs_* (design §4.4, INV-5). There is no separate WF
-    write/commit chain. Only real files under the configured repo root are
-    published, so routing unit tests (which fake the lifecycle) are unaffected.
+
+def _rel_to_root(path: str) -> str:
+    """Path relative to the configured wf root (accepts absolute or relative)."""
+    root = os.path.abspath(_wf_root or ".")
+    if os.path.isabs(path):
+        return os.path.relpath(path, root).replace(os.sep, "/")
+    return path.replace(os.sep, "/")
+
+
+def _govern_staged(stg, message: str, staged_abs, extra_rel=None):
+    """Publish WF artifacts projected into writer-private staging.
+
+    The lifecycle helpers (do_create/do_save/do_resume) and reindex run their
+    domain projection against a private copy of HEAD (never the canonical
+    working tree; operator P0 #2), then hand the resulting staging-absolute
+    paths here. They are compiled into ONE MutationBatch and published through
+    the SAME WorkFolderPolicy + TransactionEngine as fs_* (design §4.4, INV-5).
+    A rejected mutation leaves zero client-visible effect. Only real files under
+    the staging root are published, so routing unit tests are unaffected.
     """
     if _vfs is None:
         return None
-    root = os.path.abspath(_vfs.repo_root)
-    abs_paths = list(extra_abs or [])
-    if folder:
-        for n in (names or []):
-            abs_paths.append(os.path.join(folder, n))
-    rels = []
-    for ap in abs_paths:
+    root = os.path.abspath(stg.root)
+    rels = list(extra_rel or [])
+    for ap in (staged_abs or []):
         ap = os.path.abspath(ap)
         if ap != root and not ap.startswith(root + os.sep):
             continue
@@ -129,7 +141,7 @@ def _govern(message: str, folder: str | None, names, extra_abs=None):
             rels.append(rel)
     if not rels:
         return None
-    return _guard(_vfs.commit_materialized, message=message, writes=rels)
+    return _guard(_vfs.commit_staged, stg, message=message, writes=rels)
 
 
 def _do_search(query: str, top_k: int, scope: str | None) -> list[dict]:
@@ -168,9 +180,17 @@ async def wf_create(topic: str) -> dict:
     Args:
         topic: 工作主题，用于生成 slug 和初始 goal 说明。
     """
-    result = _lifecycle.do_create(_wf_root or ".", topic, now_fn=_now)
-    _govern(f"feat(work-folder): create {result.get('path','')}",
-            result.get("path"), result.get("seeded"))
+    if _vfs is None:  # routing-only mode (no governed repo configured)
+        return _lifecycle.do_create(_wf_root or ".", topic, now_fn=_now)
+    with _vfs.staging() as stg:
+        result = _lifecycle.do_create(stg.root, topic, now_fn=_now)
+        folder = result.get("path")
+        staged_abs = ([os.path.join(folder, n)
+                       for n in (result.get("seeded") or [])] if folder else None)
+        rel = _rel_to_root_of(stg.root, folder) if folder else ""
+        _govern_staged(stg, f"feat(work-folder): create {rel}", staged_abs)
+    if result.get("path"):
+        result["path"] = os.path.join(os.path.abspath(_wf_root or "."), rel)
     return result
 
 
@@ -210,17 +230,28 @@ async def wf_save(
         golden_order_additions: 追加到 golden-order.md 的文字块（仅追加，不覆盖）。
         findings_addition:      追加到 findings.md 的文字块（仅追加，不覆盖）。
     """
-    result = _lifecycle.do_save(
-        _resolve_folder(folder),
-        now_fn=_now,
-        summary=summary,
-        context_snapshot=context_snapshot,
-        resume_fields=_safe_resume_fields(resume_fields),
-        golden_order_additions=golden_order_additions,
-        findings_addition=findings_addition,
-    )
-    _govern(f"chore(work-folder): save {result.get('folder','')}",
-            result.get("folder"), result.get("written"))
+    if _vfs is None:  # routing-only mode
+        return _lifecycle.do_save(
+            _resolve_folder(folder), now_fn=_now, summary=summary,
+            context_snapshot=context_snapshot,
+            resume_fields=_safe_resume_fields(resume_fields),
+            golden_order_additions=golden_order_additions,
+            findings_addition=findings_addition)
+    rel_folder = _rel_to_root(_resolve_folder(folder))
+    with _vfs.staging() as stg:
+        result = _lifecycle.do_save(
+            os.path.join(stg.root, rel_folder),
+            now_fn=_now,
+            summary=summary,
+            context_snapshot=context_snapshot,
+            resume_fields=_safe_resume_fields(resume_fields),
+            golden_order_additions=golden_order_additions,
+            findings_addition=findings_addition,
+        )
+        staged_abs = [os.path.join(stg.root, rel_folder, n)
+                      for n in (result.get("written") or [])]
+        _govern_staged(stg, f"chore(work-folder): save {rel_folder}", staged_abs)
+    result["folder"] = os.path.join(os.path.abspath(_wf_root or "."), rel_folder)
     return result
 
 
@@ -235,10 +266,20 @@ async def wf_resume(folder: str) -> dict:
     Args:
         folder: work-folder 路径（绝对或相对 work_folder_root）。
     """
-    result = _lifecycle.do_resume(_resolve_folder(folder), now_fn=_now)
-    if result.get("ok"):
-        _govern(f"chore(work-folder): resume {result.get('folder','')}",
-                result.get("folder"), ["progress.md", "_brief.md"])
+    if _vfs is None:  # routing-only mode
+        return _lifecycle.do_resume(_resolve_folder(folder), now_fn=_now)
+    rel_folder = _rel_to_root(_resolve_folder(folder))
+    with _vfs.staging() as stg:
+        result = _lifecycle.do_resume(os.path.join(stg.root, rel_folder),
+                                      now_fn=_now)
+        if result.get("ok"):
+            _govern_staged(
+                stg, f"chore(work-folder): resume {rel_folder}",
+                [os.path.join(stg.root, rel_folder, n)
+                 for n in ("progress.md", "_brief.md")])
+    if result.get("folder"):
+        result["folder"] = os.path.join(os.path.abspath(_wf_root or "."),
+                                        rel_folder)
     return result
 
 
@@ -252,10 +293,17 @@ async def wf_reindex(dry_run: bool = False) -> dict:
     Args:
         dry_run: True 时不写文件，返回 preview 字段含将生成的 INDEX 内容。
     """
-    result = _reindex.reindex(_wf_root or ".", dry_run=dry_run)
-    if not dry_run and result.get("index_path"):
-        _govern("chore(work-folder): reindex INDEX.md", None, None,
-                extra_abs=[result["index_path"]])
+    if dry_run or _vfs is None:
+        return _reindex.reindex(_wf_root or ".", dry_run=dry_run)
+    with _vfs.staging() as stg:
+        result = _reindex.reindex(stg.root, dry_run=False)
+        if result.get("index_path"):
+            _govern_staged(stg, "chore(work-folder): reindex INDEX.md", None,
+                           extra_rel=[_rel_to_root_of(stg.root,
+                                                      result["index_path"])])
+    if result.get("index_path"):
+        result["index_path"] = os.path.join(os.path.abspath(_wf_root or "."),
+                                             "INDEX.md")
     return result
 
 

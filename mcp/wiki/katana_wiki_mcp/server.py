@@ -61,25 +61,25 @@ def _require_vfs() -> GovernedVFS:
     return _vfs
 
 
-def _governed_commit(wiki_root: str, message: str, paths: list[str]) -> str:
-    """Publish already-written pages/backlinks/log as ONE governed batch.
+def _staged_commit(staging, message: str, paths: list[str]) -> str:
+    """Publish pages/backlinks/log projected into writer-private staging.
 
-    The domain tool (wiki_ingest_apply) projected the post-state into the
-    working tree; this compiles those paths into a single MutationBatch and
-    publishes through the SAME WikiPolicy + TransactionEngine as fs_* (design
-    §4.4, INV-5). Policy rejection rolls the working tree back — there is no
-    separate wiki write chain. Returns the new commit SHA (or current head on a
-    no-op, preserving the legacy idempotent contract).
+    ``wiki_ingest_apply`` runs its projection against a private copy of HEAD
+    (never the canonical working tree; operator P0 #2), then hands the touched
+    relative paths here. They are compiled into ONE MutationBatch and published
+    through the SAME WikiPolicy + TransactionEngine as fs_* (design §4.4,
+    INV-5). Policy rejection leaves zero client-visible effect (only staging was
+    written). Returns the new commit SHA (or current head on a no-op).
     """
     vfs = _require_vfs()
     import os as _os
     rels = []
     for p in paths:
-        ap = p if _os.path.isabs(p) else _os.path.join(wiki_root, p)
-        rel = _os.path.relpath(ap, wiki_root).replace(_os.sep, "/")
+        ap = p if _os.path.isabs(p) else _os.path.join(staging.root, p)
+        rel = _os.path.relpath(ap, staging.root).replace(_os.sep, "/")
         if _os.path.isfile(ap) and rel not in rels:
             rels.append(rel)
-    res = vfs.commit_materialized(message=message, writes=rels)
+    res = vfs.commit_staged(staging, message=message, writes=rels)
     return res.commit_sha or (vfs.engine.repo.head() or "")
 
 
@@ -142,12 +142,19 @@ async def wiki_ingest_plan(source_text: str) -> dict:
 async def wiki_ingest_apply(proposal: dict) -> dict:
     """入库第二步：server 校验不变量(缺 provenance/outlink/frontmatter 必拒,零落盘)→ 通过则写页+自动反链+log+commit。
     Args: proposal 见 wiki_ingest_plan 返回的 proposal_schema。返回 applied/rejected/commit。"""
-    return _ingest.apply(
-        proposal, _wiki_root or ".",
-        validate_fn=_inv.validate_page,
-        write_fn=_pages.write_page, backlink_fn=_pages.ensure_backlink,
-        log_fn=_pages.append_log, commit_fn=_governed_commit,
-    )
+    vfs = _require_vfs()
+    # Project the whole ingest (page write + backlink + log) into writer-private
+    # staging, then publish as ONE governed transaction (operator P0 #2). The
+    # canonical working tree is only touched by the engine's post-publish
+    # materialize, so a rejected ingest leaves zero visible effect.
+    with vfs.staging() as stg:
+        return _ingest.apply(
+            proposal, stg.root,
+            validate_fn=_inv.validate_page,
+            write_fn=_pages.write_page, backlink_fn=_pages.ensure_backlink,
+            log_fn=_pages.append_log,
+            commit_fn=lambda root, msg, paths: _staged_commit(stg, msg, paths),
+        )
 
 
 @mcp.tool()

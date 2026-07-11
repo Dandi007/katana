@@ -15,6 +15,11 @@ import katana_work_folder_mcp.server as server
 
 def _set_wf_root(path: str) -> None:
     server._wf_root = path
+    # Routing tests exercise the thin tool → lifecycle wiring only. Force
+    # routing-only mode (no governed repo) so the tool passes the resolved
+    # canonical path straight to the lifecycle helper; the governed staging
+    # path is covered by test_governed_pipeline / test_integration instead.
+    server._vfs = None
 
 
 # ---------------------------------------------------------------------------

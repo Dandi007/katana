@@ -14,8 +14,10 @@ edit.
 """
 from __future__ import annotations
 
-import glob as _glob
+import contextlib
 import os
+import shutil
+import tempfile
 
 from . import paths, vfs
 from .batch import Change, MutationBatch, Op
@@ -30,6 +32,58 @@ from .errors import (
 from .transaction import TransactionEngine
 
 
+class _Staging:
+    """A writer-private working directory seeded from a base commit."""
+
+    def __init__(self, root: str, base: str | None) -> None:
+        self.root = root
+        self.base = base
+
+    def abspath(self, rel: str) -> str:
+        return os.path.join(self.root, rel)
+
+    def read(self, rel: str) -> bytes | None:
+        p = self.abspath(rel)
+        if not os.path.isfile(p):
+            return None
+        with open(p, "rb") as f:
+            return f.read()
+
+
+def _glob_match(pattern: str, rel: str, fnmatch) -> bool:
+    """Match a repo-relative path against a confined glob pattern.
+
+    ``**`` matches across path separators (recursive); a single ``*`` matches
+    within one segment only, mirroring POSIX-style globs but rooted inside the
+    repo tree so nothing outside can ever match.
+    """
+    if "**" in pattern:
+        # Translate ** to a cross-separator wildcard, * to within-segment.
+        import re
+        parts = []
+        i = 0
+        while i < len(pattern):
+            if pattern[i:i + 2] == "**":
+                parts.append(".*")
+                i += 2
+                if i < len(pattern) and pattern[i] == "/":
+                    i += 1
+            elif pattern[i] == "*":
+                parts.append("[^/]*")
+                i += 1
+            elif pattern[i] == "?":
+                parts.append("[^/]")
+                i += 1
+            else:
+                parts.append(re.escape(pattern[i]))
+                i += 1
+        return re.fullmatch("".join(parts), rel) is not None
+    if "/" in pattern:
+        return fnmatch.fnmatch(rel, pattern) and rel.count("/") == pattern.count("/")
+    # Bare pattern matches only top-level files (no separators).
+    return "/" not in rel and fnmatch.fnmatch(rel, pattern)
+
+
 class GovernedVFS:
     def __init__(self, engine: TransactionEngine, catalog: Catalog, policy) -> None:
         self.engine = engine
@@ -41,12 +95,23 @@ class GovernedVFS:
     def _abs(self, rel: str) -> str:
         return os.path.join(self.repo_root, rel)
 
-    def _read_bytes(self, rel: str) -> bytes | None:
-        p = self._abs(rel)
-        if not os.path.isfile(p):
+    def _snapshot(self) -> str | None:
+        """The immutable commit reads/discovery are pinned to (design §6.1)."""
+        return self.engine.repo.head()
+
+    def _read_bytes(self, rel: str, snapshot: str | None = None) -> bytes | None:
+        """Read canonical bytes from a pinned Git snapshot — never the working
+        tree (design §5.2/§6.1). An out-of-band edit to a tracked file is
+        therefore invisible; only committed content is client-visible. A path
+        that is not a blob in the snapshot (missing, a tree, or a symlink) reads
+        as absent, which also fails closed on symlink/host-path escape.
+        """
+        snap = snapshot if snapshot is not None else self._snapshot()
+        if snap is None:
             return None
-        with open(p, "rb") as f:
-            return f.read()
+        if self.engine.repo.object_type_at(snap, rel) != "blob":
+            return None
+        return self.engine.repo.read_blob_at(snap, rel)
 
     def _resolve_target(self, *, resource_id: str | None,
                         virtual_path: str | None,
@@ -80,9 +145,18 @@ class GovernedVFS:
         raise KernelError(POLICY_VIOLATION,
                           "either resource_id or virtual_path is required")
 
-    def _descriptor(self, rid: str | None, rel: str, raw: bytes) -> vfs.NodeDescriptor:
+    def _descriptor(self, rid: str | None, rel: str, raw: bytes,
+                    snapshot: str | None = None) -> vfs.NodeDescriptor:
         return vfs.describe(resource_id=rid or "", virtual_path=rel, content=raw,
-                            snapshot_commit=self.engine.repo.head())
+                            snapshot_commit=snapshot if snapshot is not None
+                            else self._snapshot())
+
+    def _exists(self, rel: str, snapshot: str | None = None) -> bool:
+        """Canonical existence in the pinned tree (blob or subtree)."""
+        snap = snapshot if snapshot is not None else self._snapshot()
+        if snap is None:
+            return False
+        return self.engine.repo.object_type_at(snap, rel) is not None
 
     def _commit(self, batch: MutationBatch, message: str):
         """Validate + publish, folding any pending catalog change atomically.
@@ -109,55 +183,90 @@ class GovernedVFS:
     # ── discovery / read ──────────────────────────────────────────────
     def fs_stat(self, *, resource_id: str | None = None,
                 virtual_path: str | None = None) -> dict:
+        snap = self._snapshot()
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
-        raw = self._read_bytes(rel)
+        otype = self.engine.repo.object_type_at(snap, rel) if snap else None
+        if otype == "tree" or (not rel):
+            return vfs.describe(resource_id=rid or "", virtual_path=rel,
+                                content=b"", snapshot_commit=snap,
+                                node_type="dir").to_dict()
+        raw = self._read_bytes(rel, snap)
         if raw is None:
-            if os.path.isdir(self._abs(rel)):
-                return vfs.describe(resource_id=rid or "", virtual_path=rel,
-                                    content=b"", snapshot_commit=self.engine.repo.head(),
-                                    node_type="dir").to_dict()
             raise KernelError(NOT_FOUND, f"no such node: {rel}",
                               virtual_path=rel)
-        return self._descriptor(rid, rel, raw).to_dict()
+        return self._descriptor(rid, rel, raw, snap).to_dict()
 
     def fs_resolve(self, virtual_path: str) -> dict:
         rel = paths.confine(virtual_path)
         rid = self.catalog.id_of(rel)
         return {"resource_id": rid, "virtual_path": rel,
-                "exists": os.path.exists(self._abs(rel))}
+                "exists": self._exists(rel)}
 
     def fs_list(self, virtual_path: str = "") -> list[dict]:
-        base = paths.normalize(virtual_path) if virtual_path else ""
-        abs_base = self._abs(base) if base else self.repo_root
-        if not os.path.isdir(abs_base):
+        # Confine non-empty inputs: ordinary traffic may list the repo root
+        # ("") but never a reserved namespace like .kb/.git (design §7.2).
+        base = paths.confine(virtual_path) if virtual_path else ""
+        snap = self._snapshot()
+        if snap is None:
+            return []
+        if base and self.engine.repo.object_type_at(snap, base) != "tree":
             raise KernelError(NOT_FOUND, f"not a directory: {virtual_path}",
                               virtual_path=virtual_path)
         out: list[dict] = []
-        for name in sorted(os.listdir(abs_base)):
+        for name, node_type in sorted(self.engine.repo.list_tree_at(snap, base)):
             rel = f"{base}/{name}" if base else name
             if paths.is_reserved(rel):
                 continue
-            abs_p = os.path.join(abs_base, name)
-            if os.path.isdir(abs_p):
-                out.append({"virtual_path": rel, "node_type": "dir",
-                            "resource_id": None})
+            if node_type == "dir":
+                out.append(vfs.describe(
+                    resource_id="", virtual_path=rel, content=b"",
+                    snapshot_commit=snap, node_type="dir").to_dict())
             else:
-                out.append({"virtual_path": rel, "node_type": "file",
-                            "resource_id": self.catalog.id_of(rel)})
+                raw = self._read_bytes(rel, snap) or b""
+                out.append(self._descriptor(self.catalog.id_of(rel), rel,
+                                            raw, snap).to_dict())
         return out
 
-    def fs_glob(self, pattern: str) -> list[str]:
-        matches = _glob.glob(os.path.join(self.repo_root, pattern),
-                             recursive=True)
-        rels = []
-        for m in matches:
-            rel = os.path.relpath(m, self.repo_root)
-            if paths.is_reserved(rel.replace(os.sep, "/")):
+    def fs_glob(self, pattern: str) -> list[dict]:
+        """Confined glob over the canonical tree (design §5.2, §7.2).
+
+        The pattern is validated as a safe repo-relative glob (no absolute
+        path, ``..``, backslash, NUL or reserved prefix) and matched against the
+        blob paths of the pinned snapshot — never the host filesystem, so
+        ``../*`` and host paths cannot leak. Returns uniform node descriptors.
+        """
+        self._check_glob_pattern(pattern)
+        snap = self._snapshot()
+        if snap is None:
+            return []
+        import fnmatch
+        out: list[dict] = []
+        for rel in sorted(self.engine.repo.list_tree_recursive(snap)):
+            if paths.is_reserved(rel):
                 continue
-            if os.path.isfile(m):
-                rels.append(rel.replace(os.sep, "/"))
-        return sorted(rels)
+            if _glob_match(pattern, rel, fnmatch):
+                raw = self._read_bytes(rel, snap) or b""
+                out.append(self._descriptor(self.catalog.id_of(rel), rel,
+                                            raw, snap).to_dict())
+        return out
+
+    @staticmethod
+    def _check_glob_pattern(pattern: str) -> None:
+        if not isinstance(pattern, str) or pattern == "":
+            raise KernelError(INVALID_PATH, "empty glob pattern")
+        if "\x00" in pattern:
+            raise KernelError(INVALID_PATH, "NUL byte in glob pattern")
+        if "\\" in pattern:
+            raise KernelError(INVALID_PATH, "backslash in glob pattern")
+        if pattern.startswith("/"):
+            raise KernelError(INVALID_PATH, "absolute glob pattern")
+        for seg in pattern.split("/"):
+            if seg == "..":
+                raise KernelError(INVALID_PATH, "parent traversal in glob")
+        top = pattern.split("/", 1)[0].split("*", 1)[0]
+        if top in paths.RESERVED_PREFIXES:
+            raise KernelError(INVALID_PATH, "reserved namespace glob")
 
     def fs_changes(self, *, since: str | None = None) -> dict:
         """Discovery of committed changes since a snapshot commit (design §5.2).
@@ -217,7 +326,7 @@ class GovernedVFS:
     def fs_create(self, *, virtual_path: str, content: str,
                   mutation_id: str | None = None) -> dict:
         rel = paths.confine(virtual_path)
-        if os.path.exists(self._abs(rel)):
+        if self._exists(rel):
             raise KernelError(POLICY_VIOLATION, f"path exists: {rel}",
                               virtual_path=rel)
         rid = self.catalog.mint(rel)
@@ -234,7 +343,7 @@ class GovernedVFS:
                  mutation_id: str | None = None) -> dict:
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
-        if not os.path.exists(self._abs(rel)):
+        if not self._exists(rel):
             raise KernelError(NOT_FOUND,
                               "fs_write does not implicitly create; use fs_create",
                               virtual_path=rel)
@@ -294,7 +403,7 @@ class GovernedVFS:
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
         dst = paths.confine(new_path)
-        if os.path.exists(self._abs(dst)):
+        if self._exists(dst):
             raise KernelError(POLICY_VIOLATION, f"destination exists: {dst}",
                               virtual_path=dst)
         # Rebind catalog IN the same transaction (INV-6): rename keeps the id.
@@ -315,7 +424,7 @@ class GovernedVFS:
         raw = self._read_bytes(rel)
         if raw is None:
             raise KernelError(NOT_FOUND, f"no such file: {rel}", virtual_path=rel)
-        if os.path.exists(self._abs(dst)):
+        if self._exists(dst):
             raise KernelError(POLICY_VIOLATION, f"destination exists: {dst}",
                               virtual_path=dst)
         new_rid = self.catalog.mint(dst)  # copy mints a NEW id
@@ -330,7 +439,7 @@ class GovernedVFS:
                   mutation_id: str | None = None) -> dict:
         rel, rid = self._resolve_target(resource_id=resource_id,
                                         virtual_path=virtual_path)
-        if not os.path.exists(self._abs(rel)):
+        if not self._exists(rel):
             raise KernelError(NOT_FOUND, f"no such file: {rel}", virtual_path=rel)
         # Tombstone IN the same transaction (INV-6): id never reused.
         if rid:
@@ -367,61 +476,76 @@ class GovernedVFS:
         return {"commit_sha": res.commit_sha, "no_change": res.no_change,
                 "changes": [c.to_manifest_entry() for c in batch.changes]}
 
-    # ── governed domain-tool entry (design §4.4, INV-5) ──────────────
-    def commit_materialized(self, *, message: str,
-                            writes: list[str] | None = None,
-                            deletes: list[str] | None = None,
-                            renames: list[tuple[str, str]] | None = None,
-                            ids: dict | None = None,
-                            tombstones: list[str] | None = None,
-                            mutation_id: str | None = None,
-                            request_hash: str | None = None,
-                            expected_base_commit: str | None = None):
-        """Publish a post-state a domain tool already wrote to the working tree.
+    # ── writer-private staging for domain tools (design §5.5 step 5) ──
+    @contextlib.contextmanager
+    def staging(self):
+        """Yield a writer-private working directory seeded from HEAD.
 
-        The 19 domain tools do their domain-specific planning/projection in
-        ``store``/``_ingest``/``_lifecycle`` helpers, then hand the resulting
-        working-tree paths here. This compiles them into ONE MutationBatch and
-        runs the SAME policy → transaction/manifest/receipt/CAS pipeline as
-        ``fs_*`` (design §4.4: "两组入口都编译为同一种 MutationBatch"). There is
-        no independent domain write chain (INV-5). On any rejection the working
-        tree and identity catalog are rolled back to the base commit, so a
-        failed domain mutation leaves zero client-visible effect (design §6.6).
+        Domain tools (Memory store, Wiki ingest, WF lifecycle) run their
+        projection against this private copy instead of the real canonical
+        working tree, so a mid-projection failure or a rejected policy check
+        leaves ZERO client-visible effect and never dirties the canonical tree
+        (operator P0 #2; design §6.6). The caller then hands the resulting
+        relative paths to :meth:`commit_staged`, which reads the projected bytes
+        from the staging dir and publishes them via the same CAS pipeline.
+        """
+        base = self._snapshot()
+        d = tempfile.mkdtemp(prefix="kb-staging-")
+        try:
+            self.engine.repo.export_head_to(d)
+            yield _Staging(d, base)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
-        ``writes``/``deletes`` are repo-relative paths currently present/absent
-        on disk; ``renames`` are (old_rel, new_rel) pairs; ``ids`` maps a path
-        to a caller-supplied resource_id (e.g. a Memory ``m-*`` card id) that is
-        bound in the catalog atomically with the commit.
+    def commit_staged(self, staging, *, message: str,
+                      writes: list[str] | None = None,
+                      deletes: list[str] | None = None,
+                      renames: list[tuple[str, str]] | None = None,
+                      ids: dict | None = None,
+                      tombstones: list[str] | None = None,
+                      mutation_id: str | None = None,
+                      request_hash: str | None = None,
+                      expected_base_commit: str | None = None):
+        """Publish a post-state projected into writer-private staging.
+
+        Reads the projected bytes from the staging dir (never the canonical
+        working tree), compiles them into ONE MutationBatch and runs the SAME
+        policy → transaction/manifest/receipt/CAS pipeline as ``fs_*`` (design
+        §4.4, INV-5). The canonical working tree is only written by the engine's
+        post-publish materialize step, so nothing is visible before the ref CAS
+        succeeds and a rejection needs no working-tree rollback.
         """
         writes = list(writes or [])
         deletes = list(deletes or [])
         renames = list(renames or [])
         ids = dict(ids or {})
-        base = self.engine.repo.head()
-        touched: list[str] = []
+        base = staging.base
 
-        batch = MutationBatch(domain=self.engine.domain, mutation_id=mutation_id,
-                              request_hash=request_hash,
-                              expected_base_commit=expected_base_commit,
-                              already_materialized=True)
+        batch = MutationBatch(
+            domain=self.engine.domain, mutation_id=mutation_id,
+            request_hash=request_hash,
+            expected_base_commit=expected_base_commit
+            if expected_base_commit is not None else base)
 
         for old_rel, new_rel in renames:
-            raw = self._read_bytes(new_rel) or b""
-            rid = ids.get(new_rel) or self.catalog.id_of(old_rel) or self.catalog.id_of(new_rel)
+            raw = staging.read(new_rel) or b""
+            rid = (ids.get(new_rel) or self.catalog.id_of(old_rel)
+                   or self.catalog.id_of(new_rel))
             before = self.engine.repo.read_blob_at(base, old_rel) if base else None
             if rid:
                 self.catalog.rebind(rid, new_rel)
             batch.add(Change(op=Op.RENAME, resource_id=rid or "",
                              before_path=old_rel, after_path=new_rel,
-                             after_content=raw, before_content=before))
-            touched += [old_rel, new_rel]
+                             after_content=raw, before_content=before,
+                             after_hash=vfs.identity.content_hash(raw)))
 
         for rel in writes:
-            raw = self._read_bytes(rel)
+            raw = staging.read(rel)
             if raw is None:
                 continue
             rid = ids.get(rel) or self.catalog.id_of(rel)
-            existed = base is not None and                 self.engine.repo.read_blob_at(base, rel) is not None
+            existed = base is not None and \
+                self.engine.repo.object_type_at(base, rel) == "blob"
             if rid is None and not existed:
                 rid = self.catalog.mint(rel)
             elif rid is not None:
@@ -431,7 +555,6 @@ class GovernedVFS:
             batch.add(Change(op=op, resource_id=rid or "", after_path=rel,
                              after_content=raw, before_content=before,
                              after_hash=vfs.identity.content_hash(raw)))
-            touched.append(rel)
 
         for rel in deletes:
             rid = ids.get(rel) or self.catalog.id_of(rel)
@@ -439,7 +562,6 @@ class GovernedVFS:
                 self.catalog.tombstone(rid)
             batch.add(Change(op=Op.DELETE, resource_id=rid or "",
                              before_path=rel))
-            touched.append(rel)
 
         for tid in (tombstones or []):
             self.catalog.tombstone(tid)
@@ -451,9 +573,6 @@ class GovernedVFS:
             self.policy.validate(batch)
             res = self.engine.commit(batch, message=message)
         except Exception:
-            # Roll working tree + catalog back to base: zero visible effect.
-            self.engine.repo.restore_paths(base, touched)
-            self.engine.repo.sync_index()
             self.catalog.reload()
             raise
         if res.no_change:

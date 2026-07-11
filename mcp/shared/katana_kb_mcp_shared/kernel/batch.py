@@ -71,10 +71,6 @@ class MutationBatch:
     # Maps a reserved-namespace path -> bytes (or None to delete). Never policy-
     # validated as domain content and never listed in manifest changes[].
     reserved: dict = field(default_factory=dict)
-    # True when a domain tool already projected the post-state into the working
-    # tree; the engine then validates+publishes rather than re-projecting.
-    already_materialized: bool = False
-
     def add(self, change: Change) -> "MutationBatch":
         self.changes.append(change)
         return self
