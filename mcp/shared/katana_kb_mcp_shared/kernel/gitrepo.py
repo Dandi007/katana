@@ -51,6 +51,7 @@ class GitRepo:
     # committed as content, or treated as a dirty pre-state (design §6.6).
     _OPERATIONAL_EXCLUDES = (
         ".kb/receipts.json", ".kb/projection.json", ".kb/epoch",
+        ".kb/query-gaps.log",
     )
 
     def ensure_repo(self) -> None:

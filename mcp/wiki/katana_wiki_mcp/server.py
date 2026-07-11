@@ -83,6 +83,29 @@ def _staged_commit(staging, message: str, paths: list[str]) -> str:
     return res.commit_sha or (vfs.engine.repo.head() or "")
 
 
+def _append_gap_event(wiki_root: str, line: str) -> None:
+    """Append a cold-query coverage gap to the reserved operational sink.
+
+    This is an operational event, not canonical content: it lives under the
+    git-excluded ``.kb/query-gaps.log`` so it never enters a MutationBatch,
+    never dirties the working tree, and never requires a commit (operator P0
+    #3). Governed ingest (wiki_ingest_apply) is the only path that mutates
+    canonical wiki content.
+    """
+    import os as _os
+    # Register the operational exclude so the sink never appears as untracked.
+    if _vfs is not None:
+        try:
+            _vfs.engine.repo._ensure_operational_excludes()
+        except Exception:
+            pass
+    kb = _os.path.join(wiki_root, ".kb")
+    _os.makedirs(kb, exist_ok=True)
+    entry = line if line.endswith("\n") else line + "\n"
+    with open(_os.path.join(kb, "query-gaps.log"), "a", encoding="utf-8") as f:
+        f.write(entry)
+
+
 def _guard(fn, *a, **k):
     try:
         return fn(*a, **k)
@@ -123,10 +146,15 @@ async def wiki_query(question: str, top_k: int = 10) -> dict:
         question: 问题文本。
         top_k: 候选上限，默认 10。
     """
+    # Cold-query gap logging is a NON-canonical operational event (operator
+    # P0 #3): it records a coverage gap for later governed ingest but must not
+    # mutate canonical content or dirty the working tree. It is appended to the
+    # git-excluded reserved operational sink, so a cold query leaves
+    # `git status --porcelain` clean and bypasses no governance.
     return _query._do_query(
         question, _scope, _wiki_root or ".", top_k,
         search_fn=vault_search.search,
-        log_fn=_pages.append_log,
+        log_fn=_append_gap_event,
         now_fn=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
     )
 
