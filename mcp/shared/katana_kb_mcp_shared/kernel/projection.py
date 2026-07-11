@@ -124,6 +124,21 @@ class ProjectionTracker:
         return {"pushed": None if fail else entry.commit_sha,
                 "pending": sum(1 for e in self._state.push_queue if not e.pushed)}
 
+    def mark_pushed_through(self, head: str, repo) -> dict:
+        """Mark every pending commit that is an ancestor of ``head`` as pushed.
+
+        A single fast-forward push covers a coalesced range of pending commits
+        (design §6.7); each such commit is idempotently marked pushed.
+        """
+        for e in self._state.push_queue:
+            if e.pushed:
+                continue
+            if e.commit_sha == head or repo.is_ancestor(e.commit_sha, head):
+                e.pushed = True
+                e.last_error = None
+        self._save()
+        return {"pending": sum(1 for e in self._state.push_queue if not e.pushed)}
+
     def apply_projection(self, name: str, commit_sha: str, *,
                          fail: bool = False) -> dict:
         """Advance one projection checkpoint to ``commit_sha`` (or record error).

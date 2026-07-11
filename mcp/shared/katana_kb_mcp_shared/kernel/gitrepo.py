@@ -324,6 +324,58 @@ class GitRepo:
                 with open(target, "wb") as f:
                     f.write(blob)
 
+    # ── async remote push (design §6.7, INV-9) ───────────────────────
+    def remote_head(self, remote: str) -> str | None:
+        """The remote branch tip after a fetch, or None if absent/unreachable."""
+        branch = self.branch_ref().rsplit("/", 1)[-1] or "master"
+        fetch = self._run("fetch", remote, branch, check=False)
+        if fetch.returncode != 0:
+            return None
+        proc = self._run("rev-parse", "--verify", "-q",
+                         f"{remote}/{branch}", check=False)
+        sha = proc.stdout.decode("utf-8", "replace").strip()
+        return sha or None
+
+    def is_ancestor(self, maybe_ancestor: str, descendant: str) -> bool:
+        proc = self._run("merge-base", "--is-ancestor",
+                         maybe_ancestor, descendant, check=False)
+        return proc.returncode == 0
+
+    def push_fast_forward(self, remote: str) -> dict:
+        """Fast-forward-only push to a configured remote (design §6.7).
+
+        Fetches remote ancestry first, then only pushes when local canonical
+        head is a descendant of the remote head. If the remote is unreachable
+        the attempt is retryable; if the remote has diverged (its head is not an
+        ancestor of local) the push FAILS CLOSED with REMOTE_DIVERGED — never an
+        automatic merge/rebase/force-push (INV-9).
+        """
+        head = self.head()
+        if head is None:
+            return {"pushed": None, "status": "nothing_to_push"}
+        branch = self.branch_ref().rsplit("/", 1)[-1] or "master"
+        remote_head = self.remote_head(remote)
+        if remote_head is not None:
+            if remote_head == head:
+                return {"pushed": head, "status": "already_synced"}
+            if not self.is_ancestor(remote_head, head):
+                raise KernelError(
+                    "REMOTE_DIVERGED",
+                    f"remote {remote} head is not an ancestor of local head; "
+                    "refusing automatic merge/rebase/force-push",
+                    current_commit=head)
+        proc = self._run("push", remote, f"{branch}:{branch}", check=False)
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", "replace")
+            if "non-fast-forward" in err or "fetch first" in err:
+                raise KernelError("REMOTE_DIVERGED",
+                                  f"remote {remote} diverged: {err.strip()}",
+                                  current_commit=head)
+            raise KernelError("COMMIT_FAILED",
+                              f"push to {remote} failed: {err.strip()}",
+                              current_commit=head)
+        return {"pushed": head, "status": "synced"}
+
     def first_parent_commits(self, limit: int = 200) -> list[str]:
         if not self.has_commits():
             return []

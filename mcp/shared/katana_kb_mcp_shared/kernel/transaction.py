@@ -278,6 +278,19 @@ class TransactionEngine:
         """Freshness/checkpoint snapshot for operate-scope status tools."""
         return self._tracker().status(self.repo.head())
 
+    def push_remote(self, remote: str) -> dict:
+        """Drain the push backlog to a configured Git remote (design §6.7).
+
+        Fast-forward only; a diverged remote fails closed with REMOTE_DIVERGED
+        and pauses further pushes (no automatic merge/rebase/force-push). Marks
+        every pending commit up to the pushed head as synced in the tracker.
+        """
+        result = self.repo.push_fast_forward(remote)
+        pushed = result.get("pushed")
+        if pushed and result.get("status") in ("synced", "already_synced"):
+            self._tracker().mark_pushed_through(pushed, self.repo)
+        return result
+
     # ── startup reconciliation (design §6.1, §6.6) ────────────────────
     def reconcile(self) -> dict:
         """Forward-recover after a crash (design §6.6, operator P0 #4).
