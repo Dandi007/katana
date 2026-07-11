@@ -9,7 +9,14 @@
 #   - 新增 test_governed_pipeline.py（三域各一份，证明 domain tools 与 fs_* 进入
 #     同一 policy→MutationBatch→transaction/manifest 管线，无 raw bypass）；
 #   - 新增 test_kernel_durability.py / test_projection.py（writer-private staging、
-#     dirty-tree fail-stop、catalog 原子提交、push/projection checkpoint/freshness）。
+#     dirty-tree fail-stop、catalog 原子提交、push/projection checkpoint/freshness）；
+#   - rework 追加：test_kernel_confinement.py（canonical-tree read/discovery、
+#     fs_list/fs_glob confinement、fs_batch.from_path、symlink read）、
+#     test_post_cas_recovery.py（post-CAS crash forward-recovery）、
+#     test_remote_push.py（真实 bare remote fast-forward / divergence fail-closed）、
+#     memory test_multi_tenant / test_identity_invariants / test_rpc_cas_idempotency、
+#     wiki test_query_gap_governed，以及三域 fs_* 上的 domain-invariant 断言。
+#     domain tools 改为 writer-private staging，不再先写真实 working tree。
 # 用 --import-mode=importlib 避开四包同名 `tests` 包的 collection 冲突。
 # 用法：PYTHON=/path/to/venv/bin/python bash mcp/run-tests.sh [pytest 额外参数]
 set -euo pipefail
