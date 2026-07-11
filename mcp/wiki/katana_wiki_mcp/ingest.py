@@ -128,7 +128,9 @@ def apply(
         write_fn: pages.write_page 兼容签名 (path, fm, body) -> None
         backlink_fn: pages.ensure_backlink 兼容签名 (path, title) -> bool
         log_fn: pages.append_log 兼容签名 (wiki_root, line) -> None
-        commit_fn: pages.git_commit 兼容签名 (wiki_root, message, paths) -> str
+        commit_fn: 治理提交器 (wiki_root, message, paths) -> sha；把已写入工作树的
+                   页/反链/log 作为单个 MutationBatch 经 WikiPolicy + TransactionEngine
+                   发布（design §4.4，无独立写链）。
         require_summary: 是否要求摘要（传给 validate_fn）。
         require_sources: 是否要求 frontmatter sources（传给 validate_fn）。
 
@@ -172,7 +174,11 @@ def apply(
 
     log_fn(wiki_root, log_line)
 
-    # Collect all paths for commit (new pages + back-updated pages + log.md)
+    # Collect all paths for commit (new pages + back-updated pages + log.md).
+    # commit_fn publishes them as ONE governed MutationBatch through the same
+    # WikiPolicy + TransactionEngine pipeline as fs_* (design §4.4); page write
+    # + backlink + log land in a single all-or-nothing transaction. If policy
+    # rejects, commit_fn rolls the working tree back (zero visible effect).
     commit_paths = written + backlinked + ["log.md"]
     sha = commit_fn(wiki_root, "wiki: ingest", commit_paths)
 

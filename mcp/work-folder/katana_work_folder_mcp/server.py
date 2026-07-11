@@ -13,8 +13,13 @@ import os
 from fastmcp import FastMCP
 
 from katana_kb_mcp_shared import config, vault_search
+from katana_kb_mcp_shared.kernel import (
+    Catalog, GovernedVFS, KernelError, TransactionEngine,
+)
+from katana_kb_mcp_shared.kernel.policy import AppComposition
 from katana_work_folder_mcp import lifecycle as _lifecycle
 from katana_work_folder_mcp import reindex as _reindex
+from katana_work_folder_mcp.policy import ID_PREFIX, WorkFolderPolicy
 
 mcp = FastMCP(
     "katana-work-folder-mcp",
@@ -26,6 +31,7 @@ mcp = FastMCP(
 
 _scope: str | None = None
 _wf_root: str | None = None
+_vfs: GovernedVFS | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -69,9 +75,73 @@ def compute_scope(work_folder_path: str, kb_root: str) -> str | None:
 
 
 def configure(work_folder_path: str, kb_root: str) -> None:
-    global _scope, _wf_root
+    global _scope, _wf_root, _vfs
     _scope = compute_scope(work_folder_path, kb_root)
     _wf_root = work_folder_path
+    # Governed Full VFS composition root (design §4.2/§5.2): fs_* shares the same
+    # policy → transaction pipeline as the domain tools; no raw bypass (INV-10).
+    composition = AppComposition(WorkFolderPolicy())
+    engine = TransactionEngine(work_folder_path, domain="work-folder",
+                               policy_version=composition.policy.policy_version)
+    catalog = Catalog(work_folder_path, id_prefix=ID_PREFIX)
+    _vfs = GovernedVFS(engine, catalog, composition.policy)
+
+
+def _require_vfs() -> GovernedVFS:
+    if _vfs is None:
+        raise ValueError("work-folder VFS not configured; call configure() first")
+    return _vfs
+
+
+def _guard(fn, *a, **k):
+    try:
+        return fn(*a, **k)
+    except KernelError as e:
+        raise ValueError(e.to_envelope()) from e
+
+
+def _rel_to_root_of(root: str, path: str) -> str:
+    """Path relative to a given root (accepts absolute or relative)."""
+    if os.path.isabs(path):
+        return os.path.relpath(path, os.path.abspath(root)).replace(os.sep, "/")
+    return path.replace(os.sep, "/")
+
+
+def _rel_to_root(path: str) -> str:
+    """Path relative to the configured wf root (accepts absolute or relative)."""
+    root = os.path.abspath(_wf_root or ".")
+    if os.path.isabs(path):
+        return os.path.relpath(path, root).replace(os.sep, "/")
+    return path.replace(os.sep, "/")
+
+
+def _govern_staged(stg, message: str, staged_abs, extra_rel=None):
+    """Publish WF artifacts projected into writer-private staging.
+
+    The lifecycle helpers (do_create/do_save/do_resume) and reindex run their
+    domain projection against a private copy of HEAD (never the canonical
+    working tree; operator P0 #2), then hand the resulting staging-absolute
+    paths here. They are compiled into ONE MutationBatch and published through
+    the SAME WorkFolderPolicy + TransactionEngine as fs_* (design §4.4, INV-5).
+    A rejected mutation leaves zero client-visible effect. Only real files under
+    the staging root are published, so routing unit tests are unaffected.
+    """
+    if _vfs is None:
+        return None
+    root = os.path.abspath(stg.root)
+    rels = list(extra_rel or [])
+    for ap in (staged_abs or []):
+        ap = os.path.abspath(ap)
+        if ap != root and not ap.startswith(root + os.sep):
+            continue
+        if not os.path.isfile(ap):
+            continue
+        rel = os.path.relpath(ap, root).replace(os.sep, "/")
+        if rel not in rels:
+            rels.append(rel)
+    if not rels:
+        return None
+    return _guard(_vfs.commit_staged, stg, message=message, writes=rels)
 
 
 def _do_search(query: str, top_k: int, scope: str | None) -> list[dict]:
@@ -110,7 +180,18 @@ async def wf_create(topic: str) -> dict:
     Args:
         topic: 工作主题，用于生成 slug 和初始 goal 说明。
     """
-    return _lifecycle.do_create(_wf_root or ".", topic, now_fn=_now)
+    if _vfs is None:  # routing-only mode (no governed repo configured)
+        return _lifecycle.do_create(_wf_root or ".", topic, now_fn=_now)
+    with _vfs.staging() as stg:
+        result = _lifecycle.do_create(stg.root, topic, now_fn=_now)
+        folder = result.get("path")
+        staged_abs = ([os.path.join(folder, n)
+                       for n in (result.get("seeded") or [])] if folder else None)
+        rel = _rel_to_root_of(stg.root, folder) if folder else ""
+        _govern_staged(stg, f"feat(work-folder): create {rel}", staged_abs)
+    if result.get("path"):
+        result["path"] = os.path.join(os.path.abspath(_wf_root or "."), rel)
+    return result
 
 
 @mcp.tool()
@@ -149,15 +230,29 @@ async def wf_save(
         golden_order_additions: 追加到 golden-order.md 的文字块（仅追加，不覆盖）。
         findings_addition:      追加到 findings.md 的文字块（仅追加，不覆盖）。
     """
-    return _lifecycle.do_save(
-        _resolve_folder(folder),
-        now_fn=_now,
-        summary=summary,
-        context_snapshot=context_snapshot,
-        resume_fields=_safe_resume_fields(resume_fields),
-        golden_order_additions=golden_order_additions,
-        findings_addition=findings_addition,
-    )
+    if _vfs is None:  # routing-only mode
+        return _lifecycle.do_save(
+            _resolve_folder(folder), now_fn=_now, summary=summary,
+            context_snapshot=context_snapshot,
+            resume_fields=_safe_resume_fields(resume_fields),
+            golden_order_additions=golden_order_additions,
+            findings_addition=findings_addition)
+    rel_folder = _rel_to_root(_resolve_folder(folder))
+    with _vfs.staging() as stg:
+        result = _lifecycle.do_save(
+            os.path.join(stg.root, rel_folder),
+            now_fn=_now,
+            summary=summary,
+            context_snapshot=context_snapshot,
+            resume_fields=_safe_resume_fields(resume_fields),
+            golden_order_additions=golden_order_additions,
+            findings_addition=findings_addition,
+        )
+        staged_abs = [os.path.join(stg.root, rel_folder, n)
+                      for n in (result.get("written") or [])]
+        _govern_staged(stg, f"chore(work-folder): save {rel_folder}", staged_abs)
+    result["folder"] = os.path.join(os.path.abspath(_wf_root or "."), rel_folder)
+    return result
 
 
 @mcp.tool()
@@ -171,7 +266,21 @@ async def wf_resume(folder: str) -> dict:
     Args:
         folder: work-folder 路径（绝对或相对 work_folder_root）。
     """
-    return _lifecycle.do_resume(_resolve_folder(folder), now_fn=_now)
+    if _vfs is None:  # routing-only mode
+        return _lifecycle.do_resume(_resolve_folder(folder), now_fn=_now)
+    rel_folder = _rel_to_root(_resolve_folder(folder))
+    with _vfs.staging() as stg:
+        result = _lifecycle.do_resume(os.path.join(stg.root, rel_folder),
+                                      now_fn=_now)
+        if result.get("ok"):
+            _govern_staged(
+                stg, f"chore(work-folder): resume {rel_folder}",
+                [os.path.join(stg.root, rel_folder, n)
+                 for n in ("progress.md", "_brief.md")])
+    if result.get("folder"):
+        result["folder"] = os.path.join(os.path.abspath(_wf_root or "."),
+                                        rel_folder)
+    return result
 
 
 @mcp.tool()
@@ -184,7 +293,129 @@ async def wf_reindex(dry_run: bool = False) -> dict:
     Args:
         dry_run: True 时不写文件，返回 preview 字段含将生成的 INDEX 内容。
     """
-    return _reindex.reindex(_wf_root or ".", dry_run=dry_run)
+    if dry_run or _vfs is None:
+        return _reindex.reindex(_wf_root or ".", dry_run=dry_run)
+    with _vfs.staging() as stg:
+        result = _reindex.reindex(stg.root, dry_run=False)
+        if result.get("index_path"):
+            _govern_staged(stg, "chore(work-folder): reindex INDEX.md", None,
+                           extra_rel=[_rel_to_root_of(stg.root,
+                                                      result["index_path"])])
+    if result.get("index_path"):
+        result["index_path"] = os.path.join(os.path.abspath(_wf_root or "."),
+                                             "INDEX.md")
+    return result
+
+
+
+# ── Governed Full VFS façade (fs_*) — design §5.2 ────────────────────────────
+
+@mcp.tool()
+async def fs_read(virtual_path: str, offset: int | None = None,
+                  limit: int | None = None) -> dict:
+    """治理 VFS 读（canonical tree，cat -n），path 相对 work_folder_root。"""
+    return _guard(_require_vfs().fs_read, virtual_path=virtual_path,
+                  offset=offset, limit=limit)
+
+
+@mcp.tool()
+async def fs_list(virtual_path: str = "") -> list[dict]:
+    """列出 work-folder 子树节点（reserved namespace 隐藏）。"""
+    return _guard(_require_vfs().fs_list, virtual_path)
+
+
+@mcp.tool()
+async def fs_stat(virtual_path: str) -> dict:
+    """节点统一 descriptor（id/path/hash/revision/snapshot commit）。"""
+    return _guard(_require_vfs().fs_stat, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_create(virtual_path: str, content: str) -> dict:
+    """治理写：创建对象（铸 id + _brief schema 校验 + 单 repo 事务提交）。"""
+    return _guard(_require_vfs().fs_create, virtual_path=virtual_path,
+                  content=content)
+
+
+@mcp.tool()
+async def fs_edit(virtual_path: str, old_string: str, new_string: str,
+                  replace_all: bool = False) -> dict:
+    """治理写：精确子串替换（与 domain tools 同一 policy → transaction 管线）。"""
+    return _guard(_require_vfs().fs_edit, virtual_path=virtual_path,
+                  old_string=old_string, new_string=new_string,
+                  replace_all=replace_all)
+
+
+@mcp.tool()
+async def fs_write(virtual_path: str, content: str,
+                   expected_base_commit: str | None = None) -> dict:
+    """治理写：整文件覆盖（不隐式创建，带 CAS）。"""
+    return _guard(_require_vfs().fs_write, virtual_path=virtual_path,
+                  content=content, expected_base_commit=expected_base_commit)
+
+
+@mcp.tool()
+async def fs_mkdir(virtual_path: str) -> dict:
+    """治理写：创建目录（.gitkeep 落盘）。"""
+    return _guard(_require_vfs().fs_mkdir, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_copy(virtual_path: str, new_path: str) -> dict:
+    """治理写：复制对象（铸新 id）。"""
+    return _guard(_require_vfs().fs_copy, virtual_path=virtual_path,
+                  new_path=new_path)
+
+
+@mcp.tool()
+async def fs_rename(virtual_path: str, new_path: str) -> dict:
+    """治理写：重命名/移动（保 id；catalog 同批更新）。"""
+    return _guard(_require_vfs().fs_rename, virtual_path=virtual_path,
+                  new_path=new_path)
+
+
+@mcp.tool()
+async def fs_delete(virtual_path: str) -> dict:
+    """治理写：删除（留 tombstone，id 不复用）。"""
+    return _guard(_require_vfs().fs_delete, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_batch(changes: list[dict],
+                   expected_base_commit: str | None = None) -> dict:
+    """治理写：单 repo all-or-nothing 批量事务（design §5.2 fs_batch）。"""
+    return _guard(_require_vfs().fs_batch, changes,
+                  expected_base_commit=expected_base_commit)
+
+
+@mcp.tool()
+async def fs_resolve(virtual_path: str) -> dict:
+    """path → resource_id/exists 解析（不落盘）。"""
+    return _guard(_require_vfs().fs_resolve, virtual_path)
+
+
+@mcp.tool()
+async def fs_glob(pattern: str) -> list[dict]:
+    """glob 枚举（reserved namespace 隐藏）。"""
+    return _guard(_require_vfs().fs_glob, pattern)
+
+
+@mcp.tool()
+async def fs_changes(since: str | None = None) -> dict:
+    """自某 snapshot commit 起的已提交变更。"""
+    return _guard(_require_vfs().fs_changes, since=since)
+
+
+@mcp.tool()
+async def fs_capabilities() -> dict:
+    """协议版本 + 支持的 operations + 特性发现（design §5.1）。"""
+    return _guard(_require_vfs().fs_capabilities)
+
+
+@mcp.tool()
+async def fs_status() -> dict:
+    """异步 push/projection freshness + checkpoint（design §6.5-6.8）。"""
+    return _guard(_require_vfs().fs_status)
 
 
 def main() -> None:

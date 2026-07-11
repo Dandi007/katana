@@ -10,12 +10,17 @@ import os
 from fastmcp import FastMCP
 
 from katana_kb_mcp_shared import config, vault_search
+from katana_kb_mcp_shared.kernel import (
+    Catalog, GovernedVFS, KernelError, TransactionEngine,
+)
+from katana_kb_mcp_shared.kernel.policy import AppComposition
 from katana_wiki_mcp import enumerate as _enumerate
 from katana_wiki_mcp import ingest as _ingest
 from katana_wiki_mcp import invariants as _inv
 from katana_wiki_mcp import lint as _lint
 from katana_wiki_mcp import pages as _pages
 from katana_wiki_mcp import query as _query
+from katana_wiki_mcp.policy import ID_PREFIX, WikiPolicy
 
 mcp = FastMCP(
     "katana-wiki-mcp",
@@ -28,6 +33,7 @@ mcp = FastMCP(
 
 _scope: str | None = None
 _wiki_root: str | None = None
+_vfs: GovernedVFS | None = None
 
 
 def compute_scope(wiki_root: str, kb_root: str) -> str | None:
@@ -37,9 +43,74 @@ def compute_scope(wiki_root: str, kb_root: str) -> str | None:
 
 
 def configure(wiki_root: str, kb_root: str) -> None:
-    global _scope, _wiki_root
+    global _scope, _wiki_root, _vfs
     _scope = compute_scope(wiki_root, kb_root)
     _wiki_root = wiki_root
+    # Governed Full VFS composition root (design §4.2/§5.2): fs_* shares the same
+    # policy → transaction pipeline as the domain tools; no raw bypass (INV-10).
+    composition = AppComposition(WikiPolicy())
+    engine = TransactionEngine(wiki_root, domain="wiki",
+                               policy_version=composition.policy.policy_version)
+    catalog = Catalog(wiki_root, id_prefix=ID_PREFIX)
+    _vfs = GovernedVFS(engine, catalog, composition.policy)
+
+
+def _require_vfs() -> GovernedVFS:
+    if _vfs is None:
+        raise ValueError("wiki VFS not configured; call configure() first")
+    return _vfs
+
+
+def _staged_commit(staging, message: str, paths: list[str]) -> str:
+    """Publish pages/backlinks/log projected into writer-private staging.
+
+    ``wiki_ingest_apply`` runs its projection against a private copy of HEAD
+    (never the canonical working tree; operator P0 #2), then hands the touched
+    relative paths here. They are compiled into ONE MutationBatch and published
+    through the SAME WikiPolicy + TransactionEngine as fs_* (design §4.4,
+    INV-5). Policy rejection leaves zero client-visible effect (only staging was
+    written). Returns the new commit SHA (or current head on a no-op).
+    """
+    vfs = _require_vfs()
+    import os as _os
+    rels = []
+    for p in paths:
+        ap = p if _os.path.isabs(p) else _os.path.join(staging.root, p)
+        rel = _os.path.relpath(ap, staging.root).replace(_os.sep, "/")
+        if _os.path.isfile(ap) and rel not in rels:
+            rels.append(rel)
+    res = vfs.commit_staged(staging, message=message, writes=rels)
+    return res.commit_sha or (vfs.engine.repo.head() or "")
+
+
+def _append_gap_event(wiki_root: str, line: str) -> None:
+    """Append a cold-query coverage gap to the reserved operational sink.
+
+    This is an operational event, not canonical content: it lives under the
+    git-excluded ``.kb/query-gaps.log`` so it never enters a MutationBatch,
+    never dirties the working tree, and never requires a commit (operator P0
+    #3). Governed ingest (wiki_ingest_apply) is the only path that mutates
+    canonical wiki content.
+    """
+    import os as _os
+    # Register the operational exclude so the sink never appears as untracked.
+    if _vfs is not None:
+        try:
+            _vfs.engine.repo._ensure_operational_excludes()
+        except Exception:
+            pass
+    kb = _os.path.join(wiki_root, ".kb")
+    _os.makedirs(kb, exist_ok=True)
+    entry = line if line.endswith("\n") else line + "\n"
+    with open(_os.path.join(kb, "query-gaps.log"), "a", encoding="utf-8") as f:
+        f.write(entry)
+
+
+def _guard(fn, *a, **k):
+    try:
+        return fn(*a, **k)
+    except KernelError as e:
+        raise ValueError(e.to_envelope()) from e
 
 
 def _do_search(query: str, top_k: int, scope: str | None) -> list[dict]:
@@ -75,10 +146,15 @@ async def wiki_query(question: str, top_k: int = 10) -> dict:
         question: 问题文本。
         top_k: 候选上限，默认 10。
     """
+    # Cold-query gap logging is a NON-canonical operational event (operator
+    # P0 #3): it records a coverage gap for later governed ingest but must not
+    # mutate canonical content or dirty the working tree. It is appended to the
+    # git-excluded reserved operational sink, so a cold query leaves
+    # `git status --porcelain` clean and bypasses no governance.
     return _query._do_query(
         question, _scope, _wiki_root or ".", top_k,
         search_fn=vault_search.search,
-        log_fn=_pages.append_log,
+        log_fn=_append_gap_event,
         now_fn=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
     )
 
@@ -94,12 +170,19 @@ async def wiki_ingest_plan(source_text: str) -> dict:
 async def wiki_ingest_apply(proposal: dict) -> dict:
     """入库第二步：server 校验不变量(缺 provenance/outlink/frontmatter 必拒,零落盘)→ 通过则写页+自动反链+log+commit。
     Args: proposal 见 wiki_ingest_plan 返回的 proposal_schema。返回 applied/rejected/commit。"""
-    return _ingest.apply(
-        proposal, _wiki_root or ".",
-        validate_fn=_inv.validate_page,
-        write_fn=_pages.write_page, backlink_fn=_pages.ensure_backlink,
-        log_fn=_pages.append_log, commit_fn=_pages.git_commit,
-    )
+    vfs = _require_vfs()
+    # Project the whole ingest (page write + backlink + log) into writer-private
+    # staging, then publish as ONE governed transaction (operator P0 #2). The
+    # canonical working tree is only touched by the engine's post-publish
+    # materialize, so a rejected ingest leaves zero visible effect.
+    with vfs.staging() as stg:
+        return _ingest.apply(
+            proposal, stg.root,
+            validate_fn=_inv.validate_page,
+            write_fn=_pages.write_page, backlink_fn=_pages.ensure_backlink,
+            log_fn=_pages.append_log,
+            commit_fn=lambda root, msg, paths: _staged_commit(stg, msg, paths),
+        )
 
 
 @mcp.tool()
@@ -123,6 +206,117 @@ async def wiki_lint_mechanical(path: str | None = None, zone: str | None = None)
     Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "Zettelkasten"），跨页基线只在该 zone 内算。
     """
     return _lint.lint_mechanical(_wiki_root or ".", path, zone=zone)
+
+
+
+# ── Governed Full VFS façade (fs_*) — design §5.2 ────────────────────────────
+
+@mcp.tool()
+async def fs_read(virtual_path: str, offset: int | None = None,
+                  limit: int | None = None) -> dict:
+    """治理 VFS 读（canonical tree，cat -n），path 相对 wiki_root。"""
+    return _guard(_require_vfs().fs_read, virtual_path=virtual_path,
+                  offset=offset, limit=limit)
+
+
+@mcp.tool()
+async def fs_list(virtual_path: str = "") -> list[dict]:
+    """列出 wiki 子树节点（reserved namespace 隐藏）。"""
+    return _guard(_require_vfs().fs_list, virtual_path)
+
+
+@mcp.tool()
+async def fs_stat(virtual_path: str) -> dict:
+    """节点统一 descriptor（id/path/hash/revision/snapshot commit）。"""
+    return _guard(_require_vfs().fs_stat, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_create(virtual_path: str, content: str) -> dict:
+    """治理写：创建对象（铸 id + WIKI schema 校验 + 单 repo 事务提交）。"""
+    return _guard(_require_vfs().fs_create, virtual_path=virtual_path,
+                  content=content)
+
+
+@mcp.tool()
+async def fs_edit(virtual_path: str, old_string: str, new_string: str,
+                  replace_all: bool = False) -> dict:
+    """治理写：精确子串替换（与 domain tools 同一 policy → transaction 管线）。"""
+    return _guard(_require_vfs().fs_edit, virtual_path=virtual_path,
+                  old_string=old_string, new_string=new_string,
+                  replace_all=replace_all)
+
+
+@mcp.tool()
+async def fs_write(virtual_path: str, content: str,
+                   expected_base_commit: str | None = None) -> dict:
+    """治理写：整文件覆盖（不隐式创建，带 CAS）。"""
+    return _guard(_require_vfs().fs_write, virtual_path=virtual_path,
+                  content=content, expected_base_commit=expected_base_commit)
+
+
+@mcp.tool()
+async def fs_mkdir(virtual_path: str) -> dict:
+    """治理写：创建目录（.gitkeep 落盘）。"""
+    return _guard(_require_vfs().fs_mkdir, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_copy(virtual_path: str, new_path: str) -> dict:
+    """治理写：复制对象（铸新 id）。"""
+    return _guard(_require_vfs().fs_copy, virtual_path=virtual_path,
+                  new_path=new_path)
+
+
+@mcp.tool()
+async def fs_rename(virtual_path: str, new_path: str) -> dict:
+    """治理写：重命名/移动（保 id；catalog 同批更新）。"""
+    return _guard(_require_vfs().fs_rename, virtual_path=virtual_path,
+                  new_path=new_path)
+
+
+@mcp.tool()
+async def fs_delete(virtual_path: str) -> dict:
+    """治理写：删除（留 tombstone，id 不复用）。"""
+    return _guard(_require_vfs().fs_delete, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_batch(changes: list[dict],
+                   expected_base_commit: str | None = None) -> dict:
+    """治理写：单 repo all-or-nothing 批量事务（design §5.2 fs_batch）。"""
+    return _guard(_require_vfs().fs_batch, changes,
+                  expected_base_commit=expected_base_commit)
+
+
+@mcp.tool()
+async def fs_resolve(virtual_path: str) -> dict:
+    """path → resource_id/exists 解析（不落盘）。"""
+    return _guard(_require_vfs().fs_resolve, virtual_path)
+
+
+@mcp.tool()
+async def fs_glob(pattern: str) -> list[dict]:
+    """glob 枚举（reserved namespace 隐藏）。"""
+    return _guard(_require_vfs().fs_glob, pattern)
+
+
+@mcp.tool()
+async def fs_changes(since: str | None = None) -> dict:
+    """自某 snapshot commit 起的已提交变更。"""
+    return _guard(_require_vfs().fs_changes, since=since)
+
+
+@mcp.tool()
+async def fs_capabilities() -> dict:
+    """协议版本 + 支持的 operations + 特性发现（design §5.1）。"""
+    return _guard(_require_vfs().fs_capabilities)
+
+
+@mcp.tool()
+async def fs_status() -> dict:
+    """异步 push/projection freshness + checkpoint（design §6.5-6.8）。"""
+    return _guard(_require_vfs().fs_status)
 
 
 def main() -> None:

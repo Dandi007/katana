@@ -1,7 +1,11 @@
 """Wiki page IO layer.
 
 Pure functions: parse_page, render_page.
-IO functions: read_page, write_page, ensure_backlink, append_log, git_commit, archive_inbox.
+IO functions: read_page, write_page, ensure_backlink, append_log, archive_inbox.
+
+Canonical commits are NOT made here: writes are projected into the working
+tree and published through the shared TransactionEngine (design §4.4); this
+module owns no independent write/commit chain (INV-5).
 """
 from __future__ import annotations
 
@@ -70,37 +74,6 @@ def append_log(wiki_root: str, line: str) -> None:
     entry = line if line.endswith("\n") else line + "\n"
     with log_path.open("a", encoding="utf-8") as f:
         f.write(entry)
-
-
-def git_commit(wiki_root: str, message: str, paths: list[str]) -> str:
-    """Stage paths and commit in wiki_root. Returns short SHA. Idempotent: no-op if nothing staged."""
-    def _run(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["git", "-C", wiki_root, *args],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-    _run("add", "--", *paths)
-
-    # Check if there are staged changes
-    diff_result = subprocess.run(
-        ["git", "-C", wiki_root, "diff", "--cached", "--quiet"],
-        capture_output=True,
-        text=True,
-    )
-
-    # diff --cached --quiet: exit 0 = no changes, exit 1 = has changes
-    if diff_result.returncode == 0:
-        # No staged changes; return current HEAD short SHA without committing
-        result = _run("rev-parse", "--short", "HEAD")
-        return result.stdout.strip()
-
-    # Has staged changes; commit
-    _run("commit", "-m", message)
-    result = _run("rev-parse", "--short", "HEAD")
-    return result.stdout.strip()
 
 
 def archive_inbox(inbox_path: str, raw_dir: str, wiki_root: str) -> str:

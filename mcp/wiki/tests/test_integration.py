@@ -155,10 +155,16 @@ def test_query_cold_writes_gap_log(wiki_repo, monkeypatch):
     res = _run(server.wiki_query("仓库里完全不存在的冷门话题"))
     assert res["cold"] is True
     assert res["candidates"] == []
-    # server 真写了 gap log 行到 <wiki_root>/log.md
-    log = (wiki_repo / "log.md").read_text(encoding="utf-8")
-    assert "gap:" in log
-    assert "仓库里完全不存在的冷门话题" in log
+    # Gap logging is now a NON-canonical operational event (operator P0 #3):
+    # it is recorded in the git-excluded reserved sink, NOT raw-appended to
+    # canonical log.md, and leaves the working tree clean.
+    gap = (wiki_repo / ".kb" / "query-gaps.log").read_text(encoding="utf-8")
+    assert "gap:" in gap
+    assert "仓库里完全不存在的冷门话题" in gap
+    import subprocess as _sp
+    porcelain = _sp.run(["git", "-C", str(wiki_repo), "status", "--porcelain"],
+                        capture_output=True, text=True).stdout.strip()
+    assert porcelain == ""
 
 
 # ---------------------------------------------------------------------------

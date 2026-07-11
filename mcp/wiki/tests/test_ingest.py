@@ -8,6 +8,23 @@ from katana_kb_mcp_shared import vault_search as vs
 def _git(root, *a): subprocess.run(["git","-C",str(root),*a],check=True,capture_output=True,text=True)
 
 
+def _commit(wiki_root, message, paths):
+    """Test-local committer standing in for the governed pipeline (unit scope).
+
+    ingest.apply is domain planning/projection; the governed publish is covered
+    end-to-end in test_integration.py. Here we only need a committer to assert
+    the atomic all-or-nothing behaviour of apply()."""
+    _git(wiki_root, "add", "--", *paths)
+    diff = subprocess.run(["git","-C",str(wiki_root),"diff","--cached","--quiet"],
+                          capture_output=True, text=True)
+    if diff.returncode == 0:
+        return subprocess.run(["git","-C",str(wiki_root),"rev-parse","--short","HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+    _git(wiki_root, "commit", "-m", message)
+    return subprocess.run(["git","-C",str(wiki_root),"rev-parse","--short","HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+
+
 @pytest.fixture
 def wiki(tmp_path):
     _git(tmp_path,"init","-q"); _git(tmp_path,"config","user.email","t@t"); _git(tmp_path,"config","user.name","t")
@@ -38,7 +55,7 @@ def test_apply_valid_writes_backlinks_logs_commits(wiki):
     prop = {"new_pages":[_valid_new_page()], "log_line":"## [2026-06-22 10:00] ingest | 测试源"}
     out = ingest.apply(prop, str(wiki),
                        validate_fn=invariants.validate_page, write_fn=pages.write_page,
-                       backlink_fn=pages.ensure_backlink, log_fn=pages.append_log, commit_fn=pages.git_commit)
+                       backlink_fn=pages.ensure_backlink, log_fn=pages.append_log, commit_fn=_commit)
     assert out["applied"] is True
     assert (wiki/"新概念.md").exists()
     _, bbody = pages.read_page(str(wiki/"页B.md"))
@@ -55,7 +72,7 @@ def test_apply_rejects_missing_provenance_zero_writes(wiki):
     before = subprocess.run(["git","-C",str(wiki),"rev-parse","HEAD"],capture_output=True,text=True).stdout
     out = ingest.apply({"new_pages":[bad],"log_line":"x"}, str(wiki),
                        validate_fn=invariants.validate_page, write_fn=pages.write_page,
-                       backlink_fn=pages.ensure_backlink, log_fn=pages.append_log, commit_fn=pages.git_commit)
+                       backlink_fn=pages.ensure_backlink, log_fn=pages.append_log, commit_fn=_commit)
     assert out["applied"] is False
     assert "脏页.md" in out["rejected"]
     assert any("sources" in e for e in out["rejected"]["脏页.md"])
@@ -69,7 +86,7 @@ def test_apply_rejects_island_no_outlink(wiki):
     before = subprocess.run(["git","-C",str(wiki),"rev-parse","HEAD"],capture_output=True,text=True).stdout
     out = ingest.apply({"new_pages":[bad],"log_line":"x"}, str(wiki),
                        validate_fn=invariants.validate_page, write_fn=pages.write_page,
-                       backlink_fn=pages.ensure_backlink, log_fn=pages.append_log, commit_fn=pages.git_commit)
+                       backlink_fn=pages.ensure_backlink, log_fn=pages.append_log, commit_fn=_commit)
     assert out["applied"] is False
     assert any("孤岛" in e for e in out["rejected"]["孤岛.md"])
     assert not (wiki/"孤岛.md").exists()
