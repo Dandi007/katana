@@ -140,3 +140,26 @@ def test_fs_batch_delete_from_path_confined(vfs, tmp_path):
         ])
     assert ei.value.code == "INVALID_PATH"
     assert sentinel.exists()
+
+
+def test_fs_read_symlink_does_not_deref_host_file(vfs, tmp_path):
+    """A committed symlink is never dereferenced to host content (P0 #1).
+
+    Canonical reads serve the blob at the pinned snapshot. Git stores a symlink
+    as a mode-120000 blob whose bytes are the *target path string*, so fs_read
+    returns the link text, never the dereferenced host-file content.
+    """
+    import os
+    import subprocess
+
+    secret = tmp_path.parent / "host-secret.txt"
+    secret.write_text("TOP SECRET\n", encoding="utf-8")
+    vfs.fs_create(virtual_path="a.md", content="x\n")
+    os.symlink(str(secret), str(tmp_path / "escape"))
+    subprocess.run(["git", "-C", str(tmp_path), "add", "escape"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "symlink"],
+                   check=True, capture_output=True)
+
+    rd = vfs.fs_read(virtual_path="escape")
+    assert "TOP SECRET" not in rd.get("content", "")
