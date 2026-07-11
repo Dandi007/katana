@@ -307,23 +307,6 @@ class GitRepo:
         if self.has_commits():
             self._run("read-tree", "HEAD")
 
-    def restore_paths(self, base: str | None, paths: list[str]) -> None:
-        """Roll a set of working-tree paths back to their ``base`` state.
-
-        Used to undo an already-materialised domain projection when the publish
-        fails, guaranteeing zero client-visible effect (design §6.6).
-        """
-        for path in paths:
-            target = os.path.join(self.root, path)
-            blob = self.read_blob_at(base, path) if base is not None else None
-            if blob is None:
-                if os.path.exists(target):
-                    os.remove(target)
-            else:
-                os.makedirs(os.path.dirname(target) or self.root, exist_ok=True)
-                with open(target, "wb") as f:
-                    f.write(blob)
-
     # ── async remote push (design §6.7, INV-9) ───────────────────────
     def remote_head(self, remote: str) -> str | None:
         """The remote branch tip after a fetch, or None if absent/unreachable."""

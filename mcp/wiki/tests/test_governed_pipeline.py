@@ -86,3 +86,35 @@ def test_ingest_apply_reject_leaves_zero_delta(wiki_repo):
         capture_output=True, text=True).stdout.strip()
     assert head_after == head_before
     assert not (wiki_repo / "坏页.md").exists()
+
+
+def test_ingest_reject_after_staged_changes_leaves_zero_delta(wiki_repo, monkeypatch):
+    """A commit-stage policy rejection AFTER pages/backlinks/log were projected
+    into staging still leaves zero canonical delta and a clean working tree
+    (operator P1 #10: reject must be exercised past staged/projected changes)."""
+    head_before = subprocess.run(
+        ["git", "-C", str(wiki_repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True).stdout.strip()
+
+    # Force the shared policy to reject at commit stage — i.e. after ingest has
+    # already written the page + backlink + log into writer-private staging.
+    from katana_kb_mcp_shared.kernel.errors import KernelError, POLICY_VIOLATION
+
+    def reject(batch):
+        raise KernelError(POLICY_VIOLATION, "rejected at commit stage")
+
+    monkeypatch.setattr(server._vfs.policy, "validate", reject)
+    with pytest.raises(Exception):
+        _run(server.wiki_ingest_apply(
+            {"new_pages": [_valid_page()], "log_line": "## ingest | test"}))
+
+    head_after = subprocess.run(
+        ["git", "-C", str(wiki_repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True).stdout.strip()
+    assert head_after == head_before
+    # No page leaked into the canonical working tree, and it stays clean.
+    assert not (wiki_repo / "新概念.md").exists()
+    porcelain = subprocess.run(
+        ["git", "-C", str(wiki_repo), "status", "--porcelain"],
+        capture_output=True, text=True).stdout.strip()
+    assert porcelain == ""

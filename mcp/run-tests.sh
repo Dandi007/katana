@@ -15,6 +15,10 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PY="${PYTHON:-python3}"
+# Force integrated mode: the root gate MUST run the cross-domain parity/import
+# anchors, never inherit KB_SHARED_ONLY=1 and silently skip them (operator P1
+# #10). Standalone shared-only runs set KB_SHARED_ONLY themselves.
+unset KB_SHARED_ONLY
 exec "$PY" -m pytest \
   "$HERE/shared/tests" "$HERE/wiki/tests" "$HERE/work-folder/tests" "$HERE/memory/tests" \
   --import-mode=importlib -p no:cacheprovider "$@"
