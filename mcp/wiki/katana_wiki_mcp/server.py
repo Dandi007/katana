@@ -61,6 +61,28 @@ def _require_vfs() -> GovernedVFS:
     return _vfs
 
 
+def _governed_commit(wiki_root: str, message: str, paths: list[str]) -> str:
+    """Publish already-written pages/backlinks/log as ONE governed batch.
+
+    The domain tool (wiki_ingest_apply) projected the post-state into the
+    working tree; this compiles those paths into a single MutationBatch and
+    publishes through the SAME WikiPolicy + TransactionEngine as fs_* (design
+    §4.4, INV-5). Policy rejection rolls the working tree back — there is no
+    separate wiki write chain. Returns the new commit SHA (or current head on a
+    no-op, preserving the legacy idempotent contract).
+    """
+    vfs = _require_vfs()
+    import os as _os
+    rels = []
+    for p in paths:
+        ap = p if _os.path.isabs(p) else _os.path.join(wiki_root, p)
+        rel = _os.path.relpath(ap, wiki_root).replace(_os.sep, "/")
+        if _os.path.isfile(ap) and rel not in rels:
+            rels.append(rel)
+    res = vfs.commit_materialized(message=message, writes=rels)
+    return res.commit_sha or (vfs.engine.repo.head() or "")
+
+
 def _guard(fn, *a, **k):
     try:
         return fn(*a, **k)
@@ -124,7 +146,7 @@ async def wiki_ingest_apply(proposal: dict) -> dict:
         proposal, _wiki_root or ".",
         validate_fn=_inv.validate_page,
         write_fn=_pages.write_page, backlink_fn=_pages.ensure_backlink,
-        log_fn=_pages.append_log, commit_fn=_pages.git_commit,
+        log_fn=_pages.append_log, commit_fn=_governed_commit,
     )
 
 
@@ -188,6 +210,78 @@ async def fs_edit(virtual_path: str, old_string: str, new_string: str,
     return _guard(_require_vfs().fs_edit, virtual_path=virtual_path,
                   old_string=old_string, new_string=new_string,
                   replace_all=replace_all)
+
+
+@mcp.tool()
+async def fs_write(virtual_path: str, content: str,
+                   expected_base_commit: str | None = None) -> dict:
+    """治理写：整文件覆盖（不隐式创建，带 CAS）。"""
+    return _guard(_require_vfs().fs_write, virtual_path=virtual_path,
+                  content=content, expected_base_commit=expected_base_commit)
+
+
+@mcp.tool()
+async def fs_mkdir(virtual_path: str) -> dict:
+    """治理写：创建目录（.gitkeep 落盘）。"""
+    return _guard(_require_vfs().fs_mkdir, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_copy(virtual_path: str, new_path: str) -> dict:
+    """治理写：复制对象（铸新 id）。"""
+    return _guard(_require_vfs().fs_copy, virtual_path=virtual_path,
+                  new_path=new_path)
+
+
+@mcp.tool()
+async def fs_rename(virtual_path: str, new_path: str) -> dict:
+    """治理写：重命名/移动（保 id；catalog 同批更新）。"""
+    return _guard(_require_vfs().fs_rename, virtual_path=virtual_path,
+                  new_path=new_path)
+
+
+@mcp.tool()
+async def fs_delete(virtual_path: str) -> dict:
+    """治理写：删除（留 tombstone，id 不复用）。"""
+    return _guard(_require_vfs().fs_delete, virtual_path=virtual_path)
+
+
+@mcp.tool()
+async def fs_batch(changes: list[dict],
+                   expected_base_commit: str | None = None) -> dict:
+    """治理写：单 repo all-or-nothing 批量事务（design §5.2 fs_batch）。"""
+    return _guard(_require_vfs().fs_batch, changes,
+                  expected_base_commit=expected_base_commit)
+
+
+@mcp.tool()
+async def fs_resolve(virtual_path: str) -> dict:
+    """path → resource_id/exists 解析（不落盘）。"""
+    return _guard(_require_vfs().fs_resolve, virtual_path)
+
+
+@mcp.tool()
+async def fs_glob(pattern: str) -> list[str]:
+    """glob 枚举（reserved namespace 隐藏）。"""
+    return _guard(_require_vfs().fs_glob, pattern)
+
+
+@mcp.tool()
+async def fs_changes(since: str | None = None) -> dict:
+    """自某 snapshot commit 起的已提交变更。"""
+    return _guard(_require_vfs().fs_changes, since=since)
+
+
+@mcp.tool()
+async def fs_capabilities() -> dict:
+    """协议版本 + 支持的 operations + 特性发现（design §5.1）。"""
+    return _guard(_require_vfs().fs_capabilities)
+
+
+@mcp.tool()
+async def fs_status() -> dict:
+    """异步 push/projection freshness + checkpoint（design §6.5-6.8）。"""
+    return _guard(_require_vfs().fs_status)
 
 
 def main() -> None:

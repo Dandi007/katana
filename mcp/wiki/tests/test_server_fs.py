@@ -42,9 +42,9 @@ def test_six_domain_tools_plus_fs_facade(wiki_repo):
     names = _tool_names()
     domain = {"wiki_search", "wiki_query", "wiki_ingest_plan",
               "wiki_ingest_apply", "wiki_list_docs", "wiki_lint_mechanical"}
-    fs = {"fs_read", "fs_list", "fs_stat", "fs_create", "fs_edit"}
+    from katana_kb_mcp_shared.kernel.facade import FS_FACADE
     assert domain <= names, f"missing: {domain - names}"
-    assert fs <= names, f"missing: {fs - names}"
+    assert FS_FACADE <= names, f"missing fs_*: {FS_FACADE - names}"
 
 
 def test_fs_create_governed_page_and_read(wiki_repo):

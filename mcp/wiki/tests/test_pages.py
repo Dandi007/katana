@@ -55,15 +55,6 @@ def test_append_log_creates_and_appends(wiki):
     assert "ingest | 测试" in txt and txt.endswith("\n")
 
 
-def test_git_commit_returns_sha(wiki):
-    (wiki / "新页.md").write_text("x", encoding="utf-8")
-    sha = pages.git_commit(str(wiki), "wiki: add 新页", ["新页.md"])
-    assert len(sha) >= 7
-    log = subprocess.run(["git", "-C", str(wiki), "log", "--oneline", "-1"],
-                         capture_output=True, text=True).stdout
-    assert "add 新页" in log
-
-
 def test_archive_inbox_git_mv(wiki):
     inbox = wiki / "inbox"; inbox.mkdir()
     f = inbox / "src.md"; f.write_text("源", encoding="utf-8")
@@ -83,8 +74,3 @@ def test_parse_page_body_with_dashes_not_misparsed():
     assert body2.count("---") == 1  # body 里的 --- 保留，没被当 frontmatter fence 吞掉
 
 
-def test_git_commit_empty_is_idempotent(wiki):
-    sha1 = subprocess.run(["git", "-C", str(wiki), "rev-parse", "--short", "HEAD"],
-                          capture_output=True, text=True).stdout.strip()
-    sha2 = pages.git_commit(str(wiki), "no-op", [])
-    assert sha2 == sha1  # 无变更：返回当前 HEAD，不炸
