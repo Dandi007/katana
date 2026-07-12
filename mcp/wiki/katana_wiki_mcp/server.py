@@ -24,6 +24,7 @@ from katana_wiki_mcp import lint as _lint
 from katana_wiki_mcp import pages as _pages
 from katana_wiki_mcp import query as _query
 from katana_wiki_mcp.store import WikiStore, _wiki_policy
+from katana_wiki_mcp.fs_tools import FSTools
 
 mcp = FastMCP(
     "katana-wiki-mcp",
@@ -31,6 +32,9 @@ mcp = FastMCP(
         "Wiki 的 MCP 接口：知识检索/查询/入库。"
         "wiki_search 做混合检索并返回带路径的候选，agent 可据路径自行深挖。"
         "wiki_query 做 fat 检索：判重 + cold gap-log + 综合协议，是 query skill 的 server 侧。"
+        "fs_* 工具提供 Full VFS 读写面：fs_resolve/fs_stat/fs_list/fs_glob/fs_read 做发现与读取；"
+        "fs_create/fs_write/fs_edit/fs_copy/fs_rename/fs_delete 做受治理的 mutation；"
+        "fs_batch 做单 repo all-or-nothing 批量事务。"
     ),
 )
 
@@ -38,6 +42,7 @@ _scope: str | None = None
 _wiki_root: str | None = None
 _kernel: GovernedKernel | None = None
 _store: WikiStore | None = None
+_fs_tools: FSTools | None = None
 
 
 def compute_scope(wiki_root: str, kb_root: str) -> str | None:
@@ -47,7 +52,7 @@ def compute_scope(wiki_root: str, kb_root: str) -> str | None:
 
 
 def _init_kernel(wiki_root: str) -> None:
-    global _kernel, _store
+    global _kernel, _store, _fs_tools
     if not os.path.isdir(wiki_root):
         return
     _kernel = GovernedKernel()
@@ -60,6 +65,7 @@ def _init_kernel(wiki_root: str) -> None:
     policy = _wiki_policy()
     _kernel.bind("wiki", policy, vfs, ledger, manifest, wiki_root)
     _store = WikiStore(_kernel)
+    _fs_tools = FSTools(_kernel, wiki_root)
 
 
 def configure(wiki_root: str, kb_root: str) -> None:
@@ -155,6 +161,140 @@ async def wiki_lint_mechanical(path: str | None = None, zone: str | None = None)
     Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "Zettelkasten"），跨页基线只在该 zone 内算。
     """
     return _lint.lint_mechanical(_wiki_root or ".", path, zone=zone)
+
+
+# ── fs_* Full VFS tools ──────────────────────────────────────────────────
+
+@mcp.tool()
+async def fs_capabilities() -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_capabilities()
+
+
+@mcp.tool()
+async def fs_resolve(path_or_id: str) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_resolve(path_or_id)
+
+
+@mcp.tool()
+async def fs_stat(path: str) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_stat(path)
+
+
+@mcp.tool()
+async def fs_list(path: str = "") -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_list(path)
+
+
+@mcp.tool()
+async def fs_glob(pattern: str) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_glob(pattern)
+
+
+@mcp.tool()
+async def fs_read(path: str, offset: int | None = None,
+                   limit: int | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_read(path, offset=offset, limit=limit)
+
+
+@mcp.tool()
+async def fs_create(path: str, content: str,
+                    resource_id: str | None = None,
+                    expected_base_sha: str | None = None,
+                    idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_create(path, content, resource_id=resource_id,
+                               expected_base_sha=expected_base_sha,
+                               idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_write(path: str, content: str,
+                   resource_id: str | None = None,
+                   expected_base_sha: str | None = None,
+                   expected_resource_revision: str | None = None,
+                   idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_write(path, content, resource_id=resource_id,
+                              expected_base_sha=expected_base_sha,
+                              expected_resource_revision=expected_resource_revision,
+                              idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_edit(path: str, old_string: str, new_string: str,
+                  resource_id: str | None = None,
+                  replace_all: bool = False,
+                  expected_base_sha: str | None = None,
+                  expected_resource_revision: str | None = None,
+                  idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_edit(path, old_string, new_string,
+                             resource_id=resource_id,
+                             replace_all=replace_all,
+                             expected_base_sha=expected_base_sha,
+                             expected_resource_revision=expected_resource_revision,
+                             idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_copy(source: str, dest: str,
+                  resource_id: str | None = None,
+                  expected_base_sha: str | None = None,
+                  idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_copy(source, dest, resource_id=resource_id,
+                             expected_base_sha=expected_base_sha,
+                             idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_rename(source: str, dest: str,
+                    resource_id: str | None = None,
+                    expected_base_sha: str | None = None,
+                    idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_rename(source, dest, resource_id=resource_id,
+                               expected_base_sha=expected_base_sha,
+                               idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_delete(path: str,
+                    resource_id: str | None = None,
+                    expected_base_sha: str | None = None,
+                    idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_delete(path, resource_id=resource_id,
+                               expected_base_sha=expected_base_sha,
+                               idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_batch(operations: list[dict],
+                   expected_base_commit: str | None = None,
+                   idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("wiki fs_tools not initialized; call configure() first")
+    return _fs_tools.fs_batch(operations, expected_base_commit=expected_base_commit,
+                              idempotency_key=idempotency_key)
 
 
 def main() -> None:

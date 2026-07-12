@@ -35,9 +35,20 @@ def _wiki_policy() -> DomainPolicy:
             if rejected:
                 raise WikiIngestRejectedError(rejected)
 
+        if op.startswith("fs_") and op not in ("fs_batch", "fs_capabilities", "fs_resolve",
+                                                  "fs_stat", "fs_list", "fs_glob", "fs_read"):
+            content = args.get("content")
+            if content is not None:
+                fm, body = parse_page(content)
+                errs = _inv.validate_page(fm, body, require_summary=True, require_sources=True)
+                if errs:
+                    raise ValueError("; ".join(errs))
+
     return DomainPolicy(
         domain="wiki",
-        allowed_ops={"ingest_apply", "gap_log"},
+        allowed_ops={"ingest_apply", "gap_log", "delete",
+            "fs_create", "fs_write", "fs_edit", "fs_copy", "fs_rename",
+            "fs_delete", "fs_batch"},
         invariants=[_invariants],
     )
 
