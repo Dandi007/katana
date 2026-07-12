@@ -155,19 +155,17 @@ def _create_file(tools, path, content):
 
 
 def _setup_work_folder(tools, dirname):
-    """Create a valid work-folder directory with progress.md and _brief.md."""
+    """Create a valid work-folder directory with progress.md (brief created via fs_create by callers)."""
     _mkdir(tools, dirname)
     _create_file(tools, f"{dirname}/progress.md", _progress_md())
-    _create_file(tools, f"{dirname}/_brief.md", _brief_no_id(f"wf-{dirname}"))
 
 
 def _setup_work_folder_with_context(tools, dirname):
-    """Create a valid work-folder directory with progress.md, context.md, CLAUDE.md, and _brief.md."""
+    """Create a valid work-folder directory with progress.md, context.md, and CLAUDE.md (brief created via fs_create by callers)."""
     _mkdir(tools, dirname)
     _create_file(tools, f"{dirname}/progress.md", _progress_md())
     _create_file(tools, f"{dirname}/context.md", _context_md())
     _create_file(tools, f"{dirname}/CLAUDE.md", _claude_md())
-    _create_file(tools, f"{dirname}/_brief.md", _brief_no_id(f"wf-{dirname}"))
 
 
 @pytest.fixture
@@ -234,6 +232,7 @@ def test_fs_capabilities_via_mcp(srv):
 
 def test_fs_resolve_by_path(tools):
     _setup_work_folder(tools, "test-resolve")
+    tools.fs_create("test-resolve/_brief.md", _brief_no_id("test-resolve"))
     result = tools.fs_resolve("test-resolve/_brief.md")
     assert result["node_type"] == "file"
     assert result["virtual_path"] == "test-resolve/_brief.md"
@@ -248,6 +247,7 @@ def test_fs_resolve_by_path(tools):
 
 def test_fs_resolve_by_id(tools):
     _setup_work_folder(tools, "test-resolve-id")
+    tools.fs_create("test-resolve-id/_brief.md", _brief_no_id("test-resolve-id"))
     stat = tools.fs_stat("test-resolve-id/_brief.md")
     rid = stat["resource_id"]
     result = tools.fs_resolve(rid)
@@ -268,6 +268,7 @@ def test_fs_resolve_bad_id(tools):
 
 def test_fs_resolve_tombstoned_returns_replaced(tools):
     _setup_work_folder(tools, "tomb-resolve")
+    tools.fs_create("tomb-resolve/_brief.md", _brief_no_id("tomb-resolve"))
     stat = tools.fs_stat("tomb-resolve/_brief.md")
     rid = stat["resource_id"]
     tools.fs_delete("tomb-resolve/_brief.md")
@@ -297,6 +298,7 @@ def test_fs_resolve_non_work_folder_brief_ignored(tools):
 
 def test_fs_stat_file_success_envelope(tools):
     _setup_work_folder(tools, "test-stat")
+    tools.fs_create("test-stat/_brief.md", _brief_no_id("test-stat"))
     result = tools.fs_stat("test-stat/_brief.md")
     assert result["node_type"] == "file"
     assert result["virtual_path"] == "test-stat/_brief.md"
@@ -345,7 +347,9 @@ def test_fs_stat_path_traversal_rejected(tools):
 
 def test_fs_list_root(tools):
     _setup_work_folder(tools, "test-list-1")
+    tools.fs_create("test-list-1/_brief.md", _brief_no_id("test-list-1"))
     _setup_work_folder(tools, "test-list-2")
+    tools.fs_create("test-list-2/_brief.md", _brief_no_id("test-list-2"))
     result = tools.fs_list("")
     assert result["node_type"] == "directory"
     assert "entries" in result
@@ -423,6 +427,7 @@ def test_fs_glob_path_traversal_rejected(tools):
 
 def test_fs_read_success_envelope(tools):
     _setup_work_folder(tools, "test-read")
+    tools.fs_create("test-read/_brief.md", _brief_no_id("test-read"))
     result = tools.fs_read("test-read/_brief.md")
     assert result["node_type"] == "file"
     assert result["resource_id"] is not None
@@ -450,6 +455,7 @@ def test_fs_read_non_brief_file(tools):
 
 def test_fs_read_offset_limit(tools):
     _setup_work_folder(tools, "test-read-offset")
+    tools.fs_create("test-read-offset/_brief.md", _brief_no_id("test-read-offset"))
     result = tools.fs_read("test-read-offset/_brief.md", offset=1, limit=1)
     assert result["offset"] == 1
     assert result["limit"] == 1
@@ -583,6 +589,7 @@ def test_fs_scan_ignores_non_work_folder_brief(tools):
 
 def test_fs_scan_includes_work_folder_brief(tools):
     _setup_work_folder(tools, "valid-wf")
+    tools.fs_create("valid-wf/_brief.md", _brief_no_id("valid-wf"))
     briefs = tools._scan_briefs()
     assert len(briefs) == 1
     assert briefs[0]["path"] == "valid-wf/_brief.md"
@@ -684,17 +691,17 @@ def test_fs_write_progress_append_only_allowed(tools):
 
 def test_fs_write_progress_changelog_rewrite_rejected(tools):
     _setup_work_folder(tools, "test-progress-rewrite")
-    old_content = tools.fs_read("test-progress-append/progress.md")["content"]
+    old_content = tools.fs_read("test-progress-rewrite/progress.md")["content"]
     new_content = old_content.replace("10:00:00", "99:99:99")
-    result = tools.fs_write("test-progress-append/progress.md", new_content)
+    result = tools.fs_write("test-progress-rewrite/progress.md", new_content)
     assert result["code"] == "POLICY_VIOLATION"
 
 
 def test_fs_write_progress_truncation_rejected(tools):
     _setup_work_folder(tools, "test-progress-trunc")
-    old_content = tools.fs_read("test-progress-append/progress.md")["content"]
+    old_content = tools.fs_read("test-progress-trunc/progress.md")["content"]
     truncated = old_content[:len(old_content) // 2]
-    result = tools.fs_write("test-progress-append/progress.md", truncated)
+    result = tools.fs_write("test-progress-trunc/progress.md", truncated)
     assert result["code"] == "POLICY_VIOLATION"
 
 
@@ -812,12 +819,14 @@ def test_fs_edit_success(tools):
 
 def test_fs_edit_exact_match(tools):
     _setup_work_folder(tools, "test-edit-exact")
+    tools.fs_create("test-edit-exact/_brief.md", _brief_no_id("test-edit-exact"))
     result = tools.fs_edit("test-edit-exact/_brief.md", "nonexistent string", "replacement")
     assert result["code"] == "INVALID_CONTENT"
 
 
 def test_fs_edit_multiple_matches_no_replace_all(tools):
     _setup_work_folder(tools, "test-edit-multi")
+    tools.fs_create("test-edit-multi/_brief.md", _brief_no_id("test-edit-multi"))
     old = tools.fs_read("test-edit-multi/_brief.md")["content"]
     new = old.replace("Test a work folder", "duplicate duplicate goal")
     tools.fs_write("test-edit-multi/_brief.md", new)
@@ -827,6 +836,7 @@ def test_fs_edit_multiple_matches_no_replace_all(tools):
 
 def test_fs_edit_replace_all(tools):
     _setup_work_folder(tools, "test-edit-all")
+    tools.fs_create("test-edit-all/_brief.md", _brief_no_id("test-edit-all"))
     result = tools.fs_edit("test-edit-all/_brief.md", "test", "CHANGED", replace_all=True)
     assert result["node_type"] == "file"
 
@@ -846,6 +856,7 @@ def test_fs_edit_not_found(tools):
 
 def test_fs_edit_empty_old_string(tools):
     _setup_work_folder(tools, "test-edit-empty")
+    tools.fs_create("test-edit-empty/_brief.md", _brief_no_id("test-edit-empty"))
     result = tools.fs_edit("test-edit-empty/_brief.md", "", "new")
     assert result["code"] == "INVALID_CONTENT"
 
@@ -894,6 +905,7 @@ def test_fs_edit_golden_order_rewrite_rejected(tools):
 
 def test_fs_copy_success(tools):
     _setup_work_folder(tools, "test-copy-src")
+    tools.fs_create("test-copy-src/_brief.md", _brief_no_id("test-copy-src"))
     _setup_work_folder(tools, "test-copy-dst")
     result = tools.fs_copy("test-copy-src/_brief.md", "test-copy-dst/_brief.md")
     assert result["node_type"] == "file"
@@ -904,6 +916,7 @@ def test_fs_copy_success(tools):
 
 def test_fs_copy_new_id(tools):
     _setup_work_folder(tools, "test-copy-new-id")
+    tools.fs_create("test-copy-new-id/_brief.md", _brief_no_id("test-copy-new-id"))
     src_stat = tools.fs_stat("test-copy-new-id/_brief.md")
     src_rid = src_stat["resource_id"]
     _setup_work_folder(tools, "test-copy-new-dst")
@@ -918,6 +931,7 @@ def test_fs_copy_source_not_found(tools):
 
 def test_fs_copy_dest_exists(tools):
     _setup_work_folder(tools, "test-copy-exists-src")
+    tools.fs_create("test-copy-exists-src/_brief.md", _brief_no_id("test-copy-exists-src"))
     _setup_work_folder(tools, "test-copy-exists-dst")
     result = tools.fs_copy("test-copy-exists-src/_brief.md", "test-copy-exists-dst/_brief.md")
     assert result["code"] == "RESOURCE_EXISTS"
@@ -930,6 +944,7 @@ def test_fs_copy_source_traversal_rejected(tools):
 
 def test_fs_copy_dest_traversal_rejected(tools):
     _setup_work_folder(tools, "test-copy-dest-trav")
+    tools.fs_create("test-copy-dest-trav/_brief.md", _brief_no_id("test-copy-dest-trav"))
     result = tools.fs_copy("test-copy-dest-trav/_brief.md", "../escape/_brief.md")
     assert result["code"] == "INVALID_PATH"
 
@@ -958,6 +973,7 @@ def test_fs_copy_critical_dest_rejected(tools):
 
 def test_fs_copy_non_brief_to_brief_rejected(tools):
     _setup_work_folder(tools, "test-copy-nb2b")
+    tools.fs_create("test-copy-nb2b/_brief.md", _brief_no_id("test-copy-nb2b"))
     tools.fs_create("notes.md", "# Notes\n\ncontent")
     _setup_work_folder(tools, "folder")
     result = tools.fs_copy("notes.md", "folder/_brief.md")
@@ -966,12 +982,14 @@ def test_fs_copy_non_brief_to_brief_rejected(tools):
 
 def test_fs_copy_brief_to_non_brief_rejected(tools):
     _setup_work_folder(tools, "test-copy-b2nb")
+    tools.fs_create("test-copy-b2nb/_brief.md", _brief_no_id("test-copy-b2nb"))
     result = tools.fs_copy("test-copy-b2nb/_brief.md", "copy.md")
     assert result["code"] == "POLICY_VIOLATION"
 
 
 def test_fs_copy_brief_to_non_work_folder_rejected(tools):
     _setup_work_folder(tools, "test-copy-b2nowf")
+    tools.fs_create("test-copy-b2nowf/_brief.md", _brief_no_id("test-copy-b2nowf"))
     _mkdir(tools, "not-a-wf")
     result = tools.fs_copy("test-copy-b2nowf/_brief.md", "not-a-wf/_brief.md")
     assert result["code"] == "POLICY_VIOLATION"
@@ -979,6 +997,7 @@ def test_fs_copy_brief_to_non_work_folder_rejected(tools):
 
 def test_fs_single_cas_expected_base_commit(tools):
     _setup_work_folder(tools, "test-cas-param")
+    tools.fs_create("test-cas-param/_brief.md", _brief_no_id("test-cas-param"))
     content = _brief("test-cas-param-updated", rid="wf-abc123")
     result = tools.fs_write(
         "test-cas-param/_brief.md", content,
@@ -992,6 +1011,7 @@ def test_fs_single_cas_expected_base_commit(tools):
 
 def test_fs_rename_success(tools):
     _setup_work_folder(tools, "test-rename-src")
+    tools.fs_create("test-rename-src/_brief.md", _brief_no_id("test-rename-src"))
     _setup_work_folder(tools, "test-rename-dst")
     result = tools.fs_rename("test-rename-src/_brief.md", "test-rename-dst/_brief.md")
     assert result["node_type"] == "file"
@@ -1000,6 +1020,7 @@ def test_fs_rename_success(tools):
 
 def test_fs_rename_preserves_id(tools):
     _setup_work_folder(tools, "test-rename-id")
+    tools.fs_create("test-rename-id/_brief.md", _brief_no_id("test-rename-id"))
     stat = tools.fs_stat("test-rename-id/_brief.md")
     rid = stat["resource_id"]
     _setup_work_folder(tools, "test-rename-id-dst")
@@ -1026,6 +1047,7 @@ def test_fs_rename_source_traversal_rejected(tools):
 
 def test_fs_rename_dest_traversal_rejected(tools):
     _setup_work_folder(tools, "test-rename-dest-trav")
+    tools.fs_create("test-rename-dest-trav/_brief.md", _brief_no_id("test-rename-dest-trav"))
     result = tools.fs_rename("test-rename-dest-trav/_brief.md", "../escape/_brief.md")
     assert result["code"] == "INVALID_PATH"
 
@@ -1062,12 +1084,14 @@ def test_fs_rename_non_brief_to_brief_rejected(tools):
 
 def test_fs_rename_brief_to_non_brief_rejected(tools):
     _setup_work_folder(tools, "test-rename-b2nb")
+    tools.fs_create("test-rename-b2nb/_brief.md", _brief_no_id("test-rename-b2nb"))
     result = tools.fs_rename("test-rename-b2nb/_brief.md", "renamed.md")
     assert result["code"] == "POLICY_VIOLATION"
 
 
 def test_fs_rename_brief_to_non_work_folder_rejected(tools):
     _setup_work_folder(tools, "test-rename-b2nowf")
+    tools.fs_create("test-rename-b2nowf/_brief.md", _brief_no_id("test-rename-b2nowf"))
     _mkdir(tools, "not-a-wf")
     result = tools.fs_rename("test-rename-b2nowf/_brief.md", "not-a-wf/_brief.md")
     assert result["code"] == "POLICY_VIOLATION"
@@ -1077,6 +1101,7 @@ def test_fs_rename_brief_to_non_work_folder_rejected(tools):
 
 def test_fs_delete_success(tools):
     _setup_work_folder(tools, "test-delete")
+    tools.fs_create("test-delete/_brief.md", _brief_no_id("test-delete"))
     stat = tools.fs_stat("test-delete/_brief.md")
     rid = stat["resource_id"]
     result = tools.fs_delete("test-delete/_brief.md")
@@ -1088,6 +1113,7 @@ def test_fs_delete_success(tools):
 
 def test_fs_delete_leaves_tombstone(tools):
     _setup_work_folder(tools, "test-tombstone")
+    tools.fs_create("test-tombstone/_brief.md", _brief_no_id("test-tombstone"))
     result = tools.fs_delete("test-tombstone/_brief.md")
     rid = result["resource_id"]
     resolve_result = tools.fs_resolve(rid)
@@ -1096,6 +1122,7 @@ def test_fs_delete_leaves_tombstone(tools):
 
 def test_fs_delete_id_not_reused(tools):
     _setup_work_folder(tools, "test-no-reuse")
+    tools.fs_create("test-no-reuse/_brief.md", _brief_no_id("test-no-reuse"))
     stat = tools.fs_stat("test-no-reuse/_brief.md")
     rid = stat["resource_id"]
     tools.fs_delete("test-no-reuse/_brief.md")
@@ -1111,6 +1138,7 @@ def test_fs_delete_not_found(tools):
 
 def test_fs_delete_ref_mismatch(tools):
     _setup_work_folder(tools, "test-del-ref")
+    tools.fs_create("test-del-ref/_brief.md", _brief_no_id("test-del-ref"))
     result = tools.fs_delete("test-del-ref/_brief.md", resource_id="wf-999999")
     assert result["code"] in ("REF_MISMATCH", "RESOURCE_NOT_FOUND")
 
@@ -1156,6 +1184,7 @@ def test_fs_batch_write(tools):
 
 def test_fs_batch_edit(tools):
     _setup_work_folder(tools, "batch-edit")
+    tools.fs_create("batch-edit/_brief.md", _brief_no_id("batch-edit"))
     ops = [
         {"op": "fs_edit", "args": {"path": "batch-edit/_brief.md", "old_string": "Test a work folder", "new_string": "Changed"}},
     ]
@@ -1166,6 +1195,7 @@ def test_fs_batch_edit(tools):
 
 def test_fs_batch_copy(tools):
     _setup_work_folder(tools, "batch-copy-src")
+    tools.fs_create("batch-copy-src/_brief.md", _brief_no_id("batch-copy-src"))
     _setup_work_folder(tools, "batch-copy-dst")
     ops = [
         {"op": "fs_copy", "args": {"source": "batch-copy-src/_brief.md", "dest": "batch-copy-dst/_brief.md"}},
@@ -1177,6 +1207,7 @@ def test_fs_batch_copy(tools):
 
 def test_fs_batch_rename(tools):
     _setup_work_folder(tools, "batch-rename-src")
+    tools.fs_create("batch-rename-src/_brief.md", _brief_no_id("batch-rename-src"))
     _setup_work_folder(tools, "batch-rename-dst")
     stat = tools.fs_stat("batch-rename-src/_brief.md")
     rid = stat["resource_id"]
@@ -1190,6 +1221,7 @@ def test_fs_batch_rename(tools):
 
 def test_fs_batch_delete(tools):
     _setup_work_folder(tools, "batch-delete")
+    tools.fs_create("batch-delete/_brief.md", _brief_no_id("batch-delete"))
     stat = tools.fs_stat("batch-delete/_brief.md")
     rid = stat["resource_id"]
     ops = [
@@ -1202,6 +1234,7 @@ def test_fs_batch_delete(tools):
 
 def test_fs_batch_all_or_nothing(tools):
     _setup_work_folder(tools, "batch-aon")
+    tools.fs_create("batch-aon/_brief.md", _brief_no_id("batch-aon"))
     ops = [
         {"op": "fs_edit", "args": {"path": "batch-aon/_brief.md", "old_string": "Test a work folder", "new_string": "Modified goal"}},
         {"op": "fs_edit", "args": {"path": "batch-aon/_brief.md", "old_string": "nonexistent string", "new_string": "replacement"}},
@@ -1213,6 +1246,7 @@ def test_fs_batch_all_or_nothing(tools):
 
 def test_fs_batch_cas(tools):
     _setup_work_folder(tools, "batch-cas")
+    tools.fs_create("batch-cas/_brief.md", _brief_no_id("batch-cas"))
     stat = tools.fs_stat("batch-cas/_brief.md")
     rid = stat["resource_id"]
     ops = [
@@ -1238,6 +1272,7 @@ def test_fs_batch_unknown_operation(tools):
 
 def test_fs_batch_idempotency(tools):
     _setup_work_folder(tools, "batch-idem")
+    tools.fs_create("batch-idem/_brief.md", _brief_no_id("batch-idem"))
     stat = tools.fs_stat("batch-idem/_brief.md")
     rid = stat["resource_id"]
     ops = [
@@ -1259,6 +1294,7 @@ def test_fs_batch_path_traversal_rejected(tools):
 
 def test_fs_batch_per_op_revision_conflict(tools):
     _setup_work_folder(tools, "batch-rev")
+    tools.fs_create("batch-rev/_brief.md", _brief_no_id("batch-rev"))
     ops = [
         {"op": "fs_write", "args": {
             "path": "batch-rev/_brief.md",
@@ -1331,6 +1367,7 @@ def test_fs_batch_copy_non_brief_to_brief_rejected(tools):
 
 def test_fs_batch_copy_brief_to_non_brief_rejected(tools):
     _setup_work_folder(tools, "batch-b2nb")
+    tools.fs_create("batch-b2nb/_brief.md", _brief_no_id("batch-b2nb"))
     ops = [
         {"op": "fs_copy", "args": {"source": "batch-b2nb/_brief.md", "dest": "copy.md"}},
     ]
@@ -1351,6 +1388,7 @@ def test_fs_batch_rename_non_brief_to_brief_rejected(tools):
 
 def test_fs_batch_rename_brief_to_non_brief_rejected(tools):
     _setup_work_folder(tools, "batch-r2nb")
+    tools.fs_create("batch-r2nb/_brief.md", _brief_no_id("batch-r2nb"))
     ops = [
         {"op": "fs_rename", "args": {"source": "batch-r2nb/_brief.md", "dest": "renamed.md"}},
     ]
@@ -1515,6 +1553,7 @@ def test_excluded_dir_katana_rejected(tools):
 
 def test_delete_then_resolve_returns_resource_replaced(tools):
     _setup_work_folder(tools, "test-del-resolve")
+    tools.fs_create("test-del-resolve/_brief.md", _brief_no_id("test-del-resolve"))
     stat = tools.fs_stat("test-del-resolve/_brief.md")
     rid = stat["resource_id"]
     tools.fs_delete("test-del-resolve/_brief.md")
@@ -1524,6 +1563,7 @@ def test_delete_then_resolve_returns_resource_replaced(tools):
 
 def test_write_after_delete_returns_resource_replaced(tools):
     _setup_work_folder(tools, "test-write-after-del")
+    tools.fs_create("test-write-after-del/_brief.md", _brief_no_id("test-write-after-del"))
     stat = tools.fs_stat("test-write-after-del/_brief.md")
     rid = stat["resource_id"]
     tools.fs_delete("test-write-after-del/_brief.md")
@@ -1534,6 +1574,7 @@ def test_write_after_delete_returns_resource_replaced(tools):
 
 def test_batch_delete_then_resolve_returns_replaced(tools):
     _setup_work_folder(tools, "batch-del-resolve")
+    tools.fs_create("batch-del-resolve/_brief.md", _brief_no_id("batch-del-resolve"))
     stat = tools.fs_stat("batch-del-resolve/_brief.md")
     rid = stat["resource_id"]
     ops = [
@@ -1560,6 +1601,7 @@ def test_fs_create_via_mcp(srv):
 def test_fs_read_via_mcp(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-read")
+    tools.fs_create("mcp-read/_brief.md", _brief_no_id("mcp-read"))
     result = _call(mcp, "fs_read", {"path": "mcp-read/_brief.md"})
     assert result["node_type"] == "file"
     assert result["content"] is not None
@@ -1581,6 +1623,7 @@ def test_fs_write_via_mcp(srv):
 def test_fs_delete_via_mcp(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-delete")
+    tools.fs_create("mcp-delete/_brief.md", _brief_no_id("mcp-delete"))
     result = _call(mcp, "fs_delete", {"path": "mcp-delete/_brief.md"})
     assert result["node_type"] == "file"
 
@@ -1601,6 +1644,7 @@ def test_fs_batch_via_mcp(srv):
 def test_fs_resolve_via_mcp(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-resolve")
+    tools.fs_create("mcp-resolve/_brief.md", _brief_no_id("mcp-resolve"))
     result = _call(mcp, "fs_resolve", {"path_or_id": "mcp-resolve/_brief.md"})
     assert result["node_type"] == "file"
 
@@ -1608,6 +1652,7 @@ def test_fs_resolve_via_mcp(srv):
 def test_fs_stat_via_mcp(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-stat")
+    tools.fs_create("mcp-stat/_brief.md", _brief_no_id("mcp-stat"))
     result = _call(mcp, "fs_stat", {"path": "mcp-stat/_brief.md"})
     assert result["node_type"] == "file"
 
@@ -1615,6 +1660,7 @@ def test_fs_stat_via_mcp(srv):
 def test_fs_list_via_mcp(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-list")
+    tools.fs_create("mcp-list/_brief.md", _brief_no_id("mcp-list"))
     result = _call(mcp, "fs_list", {})
     assert "entries" in result
 
@@ -1622,6 +1668,7 @@ def test_fs_list_via_mcp(srv):
 def test_fs_glob_via_mcp(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-glob")
+    tools.fs_create("mcp-glob/_brief.md", _brief_no_id("mcp-glob"))
     result = _call(mcp, "fs_glob", {"pattern": "mcp-glob*/_brief.md"})
     assert result["node_type"] == "glob"
 
@@ -1629,6 +1676,7 @@ def test_fs_glob_via_mcp(srv):
 def test_fs_edit_via_mcp(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-edit")
+    tools.fs_create("mcp-edit/_brief.md", _brief_no_id("mcp-edit"))
     result = _call(mcp, "fs_edit", {
         "path": "mcp-edit/_brief.md",
         "old_string": "Test a work folder",
@@ -1640,6 +1688,7 @@ def test_fs_edit_via_mcp(srv):
 def test_fs_copy_via_mcp(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-copy-src")
+    tools.fs_create("mcp-copy-src/_brief.md", _brief_no_id("mcp-copy-src"))
     _setup_work_folder(tools, "mcp-copy-dst")
     result = _call(mcp, "fs_copy", {
         "source": "mcp-copy-src/_brief.md",
@@ -1651,6 +1700,7 @@ def test_fs_copy_via_mcp(srv):
 def test_fs_rename_via_mcp(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-rename-src")
+    tools.fs_create("mcp-rename-src/_brief.md", _brief_no_id("mcp-rename-src"))
     _setup_work_folder(tools, "mcp-rename-dst")
     result = _call(mcp, "fs_rename", {
         "source": "mcp-rename-src/_brief.md",
@@ -1663,6 +1713,7 @@ def test_fs_rename_via_mcp(srv):
 
 def test_fs_read_content_hash_matches_content(tools):
     _setup_work_folder(tools, "test-hash")
+    tools.fs_create("test-hash/_brief.md", _brief_no_id("test-hash"))
     result = tools.fs_read("test-hash/_brief.md")
     assert result["content_hash"] == _hash(result["content"])
 
@@ -1686,6 +1737,7 @@ def test_fs_create_content_hash_matches_content(tools):
 
 def test_scan_uses_brief_pattern(tools):
     _setup_work_folder(tools, "test-scan")
+    tools.fs_create("test-scan/_brief.md", _brief_no_id("test-scan"))
     tools.fs_create("notes.md", "# Notes\n\ncontent")
     result = tools.fs_resolve("test-scan/_brief.md")
     assert result["resource_id"] is not None
@@ -1698,6 +1750,7 @@ def test_scan_uses_brief_pattern(tools):
 def test_mcp_error_base_commit_conflict(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-err-cas")
+    tools.fs_create("mcp-err-cas/_brief.md", _brief_no_id("mcp-err-cas"))
     result = _call(mcp, "fs_write", {
         "path": "mcp-err-cas/_brief.md",
         "content": _brief("mcp-err-cas-updated", rid="wf-abc123"),
@@ -1709,6 +1762,7 @@ def test_mcp_error_base_commit_conflict(srv):
 def test_mcp_error_revision_conflict(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-err-rev")
+    tools.fs_create("mcp-err-rev/_brief.md", _brief_no_id("mcp-err-rev"))
     result = _call(mcp, "fs_write", {
         "path": "mcp-err-rev/_brief.md",
         "content": _brief("mcp-err-rev-updated", rid="wf-abc123"),
@@ -1784,6 +1838,7 @@ def test_mcp_error_invalid_path(srv):
 def test_mcp_error_content_too_large(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-err-large")
+    tools.fs_create("mcp-err-large/_brief.md", _brief_no_id("mcp-err-large"))
     huge = "x" * 1_000_001
     result = _call(mcp, "fs_write", {
         "path": "mcp-err-large/_brief.md",
@@ -1795,6 +1850,7 @@ def test_mcp_error_content_too_large(srv):
 def test_mcp_batch_error_ref_mismatch(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-batch-ref")
+    tools.fs_create("mcp-batch-ref/_brief.md", _brief_no_id("mcp-batch-ref"))
     result = _call(mcp, "fs_batch", {
         "operations": [
             {"op": "fs_write", "args": {
@@ -1809,6 +1865,7 @@ def test_mcp_batch_error_ref_mismatch(srv):
 def test_mcp_batch_error_content_too_large(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-batch-large")
+    tools.fs_create("mcp-batch-large/_brief.md", _brief_no_id("mcp-batch-large"))
     huge = "x" * 1_000_001
     result = _call(mcp, "fs_batch", {
         "operations": [
