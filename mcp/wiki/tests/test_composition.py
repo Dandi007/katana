@@ -182,7 +182,7 @@ def test_composition_wiki_resource_id_has_w_prefix():
         page_id = fm.get("id")
         assert page_id is not None, "page must have a resource_id"
         assert page_id.startswith("w-"), f"resource_id must start with w-, got {page_id!r}"
-        assert len(page_id) == 9, f"resource_id must be w-<6hex>, got {page_id!r}"
+        assert len(page_id) == 8, f"resource_id must be w-<6hex>, got {page_id!r}"
     finally:
         import shutil
         shutil.rmtree(repo_root, ignore_errors=True)
