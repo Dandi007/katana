@@ -367,6 +367,7 @@ def test_fs_list_root(tools):
 
 def test_fs_list_includes_non_brief_files(tools):
     _setup_work_folder(tools, "test-list-brief")
+    tools.fs_create("test-list-brief/_brief.md", _brief_no_id("test-list-brief"))
     tools.fs_create("notes.md", "# Notes\n\ncontent")
     result = tools.fs_list("")
     paths = [e["virtual_path"] for e in result["entries"]]
@@ -380,7 +381,9 @@ def test_fs_list_includes_non_brief_files(tools):
 def test_fs_list_directory(tools):
     os.makedirs(os.path.join(tools._repo_root, "listdir"))
     _setup_work_folder(tools, "listdir/test-list-1")
+    tools.fs_create("listdir/test-list-1/_brief.md", _brief_no_id("listdir/test-list-1"))
     _setup_work_folder(tools, "listdir/test-list-2")
+    tools.fs_create("listdir/test-list-2/_brief.md", _brief_no_id("listdir/test-list-2"))
     result = tools.fs_list("")
     assert result["node_type"] == "directory"
     assert "entries" in result
@@ -404,7 +407,9 @@ def test_fs_list_nonexistent_dir(tools):
 
 def test_fs_glob_match(tools):
     _setup_work_folder(tools, "test-glob-1")
+    tools.fs_create("test-glob-1/_brief.md", _brief_no_id("test-glob-1"))
     _setup_work_folder(tools, "test-glob-2")
+    tools.fs_create("test-glob-2/_brief.md", _brief_no_id("test-glob-2"))
     result = tools.fs_glob("test-glob-*/_brief.md")
     assert result["node_type"] == "glob"
     assert "hits" in result
@@ -933,6 +938,7 @@ def test_fs_copy_dest_exists(tools):
     _setup_work_folder(tools, "test-copy-exists-src")
     tools.fs_create("test-copy-exists-src/_brief.md", _brief_no_id("test-copy-exists-src"))
     _setup_work_folder(tools, "test-copy-exists-dst")
+    tools.fs_create("test-copy-exists-dst/_brief.md", _brief_no_id("test-copy-exists-dst"))
     result = tools.fs_copy("test-copy-exists-src/_brief.md", "test-copy-exists-dst/_brief.md")
     assert result["code"] == "RESOURCE_EXISTS"
 
@@ -1035,7 +1041,9 @@ def test_fs_rename_source_not_found(tools):
 
 def test_fs_rename_dest_exists(tools):
     _setup_work_folder(tools, "test-rename-exists-src")
+    tools.fs_create("test-rename-exists-src/_brief.md", _brief_no_id("test-rename-exists-src"))
     _setup_work_folder(tools, "test-rename-exists-dst")
+    tools.fs_create("test-rename-exists-dst/_brief.md", _brief_no_id("test-rename-exists-dst"))
     result = tools.fs_rename("test-rename-exists-src/_brief.md", "test-rename-exists-dst/_brief.md")
     assert result["code"] == "RESOURCE_EXISTS"
 
