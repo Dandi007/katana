@@ -91,6 +91,13 @@ async def wiki_search(query: str, top_k: int = 10) -> list[dict]:
     return _do_search(query, top_k, _scope)
 
 
+def _governed_append_log(wiki_root: str, line: str) -> None:
+    if _store is not None:
+        _store.append_gap_log(line)
+    else:
+        _pages.append_log(wiki_root, line)
+
+
 @mcp.tool()
 async def wiki_query(question: str, top_k: int = 10) -> dict:
     """对 wiki 提问：server 判重检索 + 返回候选(带路径)与综合协议；空集走 cold 并记 gap log。
@@ -105,7 +112,7 @@ async def wiki_query(question: str, top_k: int = 10) -> dict:
     return _query._do_query(
         question, _scope, _wiki_root or ".", top_k,
         search_fn=vault_search.search,
-        log_fn=_pages.append_log,
+        log_fn=_governed_append_log,
         now_fn=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
     )
 

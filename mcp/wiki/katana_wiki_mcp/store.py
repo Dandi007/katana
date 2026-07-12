@@ -37,7 +37,7 @@ def _wiki_policy() -> DomainPolicy:
 
     return DomainPolicy(
         domain="wiki",
-        allowed_ops={"ingest_apply", "search", "query", "ingest_plan", "list_docs", "lint_mechanical"},
+        allowed_ops={"ingest_apply", "gap_log"},
         invariants=[_invariants],
     )
 
@@ -73,9 +73,12 @@ class WikiStore:
             backlinked: list[str] = []
             all_paths: list[str] = []
 
+            first_page_id = None
             for page in new_pages:
                 page_id = binding.ledger.gen_id(existing_ids)
                 existing_ids.add(page_id)
+                if first_page_id is None:
+                    first_page_id = page_id
                 fm = dict(page.get("frontmatter") or {})
                 fm["id"] = page_id
                 content = render_page(fm, page.get("body") or "")
@@ -106,6 +109,7 @@ class WikiStore:
                     all_paths.append("log.md")
 
             return {
+                "id": first_page_id or "unknown",
                 "written": written,
                 "backlinked": backlinked,
                 "changed_paths": all_paths,
@@ -129,6 +133,17 @@ class WikiStore:
             "git": result.get("git"),
             "manifest": result.get("manifest"),
         }
+
+    def append_gap_log(self, line: str) -> dict:
+        def _write(binding, args):
+            line = args["line"]
+            if binding.vfs.exists("log.md"):
+                log_content = binding.vfs.read_text("log.md")
+            else:
+                log_content = ""
+            binding.vfs.write("log.md", log_content + line + "\n", op="gap_log", args=args)
+            return {"changed_paths": ["log.md"]}
+        return self._call_mutate("gap_log", {"line": line}, _write, None, "wiki: query gap-log")
 
     def _call_mutate(self, op: str, args: dict, write_fn,
                      expected_base_sha: str | None, commit_msg: str) -> dict:

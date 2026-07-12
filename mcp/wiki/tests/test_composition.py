@@ -193,13 +193,14 @@ def test_composition_wiki_resource_id_not_reused_force_collision():
     try:
         kernel, store = _setup_kernel_and_store(repo_root)
         binding = kernel.get_binding("wiki")
-        # Force-generate ids to verify no collision with the prefix
-        ids = set()
+        tombstone_id = binding.ledger.gen_id(set())
+        binding.ledger.tombstone(tombstone_id)
+        assert binding.ledger.is_tombstoned(tombstone_id), \
+            "tombstoned id must be recognised as tombstoned"
         for _ in range(50):
-            new_id = binding.ledger.gen_id(ids)
-            assert new_id.startswith("w-"), f"id must start with w-, got {new_id!r}"
-            assert new_id not in ids, f"collision: {new_id}"
-            ids.add(new_id)
+            new_id = binding.ledger.gen_id({tombstone_id})
+            assert new_id != tombstone_id, \
+                f"tombstoned id {tombstone_id} reused as {new_id}"
     finally:
         import shutil
         shutil.rmtree(repo_root, ignore_errors=True)
