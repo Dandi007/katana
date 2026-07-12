@@ -6,5 +6,5 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PY="${PYTHON:-python3}"
 exec "$PY" -m pytest \
-  "$HERE/shared/tests" "$HERE/wiki/tests" "$HERE/work-folder/tests" "$HERE/memory/tests" \
+  "$HERE/shared/tests" "$HERE/wiki/tests" "$HERE/work-folder/tests" "$HERE/memory/tests" "$HERE/kernel/tests" \
   --import-mode=importlib -p no:cacheprovider "$@"
