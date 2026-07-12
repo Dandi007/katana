@@ -52,7 +52,7 @@ def test_create_then_index_then_get(srv):
 
 def test_update_and_delete_commit(srv):
     mcp, tdir, repo = srv
-    cid = _call(mcp, "memory_create", {"name": "u-card", "description": "d", "body": "b"})["id"]
+    cid = _call(mcp, "memory_create", {"name": "u-card", "description": "d", "body": "## Fact\ntest\n\n## How to Verify\ntest"})["id"]
     upd = _call(mcp, "memory_update", {"id": cid, "status": "stale"})
     assert upd["status"] == "stale" and upd["git"]["committed"] is True
     del_ = _call(mcp, "memory_delete", {"id": cid})
