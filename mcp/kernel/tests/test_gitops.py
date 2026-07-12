@@ -50,8 +50,7 @@ def test_git_commit_creates_commit(git_repo):
     path = os.path.join(git_repo, "file.txt")
     with open(path, "w") as f:
         f.write("hello")
-    sha = head_sha(git_repo)
-    result = git_commit(git_repo, "test commit", [path], expected_base_sha=sha)
+    result = git_commit(git_repo, "test commit", [path])
     assert result["committed"] is True
 
 

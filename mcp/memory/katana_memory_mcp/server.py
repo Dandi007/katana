@@ -18,14 +18,11 @@ from starlette.routing import Mount, Route
 
 from katana_kb_mcp_shared import config
 from katana_kernel import (
-    CASRejectionError,
     DomainPolicy,
     GovernedKernel,
     GovernedVFS,
     ResourceIdLedger,
     TransactionManifest,
-    head_sha,
-    is_working_tree_clean,
 )
 from katana_memory_mcp import index as index_mod
 from katana_memory_mcp.store import MemoryStore

@@ -9,11 +9,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import subprocess
 from collections.abc import Callable
 from typing import Any
 
-from katana_kernel.gitops import CASRejectionError, _restore_tree, cas_guard, git_commit
+from katana_kernel.gitops import _restore_tree, cas_guard, git_commit
 
 
 @dataclasses.dataclass
