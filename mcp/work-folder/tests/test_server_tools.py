@@ -1,20 +1,25 @@
-"""test_server_tools.py — WF-5 测试：4 个 fat tool shell + 边界硬化 + 工具注册验证。
+"""test_server_tools.py — WF-6 测试：6 个 fat tool shell + 边界硬化 + 工具注册验证。
 
 TDD 顺序：先跑红，实现后转绿。
 """
 import asyncio
 import datetime
 import inspect
+import os
 
 import katana_work_folder_mcp.server as server
 
 
 # ---------------------------------------------------------------------------
-# 辅助：固定 _wf_root 为测试路径
+# 辅助：固定 _wf_root / _store 为测试路径
 # ---------------------------------------------------------------------------
 
 def _set_wf_root(path: str) -> None:
     server._wf_root = path
+
+
+def _set_store(store) -> None:
+    server._store = store
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +40,6 @@ class TestResolveFolder:
     def test_relative_with_none_wf_root_falls_back_to_dot(self):
         server._wf_root = None
         result = server._resolve_folder("some/topic")
-        import os
         assert result == os.path.join(".", "some/topic")
 
 
@@ -84,97 +88,113 @@ class TestSafeResumeFields:
 
 
 # ---------------------------------------------------------------------------
-# 3. 工具注册：5 个工具都已注册
+# 3. 工具注册：6 个工具都已注册
 # ---------------------------------------------------------------------------
 
 class TestToolRegistration:
-    def test_all_five_tools_registered(self):
+    def test_all_six_tools_registered(self):
         tools = asyncio.run(server.mcp.list_tools())
         names = {t.name for t in tools}
-        assert {"wf_search", "wf_create", "wf_list", "wf_save", "wf_resume"} <= names
+        assert {"wf_search", "wf_create", "wf_list", "wf_save", "wf_resume", "wf_reindex"} <= names
 
     def test_server_module_has_all_tool_functions(self):
-        """备用断言：确认模块属性层面 5 个异步函数都存在。"""
-        for fn_name in ("wf_search", "wf_create", "wf_list", "wf_save", "wf_resume"):
+        """备用断言：确认模块属性层面 6 个异步函数都存在。"""
+        for fn_name in ("wf_search", "wf_create", "wf_list", "wf_save", "wf_resume", "wf_reindex"):
             fn = getattr(server, fn_name, None)
             assert fn is not None, f"server.{fn_name} not found"
             assert inspect.iscoroutinefunction(fn), f"server.{fn_name} should be async"
 
 
 # ---------------------------------------------------------------------------
-# 4. 路由测试：wf_create 路由到 _lifecycle.do_create
+# 4. 路由测试：wf_create 路由到 store.create
 # ---------------------------------------------------------------------------
 
 class TestWfCreateRouting:
-    def test_routes_to_do_create_with_wf_root_and_topic(self, monkeypatch):
-        _set_wf_root("/kb/wf")
+    def test_routes_to_store_create_with_topic(self, monkeypatch):
         captured = {}
         fake_now = datetime.datetime(2026, 6, 22, 13, 0, 0)
 
-        def fake_do_create(work_folder_root, topic, *, now_fn):
-            captured["work_folder_root"] = work_folder_root
-            captured["topic"] = topic
-            captured["now"] = now_fn()
-            return {"created": True, "path": "/kb/wf/2026/06/22/test-topic", "seeded": []}
+        class FakeStore:
+            def create(self, topic, now_fn, expected_base_sha=None):
+                captured["topic"] = topic
+                captured["now"] = now_fn()
+                captured["expected_base_sha"] = expected_base_sha
+                return {"created": True, "path": "2026/06/22/test-topic",
+                        "seeded": [], "id": "wf-000000",
+                        "git": {"committed": True, "detail": "a" * 40},
+                        "manifest": {"manifest_id": "x"}}
 
-        monkeypatch.setattr(server._lifecycle, "do_create", fake_do_create)
+        _set_store(FakeStore())
         monkeypatch.setattr(server, "_now", lambda: fake_now)
 
         result = asyncio.run(server.wf_create("test topic"))
 
-        assert captured["work_folder_root"] == "/kb/wf"
         assert captured["topic"] == "test topic"
         assert captured["now"] == fake_now
+        assert captured["expected_base_sha"] is None
         assert result["created"] is True
 
-    def test_uses_dot_when_wf_root_none(self, monkeypatch):
-        server._wf_root = None
+    def test_passes_expected_base_sha(self, monkeypatch):
         captured = {}
+        fake_now = datetime.datetime(2026, 6, 22, 13, 0, 0)
 
-        def fake_do_create(work_folder_root, topic, *, now_fn):
-            captured["work_folder_root"] = work_folder_root
-            return {"created": True, "path": "/x", "seeded": []}
+        class FakeStore:
+            def create(self, topic, now_fn, expected_base_sha=None):
+                captured["expected_base_sha"] = expected_base_sha
+                return {"created": True, "path": "x", "seeded": [],
+                        "id": "wf-000000",
+                        "git": {"committed": True, "detail": "a" * 40},
+                        "manifest": {"manifest_id": "x"}}
 
-        monkeypatch.setattr(server._lifecycle, "do_create", fake_do_create)
-        asyncio.run(server.wf_create("topic"))
-        assert captured["work_folder_root"] == "."
+        _set_store(FakeStore())
+        monkeypatch.setattr(server, "_now", lambda: fake_now)
+
+        asyncio.run(server.wf_create("topic", expected_base_sha="a" * 40))
+        assert captured["expected_base_sha"] == "a" * 40
 
 
 # ---------------------------------------------------------------------------
-# 5. 路由测试：wf_resume 路由到 _lifecycle.do_resume（含 _resolve_folder）
+# 5. 路由测试：wf_resume 路由到 store.resume（含 _resolve_folder）
 # ---------------------------------------------------------------------------
 
 class TestWfResumeRouting:
-    def test_routes_absolute_folder_to_do_resume(self, monkeypatch):
-        _set_wf_root("/kb/wf")
+    def test_routes_absolute_folder_to_store_resume(self, monkeypatch):
+        _set_wf_root("/abs/path")
         captured = {}
         fake_now = datetime.datetime(2026, 6, 22, 14, 0, 0)
 
-        def fake_do_resume(folder, *, now_fn, **kwargs):
-            captured["folder"] = folder
-            captured["now"] = now_fn()
-            return {"ok": True, "folder": folder, "blocked": False}
+        class FakeStore:
+            def resume(self, folder, now_fn, probe_fn=None, expected_base_sha=None):
+                captured["folder"] = folder
+                captured["now"] = now_fn()
+                captured["expected_base_sha"] = expected_base_sha
+                return {"ok": True, "folder": folder, "blocked": False,
+                        "git": {"committed": True, "detail": "a" * 40},
+                        "manifest": {"manifest_id": "x"}}
 
-        monkeypatch.setattr(server._lifecycle, "do_resume", fake_do_resume)
+        _set_store(FakeStore())
         monkeypatch.setattr(server, "_now", lambda: fake_now)
 
         asyncio.run(server.wf_resume("/abs/path/to/folder"))
 
-        assert captured["folder"] == "/abs/path/to/folder"
+        assert captured["folder"] == "to/folder"
         assert captured["now"] == fake_now
 
     def test_resolves_relative_folder_against_wf_root(self, monkeypatch):
         _set_wf_root("/kb/wf")
         captured = {}
 
-        def fake_do_resume(folder, *, now_fn, **kwargs):
-            captured["folder"] = folder
-            return {"ok": True, "folder": folder, "blocked": False}
+        class FakeStore:
+            def resume(self, folder, now_fn, probe_fn=None, expected_base_sha=None):
+                captured["folder"] = folder
+                return {"ok": True, "folder": folder, "blocked": False,
+                        "git": {"committed": True, "detail": "a" * 40},
+                        "manifest": {"manifest_id": "x"}}
 
-        monkeypatch.setattr(server._lifecycle, "do_resume", fake_do_resume)
+        _set_store(FakeStore())
         asyncio.run(server.wf_resume("2026/06/22/my-topic"))
 
-        assert captured["folder"] == "/kb/wf/2026/06/22/my-topic"
+        assert captured["folder"] == "2026/06/22/my-topic"
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +220,7 @@ class TestWfListRouting:
 
 
 # ---------------------------------------------------------------------------
-# 6b. 路由测试：wf_reindex 路由到 _reindex.reindex（用 _wf_root）
+# 6b. 路由测试：wf_reindex 路由到 store.reindex
 # ---------------------------------------------------------------------------
 
 class TestWfReindexRouting:
@@ -208,39 +228,61 @@ class TestWfReindexRouting:
         tools = asyncio.run(server.mcp.list_tools())
         assert "wf_reindex" in {t.name for t in tools}
 
-        _set_wf_root("/kb/wf")
         captured = {}
 
-        def fake_reindex(root, dry_run=False):
-            captured["root"] = root
-            captured["dry_run"] = dry_run
-            return {"indexed": 3, "skipped": 0, "errors": [], "index_path": "/kb/wf/INDEX.md"}
+        class FakeStore:
+            def reindex(self, dry_run=False, expected_base_sha=None):
+                captured["dry_run"] = dry_run
+                captured["expected_base_sha"] = expected_base_sha
+                return {"indexed": 3, "skipped": 0, "errors": [],
+                        "index_path": "INDEX.md",
+                        "git": {"committed": True, "detail": "a" * 40},
+                        "manifest": {"manifest_id": "x"}}
 
-        monkeypatch.setattr(server._reindex, "reindex", fake_reindex)
+        _set_store(FakeStore())
         result = asyncio.run(server.wf_reindex(dry_run=True))
-        assert captured["root"] == "/kb/wf"
         assert captured["dry_run"] is True
         assert result["indexed"] == 3
 
+    def test_patches_index_path_to_absolute(self, monkeypatch):
+        _set_wf_root("/kb/wf")
+
+        class FakeStore:
+            def reindex(self, dry_run=False, expected_base_sha=None):
+                return {"indexed": 3, "skipped": 0, "errors": [],
+                        "index_path": "INDEX.md",
+                        "git": {"committed": True, "detail": "a" * 40},
+                        "manifest": {"manifest_id": "x"}}
+
+        _set_store(FakeStore())
+        result = asyncio.run(server.wf_reindex())
+        assert result["index_path"] == "/kb/wf/INDEX.md"
+
 
 # ---------------------------------------------------------------------------
-# 7. 路由测试：wf_save 路由到 _lifecycle.do_save（含 _safe_resume_fields 过滤）
+# 7. 路由测试：wf_save 路由到 store.save（含 _safe_resume_fields 过滤）
 # ---------------------------------------------------------------------------
 
 class TestWfSaveRouting:
-    def test_routes_with_resolved_folder_and_filtered_resume_fields(self, monkeypatch):
-        _set_wf_root("/kb/wf")
+    def test_routes_with_filtered_resume_fields(self, monkeypatch):
+        _set_wf_root("/abs/folder")
         captured = {}
         fake_now = datetime.datetime(2026, 6, 22, 13, 30, 0)
 
-        def fake_do_save(folder, *, now_fn, summary, context_snapshot,
-                         resume_fields, golden_order_additions, findings_addition):
-            captured["folder"] = folder
-            captured["resume_fields"] = resume_fields
-            captured["summary"] = summary
-            return {"saved": True, "folder": folder, "written": [], "contract": "x"}
+        class FakeStore:
+            def save(self, folder, now_fn, summary="checkpoint",
+                     context_snapshot=None, resume_fields=None,
+                     golden_order_additions=None, findings_addition=None,
+                     expected_base_sha=None):
+                captured["folder"] = folder
+                captured["resume_fields"] = resume_fields
+                captured["summary"] = summary
+                return {"saved": True, "folder": folder, "written": [],
+                        "contract": "x",
+                        "git": {"committed": True, "detail": "a" * 40},
+                        "manifest": {"manifest_id": "x"}}
 
-        monkeypatch.setattr(server._lifecycle, "do_save", fake_do_save)
+        _set_store(FakeStore())
         monkeypatch.setattr(server, "_now", lambda: fake_now)
 
         dirty_fields = {"goal": "ok", "evil": "drop_me"}
@@ -250,22 +292,26 @@ class TestWfSaveRouting:
             resume_fields=dirty_fields,
         ))
 
-        assert captured["folder"] == "/abs/folder"
         assert captured["summary"] == "my checkpoint"
-        # evil key must be filtered out
         assert "evil" not in (captured["resume_fields"] or {})
         assert captured["resume_fields"].get("goal") == "ok"
 
     def test_none_resume_fields_passes_through(self, monkeypatch):
-        _set_wf_root("/kb/wf")
+        _set_wf_root("/abs/folder")
         captured = {}
 
-        def fake_do_save(folder, *, now_fn, summary, context_snapshot,
-                         resume_fields, golden_order_additions, findings_addition):
-            captured["resume_fields"] = resume_fields
-            return {"saved": True, "folder": folder, "written": [], "contract": "x"}
+        class FakeStore:
+            def save(self, folder, now_fn, summary="checkpoint",
+                     context_snapshot=None, resume_fields=None,
+                     golden_order_additions=None, findings_addition=None,
+                     expected_base_sha=None):
+                captured["resume_fields"] = resume_fields
+                return {"saved": True, "folder": folder, "written": [],
+                        "contract": "x",
+                        "git": {"committed": True, "detail": "a" * 40},
+                        "manifest": {"manifest_id": "x"}}
 
-        monkeypatch.setattr(server._lifecycle, "do_save", fake_do_save)
+        _set_store(FakeStore())
         asyncio.run(server.wf_save("/abs/folder"))
 
         assert captured["resume_fields"] is None
