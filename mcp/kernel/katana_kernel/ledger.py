@@ -36,6 +36,9 @@ class ResourceIdLedger:
         self._tombstones.add(resource_id)
         self._save()
 
+    def rollback_tombstone(self, resource_id: str):
+        self._tombstones.discard(resource_id)
+
     def is_tombstoned(self, resource_id: str) -> bool:
         return resource_id in self._tombstones
 

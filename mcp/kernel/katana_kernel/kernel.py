@@ -13,7 +13,7 @@ import subprocess
 from collections.abc import Callable
 from typing import Any
 
-from katana_kernel.gitops import CASRejectionError, _restore_tree, cas_guard, git_commit, head_sha, is_working_tree_clean
+from katana_kernel.gitops import CASRejectionError, _restore_tree, cas_guard, git_commit
 
 
 @dataclasses.dataclass
@@ -85,11 +85,23 @@ class GovernedKernel:
         result = write_fn(binding=binding, args=args)
 
         changed_paths = list(result.pop("changed_paths", []))
+        tombstoned_id = None
         if op == "delete" and "id" in result:
+            tombstoned_id = result["id"]
             binding.ledger.tombstone(result["id"])
 
         manifest_record = binding.manifest.record(domain, op, result)
         committed_manifest_ids = binding.manifest.commit_manifests()
+
+        manifest_path = os.path.join(
+            binding.manifest.manifests_dir,
+            f"{manifest_record['manifest_id']}.json",
+        )
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest_data = json.load(f)
+        manifest_data["git"] = {"committed": True}
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest_data, f, indent=2)
 
         all_paths = list(changed_paths)
         for p in extra_commit_paths or []:
@@ -110,34 +122,18 @@ class GovernedKernel:
             binding.repo_root,
             commit_msg or f"chore({domain}): {op}",
             all_paths,
-            expected_base_sha=expected_base_sha,
         )
 
         if not git_result.get("committed"):
             binding.manifest.rollback_committed(committed_manifest_ids["manifests"])
+            if tombstoned_id is not None:
+                binding.ledger.rollback_tombstone(tombstoned_id)
             _restore_tree(binding.repo_root)
             return {
                 **{k: v for k, v in result.items()},
                 "git": git_result,
                 "manifest": {"manifest_id": manifest_record["manifest_id"]},
             }
-
-        manifest_path = os.path.join(
-            binding.manifest.manifests_dir,
-            f"{manifest_record['manifest_id']}.json",
-        )
-        updated_record = {**manifest_record, "git": git_result}
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(updated_record, f, indent=2)
-
-        subprocess.run(
-            ["git", "-C", binding.repo_root, "add", manifest_path],
-            capture_output=True, text=True, timeout=30,
-        )
-        subprocess.run(
-            ["git", "-C", binding.repo_root, "commit", "--amend", "--no-edit"],
-            capture_output=True, text=True, timeout=30,
-        )
 
         return {
             **{k: v for k, v in result.items()},

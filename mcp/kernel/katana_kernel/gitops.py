@@ -62,9 +62,7 @@ def git_commit(
     repo_root: str,
     message: str,
     paths: list[str],
-    expected_base_sha: str | None = None,
 ) -> dict:
-    cas_guard(repo_root, expected_base_sha)
     try:
         add = _run(repo_root, "add", "--", *paths)
         if add.returncode != 0:

@@ -72,8 +72,6 @@ class TransactionManifest:
         self._ensure_dirs()
         manifests = []
         for mp in sorted(self._dir.glob("*.json")):
-            if mp.parent == self._staging_dir:
-                continue
             try:
                 manifests.append(json.loads(mp.read_text(encoding="utf-8")))
             except (json.JSONDecodeError, OSError):

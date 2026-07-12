@@ -11,7 +11,7 @@ import secrets
 
 import yaml
 
-from katana_kernel.kernel import DomainBinding, GovernedKernel
+from katana_kernel.kernel import GovernedKernel
 
 ID_RE = re.compile(r"m-[0-9a-f]{6}")
 NAME_RE = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?")

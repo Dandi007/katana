@@ -365,3 +365,27 @@ def test_composition_data_root_not_default_slash_data_memory():
     finally:
         if old is not None:
             os.environ["KATANA_MEMORY_DIR"] = old
+
+
+# --- Regression: sequential CAS uses returned SHA (feedback PRIMARY) ---
+
+def test_sequential_cas_uses_returned_sha():
+    repo_root, tenant = _make_git_repo()
+    try:
+        kernel, store = _setup_kernel_and_store(repo_root)
+        r1 = store.create_card(tenant, "card-seq", "desc seq",
+                               "## Fact\nx\n\n## How to Verify\ny")
+        sha1 = r1["git"]["detail"]
+        assert sha1 == head_sha(repo_root), \
+            "returned SHA must equal canonical HEAD after mutate"
+        r2 = store.update_card(tenant, r1["id"], description="d2",
+                               expected_base_sha=sha1)
+        assert r2["git"]["committed"] is True
+        assert is_working_tree_clean(repo_root), \
+            "working tree must be clean after sequential CAS-chained mutations"
+        sha2 = r2["git"]["detail"]
+        assert sha2 == head_sha(repo_root), \
+            "returned SHA must equal canonical HEAD after second mutate"
+    finally:
+        import shutil
+        shutil.rmtree(repo_root, ignore_errors=True)
