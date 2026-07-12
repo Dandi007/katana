@@ -10,12 +10,20 @@ import os
 from fastmcp import FastMCP
 
 from katana_kb_mcp_shared import config, vault_search
+from katana_kernel import (
+    DomainPolicy,
+    GovernedKernel,
+    GovernedVFS,
+    ResourceIdLedger,
+    TransactionManifest,
+)
 from katana_wiki_mcp import enumerate as _enumerate
 from katana_wiki_mcp import ingest as _ingest
 from katana_wiki_mcp import invariants as _inv
 from katana_wiki_mcp import lint as _lint
 from katana_wiki_mcp import pages as _pages
 from katana_wiki_mcp import query as _query
+from katana_wiki_mcp.store import WikiStore, _wiki_policy
 
 mcp = FastMCP(
     "katana-wiki-mcp",
@@ -28,6 +36,8 @@ mcp = FastMCP(
 
 _scope: str | None = None
 _wiki_root: str | None = None
+_kernel: GovernedKernel | None = None
+_store: WikiStore | None = None
 
 
 def compute_scope(wiki_root: str, kb_root: str) -> str | None:
@@ -36,10 +46,27 @@ def compute_scope(wiki_root: str, kb_root: str) -> str | None:
     return None if rel in (".", "") else rel
 
 
+def _init_kernel(wiki_root: str) -> None:
+    global _kernel, _store
+    if _kernel is not None and _kernel.get_binding("wiki"):
+        return
+    _kernel = GovernedKernel()
+    vfs = GovernedVFS(wiki_root)
+    ledger = ResourceIdLedger(
+        os.path.join(wiki_root, ".katana", "tombstones.json"),
+        prefix="w-",
+    )
+    manifest = TransactionManifest(os.path.join(wiki_root, ".katana", "manifests"))
+    policy = _wiki_policy()
+    _kernel.bind("wiki", policy, vfs, ledger, manifest, wiki_root)
+    _store = WikiStore(_kernel)
+
+
 def configure(wiki_root: str, kb_root: str) -> None:
     global _scope, _wiki_root
     _scope = compute_scope(wiki_root, kb_root)
     _wiki_root = wiki_root
+    _init_kernel(wiki_root)
 
 
 def _do_search(query: str, top_k: int, scope: str | None) -> list[dict]:
@@ -91,15 +118,13 @@ async def wiki_ingest_plan(source_text: str) -> dict:
 
 
 @mcp.tool()
-async def wiki_ingest_apply(proposal: dict) -> dict:
-    """入库第二步：server 校验不变量(缺 provenance/outlink/frontmatter 必拒,零落盘)→ 通过则写页+自动反链+log+commit。
-    Args: proposal 见 wiki_ingest_plan 返回的 proposal_schema。返回 applied/rejected/commit。"""
-    return _ingest.apply(
-        proposal, _wiki_root or ".",
-        validate_fn=_inv.validate_page,
-        write_fn=_pages.write_page, backlink_fn=_pages.ensure_backlink,
-        log_fn=_pages.append_log, commit_fn=_pages.git_commit,
-    )
+async def wiki_ingest_apply(proposal: dict,
+                            expected_base_sha: str | None = None) -> dict:
+    """入库第二步：server 校验不变量(缺 provenance/outlink/frontmatter 必拒,零落盘)→ 通过则经 kernel 治理链写页+自动反链+log+commit。
+    Args: proposal 见 wiki_ingest_plan 返回的 proposal_schema。expected_base_sha 可选 CAS 校验。返回 applied/rejected/commit。"""
+    if _store is None:
+        raise RuntimeError("wiki store not initialized; call configure() first")
+    return _store.ingest_apply(proposal, expected_base_sha=expected_base_sha)
 
 
 @mcp.tool()
