@@ -48,8 +48,6 @@ def compute_scope(wiki_root: str, kb_root: str) -> str | None:
 
 def _init_kernel(wiki_root: str) -> None:
     global _kernel, _store
-    if _kernel is not None and _kernel.get_binding("wiki"):
-        return
     _kernel = GovernedKernel()
     vfs = GovernedVFS(wiki_root)
     ledger = ResourceIdLedger(
