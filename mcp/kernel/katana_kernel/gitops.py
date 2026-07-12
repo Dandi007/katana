@@ -80,3 +80,23 @@ def git_commit(
         }
     except (subprocess.SubprocessError, OSError) as e:
         return {"committed": False, "detail": str(e)}
+
+
+def amend_commit(
+    repo_root: str,
+    paths: list[str],
+) -> dict:
+    try:
+        add = _run(repo_root, "add", "--", *paths)
+        if add.returncode != 0:
+            return {"committed": False, "detail": add.stderr.strip()}
+        c = _run(repo_root, "commit", "--amend", "--no-edit")
+        if c.returncode != 0:
+            return {"committed": False, "detail": c.stderr.strip() or c.stdout.strip()}
+        sha = head_sha(repo_root)
+        return {
+            "committed": True,
+            "detail": sha if sha else "committed",
+        }
+    except (subprocess.SubprocessError, OSError) as e:
+        return {"committed": False, "detail": str(e)}

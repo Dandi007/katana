@@ -52,12 +52,19 @@ def _resolve_data_root() -> str:
     if root:
         return root
     try:
-        return config.resolve("memory_data_path", default=".", env_var="KATANA_MEMORY_DIR")
+        resolved = config.resolve("memory_data_path", default="", env_var="KATANA_MEMORY_DIR")
+        if resolved and resolved != ".":
+            return resolved
     except Exception:
-        return "."
+        pass
+    raise RuntimeError(
+        "KATANA_MEMORY_DIR not set and katana-config.sh could not resolve memory_data_path; "
+        "set KATANA_MEMORY_DIR to the data repo root."
+    )
 
 
-def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP:
+def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str,
+                         kernel: GovernedKernel | None = None) -> FastMCP:
     m = FastMCP(
         f"katana-memory-mcp[{tenant}]",
         instructions=(
@@ -70,12 +77,13 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str) -> FastMCP
         ),
     )
 
-    kernel = GovernedKernel()
-    vfs = GovernedVFS(repo_root)
-    ledger = ResourceIdLedger(os.path.join(repo_root, ".katana", "tombstones.json"))
-    manifest = TransactionManifest(os.path.join(repo_root, ".katana", "manifests"))
-    policy = _memory_policy()
-    kernel.bind("memory", policy, vfs, ledger, manifest, repo_root)
+    if kernel is None:
+        kernel = GovernedKernel()
+        vfs = GovernedVFS(repo_root)
+        ledger = ResourceIdLedger(os.path.join(repo_root, ".katana", "tombstones.json"))
+        manifest = TransactionManifest(os.path.join(repo_root, ".katana", "manifests"))
+        policy = _memory_policy()
+        kernel.bind("memory", policy, vfs, ledger, manifest, repo_root)
     store = MemoryStore(kernel)
 
     @m.tool()
@@ -134,10 +142,18 @@ def _tenants(data_root: str) -> list[str]:
 
 def build_app(data_root: str) -> Starlette:
     tenants = _tenants(data_root)
+
+    kernel = GovernedKernel()
+    vfs = GovernedVFS(data_root)
+    ledger = ResourceIdLedger(os.path.join(data_root, ".katana", "tombstones.json"))
+    manifest = TransactionManifest(os.path.join(data_root, ".katana", "manifests"))
+    policy = _memory_policy()
+    kernel.bind("memory", policy, vfs, ledger, manifest, data_root)
+
     sub_apps: list = []
     mounts: list = []
     for t in tenants:
-        mcp_server = build_tenant_server(t, os.path.join(data_root, t), data_root)
+        mcp_server = build_tenant_server(t, os.path.join(data_root, t), data_root, kernel=kernel)
         sub = mcp_server.http_app(path="/mcp")
         sub_apps.append(sub)
         mounts.append(Mount(f"/t/{t}", app=sub))

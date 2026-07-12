@@ -12,7 +12,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-from katana_kernel.gitops import _restore_tree, cas_guard, git_commit
+from katana_kernel.gitops import _restore_tree, amend_commit, cas_guard, git_commit
 
 
 @dataclasses.dataclass
@@ -92,16 +92,6 @@ class GovernedKernel:
         manifest_record = binding.manifest.record(domain, op, result)
         committed_manifest_ids = binding.manifest.commit_manifests()
 
-        manifest_path = os.path.join(
-            binding.manifest.manifests_dir,
-            f"{manifest_record['manifest_id']}.json",
-        )
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest_data = json.load(f)
-        manifest_data["git"] = {"committed": True}
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest_data, f, indent=2)
-
         all_paths = list(changed_paths)
         for p in extra_commit_paths or []:
             if p not in all_paths:
@@ -134,8 +124,31 @@ class GovernedKernel:
                 "manifest": {"manifest_id": manifest_record["manifest_id"]},
             }
 
+        manifest_path = os.path.join(
+            binding.manifest.manifests_dir,
+            f"{manifest_record['manifest_id']}.json",
+        )
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest_data = json.load(f)
+        manifest_data["git"] = git_result
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest_data, f, indent=2)
+
+        amend_result = amend_commit(binding.repo_root, [manifest_path])
+
+        if not amend_result.get("committed"):
+            binding.manifest.rollback_committed(committed_manifest_ids["manifests"])
+            if tombstoned_id is not None:
+                binding.ledger.rollback_tombstone(tombstoned_id)
+            _restore_tree(binding.repo_root)
+            return {
+                **{k: v for k, v in result.items()},
+                "git": amend_result,
+                "manifest": {"manifest_id": manifest_record["manifest_id"]},
+            }
+
         return {
             **{k: v for k, v in result.items()},
-            "git": git_result,
+            "git": amend_result,
             "manifest": {"manifest_id": manifest_record["manifest_id"]},
         }

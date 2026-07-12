@@ -153,7 +153,7 @@ def test_composition_manifest_git_field_populated():
     try:
         kernel, store = _setup_kernel_and_store(repo_root)
         result = store.create_card(tenant, "card-git", "desc git",
-                                   "## Fact\nx\n\n## How to Verify\ny")
+                                    "## Fact\nx\n\n## How to Verify\ny")
         manifest_id = result["manifest"]["manifest_id"]
         import json
         found = False
@@ -171,6 +171,15 @@ def test_composition_manifest_git_field_populated():
                 assert isinstance(git_field, dict), "git field must be a dict"
                 assert git_field, f"git field must be non-empty, got {git_field!r}"
                 assert git_field.get("committed") is True, "git.committed must be True"
+                detail = git_field.get("detail", "")
+                assert detail, "git.detail must be non-empty"
+                assert len(detail) == 40, f"git.detail must be a valid 40-char SHA, got {detail!r}"
+                cat = subprocess.run(
+                    ["git", "-C", repo_root, "cat-file", "-t", detail],
+                    capture_output=True, text=True,
+                )
+                assert cat.returncode == 0, \
+                    f"git.detail SHA {detail} not a valid git object in repo"
                 found = True
                 break
         assert found, "manifest not found in committed git history"
@@ -238,12 +247,12 @@ def test_composition_resource_id_not_reused_force_collision():
 
 # --- 4. governed VFS: reject path traversal / cross-domain write (spec L30) ---
 
-def test_composition_vfs_rejects_path_traversal():
+def test_composition_edit_rejects_path_like_name():
     repo_root, tenant = _make_git_repo()
     try:
         kernel, store = _setup_kernel_and_store(repo_root)
         result = store.create_card(tenant, "card-k", "desc k",
-                                   "## Fact\nx\n\n## How to Verify\ny")
+                                    "## Fact\nx\n\n## How to Verify\ny")
         cid = result["id"]
         with pytest.raises(Exception):
             store.edit_card(tenant, cid, "card-k", "../escape")
@@ -360,8 +369,8 @@ def test_composition_data_root_not_default_slash_data_memory():
     from katana_memory_mcp.server import _resolve_data_root
     old = os.environ.pop("KATANA_MEMORY_DIR", None)
     try:
-        root = _resolve_data_root()
-        assert root != "/data/memory", "default data root must not be /data/memory"
+        with pytest.raises(RuntimeError, match="KATANA_MEMORY_DIR"):
+            _resolve_data_root()
     finally:
         if old is not None:
             os.environ["KATANA_MEMORY_DIR"] = old
