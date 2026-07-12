@@ -33,10 +33,43 @@ def _wf_policy() -> DomainPolicy:
         elif op in ("wf_save", "wf_resume"):
             if not args.get("folder"):
                 raise PolicyViolationError("folder is required")
+        elif op == "fs_create":
+            if not args.get("path"):
+                raise PolicyViolationError("path is required for fs_create")
+            if not args.get("content"):
+                raise PolicyViolationError("content is required for fs_create")
+        elif op == "fs_write":
+            if not args.get("path"):
+                raise PolicyViolationError("path is required for fs_write")
+            if not args.get("content"):
+                raise PolicyViolationError("content is required for fs_write")
+        elif op == "fs_edit":
+            if not args.get("path"):
+                raise PolicyViolationError("path is required for fs_edit")
+            if not args.get("old_string"):
+                raise PolicyViolationError("old_string is required for fs_edit")
+        elif op == "fs_copy":
+            if not args.get("source"):
+                raise PolicyViolationError("source is required for fs_copy")
+            if not args.get("dest"):
+                raise PolicyViolationError("dest is required for fs_copy")
+        elif op == "fs_rename":
+            if not args.get("source"):
+                raise PolicyViolationError("source is required for fs_rename")
+            if not args.get("dest"):
+                raise PolicyViolationError("dest is required for fs_rename")
+        elif op in ("fs_delete", "delete"):
+            if not args.get("path"):
+                raise PolicyViolationError("path is required for fs_delete")
+        elif op == "fs_batch":
+            if not args.get("operations"):
+                raise PolicyViolationError("operations is required for fs_batch")
 
     return DomainPolicy(
         domain="work-folder",
-        allowed_ops={"wf_create", "wf_save", "wf_resume", "wf_reindex"},
+        allowed_ops={"wf_create", "wf_save", "wf_resume", "wf_reindex",
+            "fs_create", "fs_write", "fs_edit", "fs_copy", "fs_rename",
+            "fs_delete", "fs_batch", "delete"},
         invariants=[_invariants],
     )
 

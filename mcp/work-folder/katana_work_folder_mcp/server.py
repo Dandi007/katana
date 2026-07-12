@@ -26,6 +26,7 @@ from katana_kernel import (
 )
 from katana_work_folder_mcp import lifecycle as _lifecycle
 from katana_work_folder_mcp import reindex as _reindex
+from katana_work_folder_mcp.fs_tools import FSTools
 from katana_work_folder_mcp.store import WorkFolderStore, _wf_policy
 
 mcp = FastMCP(
@@ -40,6 +41,7 @@ _scope: str | None = None
 _wf_root: str | None = None
 _kernel: GovernedKernel | None = None
 _store: WorkFolderStore | None = None
+_fs_tools: FSTools | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +124,7 @@ def _ensure_git_repo(path: str) -> None:
 
 
 def configure(work_folder_path: str, kb_root: str) -> None:
-    global _scope, _wf_root, _kernel, _store
+    global _scope, _wf_root, _kernel, _store, _fs_tools
     _scope = compute_scope(work_folder_path, kb_root)
     _wf_root = work_folder_path
 
@@ -141,6 +143,7 @@ def configure(work_folder_path: str, kb_root: str) -> None:
     policy = _wf_policy()
     _kernel.bind("work-folder", policy, vfs, ledger, manifest, work_folder_path)
     _store = WorkFolderStore(_kernel)
+    _fs_tools = FSTools(_kernel, work_folder_path)
 
 
 def _do_search(query: str, top_k: int, scope: str | None) -> list[dict]:
@@ -288,6 +291,147 @@ def main() -> None:
     host = os.environ.get("KATANA_WORK_FOLDER_MCP_HOST", "127.0.0.1")
     port = int(os.environ.get("KATANA_WORK_FOLDER_MCP_PORT", "5602"))
     mcp.run(transport="streamable-http", host=host, port=port)
+
+
+# ---------------------------------------------------------------------------
+# Full VFS (fs_*) tool wrappers — thin shells routing to FSTools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def fs_capabilities() -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_capabilities()
+
+
+@mcp.tool()
+async def fs_resolve(path_or_id: str) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_resolve(path_or_id)
+
+
+@mcp.tool()
+async def fs_stat(path: str) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_stat(path)
+
+
+@mcp.tool()
+async def fs_list(path: str = "") -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_list(path)
+
+
+@mcp.tool()
+async def fs_glob(pattern: str) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_glob(pattern)
+
+
+@mcp.tool()
+async def fs_read(path: str, offset: int | None = None, limit: int | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_read(path, offset=offset, limit=limit)
+
+
+@mcp.tool()
+async def fs_create(path: str, content: str,
+                    resource_id: str | None = None,
+                    expected_base_commit: str | None = None,
+                    idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_create(path, content,
+                                resource_id=resource_id,
+                                expected_base_commit=expected_base_commit,
+                                idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_write(path: str, content: str,
+                   resource_id: str | None = None,
+                   expected_base_commit: str | None = None,
+                   expected_resource_revision: str | None = None,
+                   idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_write(path, content,
+                               resource_id=resource_id,
+                               expected_base_commit=expected_base_commit,
+                               expected_resource_revision=expected_resource_revision,
+                               idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_edit(path: str, old_string: str, new_string: str,
+                  resource_id: str | None = None,
+                  replace_all: bool = False,
+                  expected_base_commit: str | None = None,
+                  expected_resource_revision: str | None = None,
+                  idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_edit(path, old_string, new_string,
+                              resource_id=resource_id,
+                              replace_all=replace_all,
+                              expected_base_commit=expected_base_commit,
+                              expected_resource_revision=expected_resource_revision,
+                              idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_copy(source: str, dest: str,
+                  resource_id: str | None = None,
+                  expected_base_commit: str | None = None,
+                  idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_copy(source, dest,
+                              resource_id=resource_id,
+                              expected_base_commit=expected_base_commit,
+                              idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_rename(source: str, dest: str,
+                    resource_id: str | None = None,
+                    expected_base_commit: str | None = None,
+                    idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_rename(source, dest,
+                                resource_id=resource_id,
+                                expected_base_commit=expected_base_commit,
+                                idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_delete(path: str,
+                    resource_id: str | None = None,
+                    expected_base_commit: str | None = None,
+                    idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_delete(path,
+                                resource_id=resource_id,
+                                expected_base_commit=expected_base_commit,
+                                idempotency_key=idempotency_key)
+
+
+@mcp.tool()
+async def fs_batch(operations: list[dict],
+                   expected_base_commit: str | None = None,
+                   idempotency_key: str | None = None) -> dict:
+    if _fs_tools is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _fs_tools.fs_batch(operations,
+                               expected_base_commit=expected_base_commit,
+                               idempotency_key=idempotency_key)
 
 
 if __name__ == "__main__":
