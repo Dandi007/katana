@@ -9,8 +9,9 @@ from pathlib import Path
 
 
 class ResourceIdLedger:
-    def __init__(self, path: str):
+    def __init__(self, path: str, prefix: str = "m-"):
         self._path = Path(path)
+        self._prefix = prefix
         self._tombstones: set[str] = set()
         self._load()
 
@@ -44,7 +45,7 @@ class ResourceIdLedger:
 
     def gen_id(self, existing: set[str]) -> str:
         while True:
-            i = "m-" + secrets.token_hex(3)
+            i = self._prefix + secrets.token_hex(3)
             if i not in existing and i not in self._tombstones:
                 return i
 
