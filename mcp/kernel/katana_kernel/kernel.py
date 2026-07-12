@@ -84,12 +84,16 @@ class GovernedKernel:
         result = write_fn(binding=binding, args=args)
 
         changed_paths = list(result.pop("changed_paths", []))
-        tombstoned_id = None
+        tombstoned_ids = []
         if op == "delete" and "id" in result:
-            tombstoned_id = result["id"]
+            tombstoned_ids.append(result["id"])
             binding.ledger.tombstone(result["id"])
+        if "tombstoned_ids" in result:
+            for rid in result.pop("tombstoned_ids", []):
+                tombstoned_ids.append(rid)
+                binding.ledger.tombstone(rid)
 
-        manifest_record = binding.manifest.record(domain, op, result)
+        manifest_record = binding.manifest.record(domain, op, result, changed_paths=changed_paths)
         committed_manifest_ids = binding.manifest.commit_manifests()
 
         all_paths = list(changed_paths)
@@ -115,8 +119,8 @@ class GovernedKernel:
 
         if not git_result.get("committed"):
             binding.manifest.rollback_committed(committed_manifest_ids["manifests"])
-            if tombstoned_id is not None:
-                binding.ledger.rollback_tombstone(tombstoned_id)
+            for rid in tombstoned_ids:
+                binding.ledger.rollback_tombstone(rid)
             _restore_tree(binding.repo_root)
             return {
                 **{k: v for k, v in result.items()},
@@ -138,8 +142,8 @@ class GovernedKernel:
 
         if not amend_result.get("committed"):
             binding.manifest.rollback_committed(committed_manifest_ids["manifests"])
-            if tombstoned_id is not None:
-                binding.ledger.rollback_tombstone(tombstoned_id)
+            for rid in tombstoned_ids:
+                binding.ledger.rollback_tombstone(rid)
             _restore_tree(binding.repo_root)
             return {
                 **{k: v for k, v in result.items()},
