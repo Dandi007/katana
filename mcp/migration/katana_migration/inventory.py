@@ -23,6 +23,7 @@ import os
 import re
 import stat
 import sys
+import unicodedata
 from pathlib import Path
 
 import yaml
@@ -47,6 +48,7 @@ EXC_LFS_POINTER = "LFS_POINTER"
 EXC_CREDENTIAL_SYMLINK = "CREDENTIAL_SYMLINK"
 EXC_EXECUTABLE = "EXECUTABLE_BIT"
 EXC_BINARY = "BINARY_BYTES"
+EXC_UNICODE_NFC = "UNICODE_NFC"
 EXC_READ_ERROR = "READ_ERROR"
 
 # Actions
@@ -120,6 +122,14 @@ def is_binary(content: bytes) -> bool:
 
 def is_lfs_pointer(content: bytes) -> bool:
     return content.startswith(b"version https://git-lfs.github.com/spec/v1")
+
+
+def is_nfc_normalized(content: bytes) -> bool:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return unicodedata.is_normalized("NFC", text)
 
 
 def _extract_lfs_oid(content: bytes) -> str | None:
@@ -255,6 +265,9 @@ def scan_file(
 
     if is_lfs_pointer(content):
         exceptions.append((EXC_LFS_POINTER, "File is a git LFS pointer"))
+
+    if not is_nfc_normalized(content):
+        exceptions.append((EXC_UNICODE_NFC, "File content is not NFC normalized"))
 
     st = path.stat()
     if st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
