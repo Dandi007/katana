@@ -188,7 +188,7 @@ function synthesisPrompt() {
 2) 根据 index.md 索引，有选择地 Read 高 credibility 或与主问题最相关的 findings/*.md L2 原文（先高后低，跳过 low+不相关的，节省 context）。
 3) sources.md：按 "${TPL}/sources.md" 模板合并去重，保留 anchor + credibility。
 4) topics.md：按 "${TPL}/topics.md" 聚类为 3-7 个自包含主题，标 [^N] 引用 sources。
-5) report.md：按 "${TPL}/report.md" 连贯叙事，note-seed 用 > [!note-seed] 标记，末尾附探索轨迹摘要；回填 sources.md 的 Used In 列。
+5) report.md：严格按 "${TPL}/report.md" 的节序写——背景先行（## 研究背景与目标）→ ## 总览（L0 一句话结论+硬数字）→ 主题章节 ## 一/二/三…（每章 intro 立主线、原"发现"降为带编号 ### x.y 小节，不平铺"发现一/二"）→ ## 结论与建议 → ## Open Questions → ## References → 可选 ## 探索轨迹摘要（尾节）。note-seed 用 > [!note-seed] 标记；回填 sources.md 的 Used In 列。
 
 MUST: 每个论断可回溯到 sources.md / L2 原文。MUST NOT: 编造来源、做任何 mutation。
 
