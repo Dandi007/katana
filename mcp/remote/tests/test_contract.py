@@ -153,6 +153,23 @@ class TestScopeEnforcement:
         r = client.post("/audit_query", headers=_auth_header("reader"))
         assert r.status_code == FORBIDDEN
 
+    def test_missing_audit_scope_cannot_export_audit(self):
+        creds = CredentialRegistry()
+        creds.register("reader", "alice", "default", scopes={"read"})
+        app, _ = _make_test_app(credential_registry=creds)
+        client = TestClient(app)
+        r = client.post("/audit_export", headers=_auth_header("reader"))
+        assert r.status_code == FORBIDDEN
+
+    def test_audit_scope_allows_export(self):
+        creds = CredentialRegistry()
+        creds.register("auditor", "alice", "default", scopes={"audit"})
+        app, _ = _make_test_app(credential_registry=creds)
+        client = TestClient(app)
+        r = client.post("/audit_export", headers=_auth_header("auditor"))
+        assert r.status_code == 200
+        assert "entries" in r.json()
+
     def test_required_scope_allows_operation(self):
         creds = CredentialRegistry()
         creds.register("full-access", "alice", "default",

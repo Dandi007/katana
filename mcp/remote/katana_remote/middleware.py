@@ -260,6 +260,34 @@ class AuthMiddleware:
             await r(scope, receive, send)
             return
 
+        if path == "/audit_export":
+            if not requires_scope(principal.scopes, "audit_export"):
+                response = _build_error_response(
+                    FORBIDDEN, "FORBIDDEN",
+                    "insufficient scope for audit")
+                await response(scope, receive, send)
+                return
+            entries_dict = []
+            for e in self._audit.entries():
+                entries_dict.append({
+                    "request_id": e.request_id,
+                    "mutation_id": e.mutation_id,
+                    "principal_id": e.principal_id,
+                    "tenant": e.tenant,
+                    "domain": e.domain,
+                    "scopes": e.scopes,
+                    "operation": e.operation,
+                    "resource_ids": e.resource_ids,
+                    "result": e.result,
+                    "error": e.error,
+                    "server_time": e.server_time,
+                })
+            r = JSONResponse({"entries": entries_dict})
+            self._log_audit(principal, "audit_export", result="success",
+                            client_identity=client_identity)
+            await r(scope, receive, send)
+            return
+
         body = await request.body()
         body_obj = None
         if body:

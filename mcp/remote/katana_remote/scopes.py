@@ -30,6 +30,10 @@ _READ_OPS = {
     "wf_list",
     "fs_capabilities",
     "initialize", "tools/list",
+    # initialize, tools/list mapped to read scope is deliberate:
+    # read-only tokens must be able to bootstrap an MCP session
+    # (discover tools, establish session) before performing any
+    # scoped operations.  These are metadata/negotiation, not VFS content.
 }
 
 _QUERY_OPS = {

@@ -237,3 +237,101 @@ class TestMemoryRemoteAuth:
             mut_entry = mutation_entries[-1]
             assert mut_entry.resulting_commit is not None, f"audit entry missing resulting_commit: {mut_entry}"
             assert mut_entry.client_identity != "unknown", f"audit entry missing client_identity: {mut_entry}"
+
+    def test_fs_create_mutation_with_cas(self, tmp_path):
+        """R1+R2: fs_* mutation over HTTP with CAS guard + stable error envelope."""
+        audit_logger = AuditLogger()
+        creds = CredentialRegistry()
+        creds.register("full-token", "alice", "uther", scopes={"read", "mutate", "query", "operate", "audit"})
+        app, data_root = _make_memory_app_with_auth(tmp_path, creds, audit_logger=audit_logger)
+
+        with TestClient(app) as client:
+            session_id = _mcp_session(client, "full-token")
+
+            r0 = _mcp_call(client, "full-token", session_id, "memory_create", arguments={
+                "name": "seed-card",
+                "description": "seed card for CAS test",
+                "body": "## Fact\nseed\n\n## How to Verify\nseed\n",
+            })
+            assert r0.status_code == 200, f"seed create failed: {r0.status_code} {r0.text[:500]}"
+
+            base_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=data_root,
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+
+            r = _mcp_call(client, "full-token", session_id, "fs_create", arguments={
+                "path": "uther/fs-test-card.md",
+                "content": (
+                    "---\n"
+                    "name: fs-test-card\n"
+                    "description: test fs_* mutation with CAS\n"
+                    "---\n\n"
+                    "## Fact\nTest CAS mutation.\n\n"
+                    "## How to Verify\nRun the test.\n"
+                ),
+                "expected_base_sha": base_commit,
+            })
+            assert r.status_code == 200, f"fs_create with CAS failed: {r.status_code} {r.text[:500]}"
+
+            result = _parse_sse_json(r)
+            assert "result" in result
+            inner = result.get("result", {})
+            content_list = inner.get("content", [])
+            assert len(content_list) > 0
+            text = content_list[0].get("text", "")
+            data = json.loads(text)
+            new_commit = data.get("commit")
+            assert new_commit is not None, f"no commit in fs_create response: {data}"
+            assert new_commit != base_commit, f"commit should have changed: base={base_commit[:8]} new={new_commit[:8]}"
+            assert "resource_id" in data
+
+            entries = audit_logger.entries()
+            fs_entries = [e for e in entries if e.operation == "fs_create" and e.result == "success"]
+            assert len(fs_entries) > 0, f"no fs_create audit entry in: {[(e.operation, e.result) for e in entries]}"
+            fs_entry = fs_entries[-1]
+            assert fs_entry.principal_id == "alice"
+            assert fs_entry.tenant == "uther"
+            assert fs_entry.resulting_commit is not None
+            assert fs_entry.client_identity != "unknown"
+
+            r2 = _mcp_call(client, "full-token", session_id, "fs_create", arguments={
+                "path": "uther/fs-test-card-2.md",
+                "content": (
+                    "---\n"
+                    "name: fs-test-card-2\n"
+                    "description: CAS mismatch test\n"
+                    "---\n\n"
+                    "## Fact\nCAS mismatch.\n\n"
+                    "## How to Verify\nRun the test.\n"
+                ),
+                "expected_base_sha": base_commit,
+            })
+            assert r2.status_code == 200, f"CAS mismatch should return HTTP 200 with error envelope: {r2.status_code} {r2.text[:500]}"
+
+            cas_result = _parse_sse_json(r2)
+            assert "error" in cas_result or "result" in cas_result
+
+            error_data = None
+            if "error" in cas_result:
+                error_data = cas_result["error"]
+            elif "result" in cas_result:
+                inner_r = cas_result["result"]
+                content_items = inner_r.get("content", [])
+                if content_items and isinstance(content_items, list):
+                    inner_text = content_items[0].get("text", "")
+                    try:
+                        error_data = json.loads(inner_text)
+                    except Exception:
+                        error_data = inner_r
+
+            assert error_data is not None, f"no error data in CAS mismatch response: {cas_result}"
+            assert error_data.get("code") == "BASE_COMMIT_CONFLICT", \
+                f"expected BASE_COMMIT_CONFLICT, got {error_data.get('code')}: {error_data}"
+            assert error_data.get("retryable") is True, \
+                f"CAS conflict should be retryable: {error_data}"
+            assert "message" in error_data
+            assert "full-token" not in json.dumps(error_data), \
+                f"token leaked into error body: {error_data}"
+            assert "full-token" not in r2.text, \
+                f"token leaked into HTTP response body"
