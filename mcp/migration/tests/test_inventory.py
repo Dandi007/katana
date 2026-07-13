@@ -5,14 +5,17 @@ import json
 import pytest
 
 from katana_migration.inventory import (
+    ACTION_ID_BACKFILL,
     ACTION_PRESERVE,
     ACTION_REJECT,
     EXC_BINARY,
     EXC_CASEFOLD_COLLISION,
+    EXC_DUPLICATE_BASENAME,
     EXC_DUPLICATE_ID,
     EXC_EXECUTABLE,
     EXC_LFS_POINTER,
     EXC_MISSING_BRIEF,
+    EXC_PATH_LENGTH,
     EXC_SYMLINK,
     EXC_YAML_PARSE,
     build_manifest,
@@ -255,6 +258,7 @@ def test_manifest_top_level_fields(manifest):
     assert "migration_run_id" in manifest
     assert "source_sets" in manifest
     assert "objects" in manifest
+    assert "redirect_map" in manifest
     assert "summary" in manifest
     assert manifest["migration_run_id"] == "test-run-001"
 
@@ -395,8 +399,12 @@ def test_missing_brief_rejected(manifest):
 
 def test_symlink_rejected(manifest):
     symlinks = [r for r in manifest["objects"] if r["exception_code"] in (EXC_SYMLINK, "CREDENTIAL_SYMLINK")]
+    assert len(symlinks) >= 1, "Symlink fixture not created — test is vacuous"
     for obj in symlinks:
         assert obj["action"] == ACTION_REJECT
+        assert obj["sha256"] is None, "Symlink must not be dereferenced (sha256 must be None)"
+        assert obj["git_blob_oid"] is None, "Symlink must not be dereferenced (git_blob_oid must be None)"
+        assert obj["file_mode"] == "120000", f"Expected symlink mode 120000, got {obj['file_mode']}"
 
 
 # ── Duplicate / collision detection ───────────────────────────────────────────
@@ -424,14 +432,17 @@ def test_duplicate_detection(tmp_path):
     assert len(duplicate_ids) >= 1, "Duplicate IDs not detected for same-content files"
 
 
-def test_casefold_collision_detection(tmp_path):
-    root = tmp_path / "casefold_test"
-    root.mkdir()
-    (root / "Card.md").write_text("content 1", encoding="utf-8")
-    (root / "card.md").write_text("content 2", encoding="utf-8")
+def test_duplicate_basename_detection(tmp_path):
+    root = tmp_path / "dup_basename_test"
+    dir1 = root / "dir1"
+    dir2 = root / "dir2"
+    dir1.mkdir(parents=True)
+    dir2.mkdir(parents=True)
+    (dir1 / "note.md").write_text("content one", encoding="utf-8")
+    (dir2 / "note.md").write_text("content two different", encoding="utf-8")
 
     config = [{
-        "name": "casefold",
+        "name": "dup_basename",
         "root": str(root),
         "source_repo": "/test",
         "source_commit": "0000000000000000000000000000000000000000",
@@ -439,12 +450,110 @@ def test_casefold_collision_detection(tmp_path):
         "prefix": "t-",
         "destination_repo": "/test",
         "default_action": "preserve",
+        "include": ["**/*.md"],
+    }]
+    manifest = run_inventory(config, migration_run_id="dup-basename-test")
+
+    dup_basenames = [r for r in manifest["objects"] if r["exception_code"] == EXC_DUPLICATE_BASENAME]
+    assert len(dup_basenames) >= 1, "Duplicate basenames not detected"
+
+    for obj in dup_basenames:
+        assert obj["action"] == ACTION_REJECT
+        assert "note.md" in obj["reason"]
+
+
+def test_path_length_exception(tmp_path, monkeypatch):
+    import katana_migration.inventory as inv_mod
+    monkeypatch.setattr(inv_mod, "MAX_PATH_LENGTH", 100)
+
+    root = tmp_path / "pathlen_test"
+    root.mkdir()
+    deep = root
+    long_name = "d" * 50
+    for i in range(3):
+        deep = deep / long_name
+        deep.mkdir()
+    deep_file = deep / "file.md"
+    deep_file.write_text("content", encoding="utf-8")
+
+    config = [{
+        "name": "pathlen",
+        "root": str(root),
+        "source_repo": "/test",
+        "source_commit": "0000000000000000000000000000000000000000",
+        "object_class": "test",
+        "prefix": "t-",
+        "destination_repo": "/test",
+        "default_action": "preserve",
+        "include": ["**/*.md"],
+    }]
+    manifest = run_inventory(config, migration_run_id="pathlen-test")
+
+    path_len_objs = [r for r in manifest["objects"] if r["exception_code"] == EXC_PATH_LENGTH]
+    assert len(path_len_objs) >= 1, "Path-length exception not detected"
+
+    for obj in path_len_objs:
+        assert obj["action"] == ACTION_REJECT
+        assert "Path exceeds" in obj["reason"]
+
+
+def test_redirect_map_present(manifest):
+    redirect_map = manifest.get("redirect_map", {})
+    assert isinstance(redirect_map, dict), "redirect_map must be a dict"
+
+    legacy = [r for r in manifest["objects"] if r["action"] == ACTION_ID_BACKFILL]
+    for obj in legacy:
+        assert obj["source_path"] in redirect_map, (
+            f"Legacy object {obj['source_path']} missing from redirect_map"
+        )
+        assert redirect_map[obj["source_path"]] == obj["domain_resource_id"], (
+            f"redirect_map entry mismatch for {obj['source_path']}"
+        )
+
+
+def test_ledger_tombstone_avoidance(tmp_path):
+    try:
+        from katana_kernel.ledger import ResourceIdLedger
+    except ImportError:
+        pytest.skip("katana-kernel not available")
+
+    root = tmp_path / "tombstone_test"
+    root.mkdir()
+    (root / "card.md").write_text(
+        "---\nname: test\ndescription: test desc\n---\n\n## Fact\nContent\n",
+        encoding="utf-8",
+    )
+
+    ledger_path = str(tmp_path / "tombstones.json")
+    ledger = ResourceIdLedger(ledger_path)
+
+    config = [{
+        "name": "ts",
+        "root": str(root),
+        "source_repo": "/test",
+        "source_commit": "0000000000000000000000000000000000000000",
+        "object_class": "memory_legacy",
+        "prefix": "m-",
+        "destination_repo": "/test",
+        "default_action": "id_backfill",
         "include": ["*.md"],
     }]
-    manifest = run_inventory(config, migration_run_id="casefold-test")
 
-    collisions = [r for r in manifest["objects"] if r["exception_code"] == EXC_CASEFOLD_COLLISION]
-    assert len(collisions) >= 1, "Casefold collisions not detected"
+    manifest1 = run_inventory(config, migration_run_id="ts-test", ledger_path=ledger_path)
+    obj1 = manifest1["objects"][0]
+    id1 = obj1["domain_resource_id"]
+
+    ledger.tombstone(id1)
+    ledger2 = ResourceIdLedger(ledger_path)
+    assert ledger2.is_tombstoned(id1)
+
+    manifest2 = run_inventory(config, migration_run_id="ts-test", ledger_path=ledger_path)
+    obj2 = manifest2["objects"][0]
+    id2 = obj2["domain_resource_id"]
+
+    assert id1 != id2, f"Tombstoned ID {id1} was reused ({id2})"
+    assert id2.startswith("m-")
+    assert len(id2) == 8
 
 
 # ── Schema-scope classification ───────────────────────────────────────────────

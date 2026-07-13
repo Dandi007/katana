@@ -4,6 +4,14 @@ M3a INVENTORIED-phase tool.  Scans source sets per design §8.1,
 produces a deterministic, immutable migration manifest (§8.4 fields),
 and verifies the global invariant tracked == preserved + transformed +
 archived + rejected with unclassified == 0.
+
+ID generation uses content-hash determinism (SHA-256 prefix) rather than
+the kernel ResourceIdLedger's random gen_id.  The prefix/length alignment
+(m-/w-/wf- + 6 hex) matches the kernel convention.  Tombstone avoidance
+is integrated via an optional ledger_path: when a ledger is provided,
+minted IDs that collide with a tombstone are iteratively re-hashed
+(content + counter) until a free ID is found, preserving determinism for
+a given ledger state.
 """
 
 from __future__ import annotations
@@ -16,7 +24,6 @@ import re
 import stat
 import sys
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -74,9 +81,17 @@ def _is_credential_path(path: str) -> bool:
 
 # ── ID generation ─────────────────────────────────────────────────────────────
 
-def deterministic_id(content: bytes, prefix: str) -> str:
+def deterministic_id(content: bytes, prefix: str, ledger: object | None = None) -> str:
     h = hashlib.sha256(content).hexdigest()
-    return prefix + h[:6]
+    candidate = prefix + h[:6]
+    if ledger is None or not hasattr(ledger, "is_tombstoned"):
+        return candidate
+    counter = 0
+    while ledger.is_tombstoned(candidate):
+        counter += 1
+        h = hashlib.sha256(content + counter.to_bytes(4, "big")).hexdigest()
+        candidate = prefix + h[:6]
+    return candidate
 
 
 def sha256_hex(content: bytes) -> str:
@@ -150,7 +165,7 @@ def _classify_wiki_file(rel_path: str) -> str | None:
     if str(rel_path) == "findings.md":
         return "wiki_raw"
     # Check for asset closure: files referenced by findings.md or report.md
-    if str(rel_path).startswith("findings_assets/") or str(rel_path).startswith("DeepThought/") and "/assets/" in str(rel_path):
+    if str(rel_path).startswith("findings_assets/") or (str(rel_path).startswith("DeepThought/") and "/assets/" in str(rel_path)):
         return "wiki_raw"
     if Path(rel_path).name in _WIKI_SCHEMA_BASENAMES:
         return "wiki_schema"
@@ -169,6 +184,7 @@ def scan_file(
     destination_repo: str,
     default_action: str,
     migration_run_id: str,
+    ledger: object | None = None,
 ) -> dict:
     rel_path = str(path.relative_to(root))
 
@@ -250,7 +266,7 @@ def scan_file(
     file_mode = oct(st.st_mode)[-6:]
     lfs_oid = _extract_lfs_oid(content)
 
-    resource_id = deterministic_id(content, prefix)
+    resource_id = deterministic_id(content, prefix, ledger=ledger)
 
     existing_id = None
     if content.startswith(b"---\n"):
@@ -309,12 +325,14 @@ def scan_file(
 def _scan_source_set(
     ss: dict,
     migration_run_id: str,
-) -> list[dict]:
+    ledger: object | None = None,
+) -> tuple[list[dict], dict[str, str]]:
     root = Path(ss["root"])
     records: list[dict] = []
     seen_basenames: set[str] = set()
     seen_ids: set[str] = set()
     casefold_map: dict[str, str] = {}
+    redirect_map: dict[str, str] = {}
 
     for pattern in ss.get("include", ["**/*"]):
         if os.path.isabs(pattern):
@@ -355,6 +373,7 @@ def _scan_source_set(
                 destination_repo=ss.get("destination_repo", ss["source_repo"]),
                 default_action=default_action,
                 migration_run_id=migration_run_id,
+                ledger=ledger,
             )
 
             basename = Path(record["source_path"]).name
@@ -382,9 +401,12 @@ def _scan_source_set(
             if record["domain_resource_id"]:
                 seen_ids.add(record["domain_resource_id"])
 
+            if record["action"] == ACTION_ID_BACKFILL and record["domain_resource_id"]:
+                redirect_map[record["source_path"]] = record["domain_resource_id"]
+
             records.append(record)
 
-    return records
+    return records, redirect_map
 
 
 # ── Manifest assembly ─────────────────────────────────────────────────────────
@@ -411,13 +433,25 @@ def compute_summary(records: list[dict]) -> dict:
 def build_manifest(
     source_sets: list[dict],
     migration_run_id: str | None = None,
+    ledger_path: str | None = None,
 ) -> dict:
     if migration_run_id is None:
         migration_run_id = _generate_run_id(source_sets)
 
+    ledger = None
+    if ledger_path is not None:
+        try:
+            from katana_kernel.ledger import ResourceIdLedger
+            ledger = ResourceIdLedger(ledger_path)
+        except ImportError:
+            pass
+
     all_records: list[dict] = []
+    all_redirects: dict[str, str] = {}
     for ss in source_sets:
-        all_records.extend(_scan_source_set(ss, migration_run_id))
+        records, redirects = _scan_source_set(ss, migration_run_id, ledger=ledger)
+        all_records.extend(records)
+        all_redirects.update(redirects)
 
     all_records.sort(key=lambda r: (r["source_repo"], r["source_path"]))
 
@@ -436,6 +470,7 @@ def build_manifest(
             for ss in source_sets
         ],
         "objects": all_records,
+        "redirect_map": all_redirects,
         "summary": summary,
     }
 
@@ -443,8 +478,9 @@ def build_manifest(
 def run_inventory(
     source_sets: list[dict],
     migration_run_id: str | None = None,
+    ledger_path: str | None = None,
 ) -> dict:
-    return build_manifest(source_sets, migration_run_id)
+    return build_manifest(source_sets, migration_run_id, ledger_path=ledger_path)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
