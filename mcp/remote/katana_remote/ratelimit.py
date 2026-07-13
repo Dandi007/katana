@@ -25,8 +25,11 @@ class RateLimitConfig:
 
 @dataclass
 class RateLimitState:
-    last_reset: float = field(default_factory=time.time)
+    start: float = field(default_factory=time.time)
+    second_start: float = field(default_factory=time.time)
+    last_check: float = field(default_factory=time.time)
     request_count: int = 0
+    second_count: int = 0
     mutation_count: int = 0
     batch_operation_count: int = 0
     resource_count: int = 0
@@ -50,50 +53,58 @@ class RateLimiter:
         key = self._key(principal, tenant)
         state = self._states[key]
         now = time.time()
-        elapsed = now - state.last_reset
+        elapsed = now - state.start
+        bucket_elapsed = now - state.last_check
+        state.last_check = now
 
-        if elapsed >= 1.0:
-            state.request_count = 0
-            state.resource_count = 0
+        if now - state.second_start >= 1.0:
+            state.second_count = 0
+            state.second_start = now
+
         if elapsed >= 60.0:
+            state.request_count = 0
             state.mutation_count = 0
             state.batch_operation_count = 0
             state.recursive_operation_count = 0
-            state.last_reset = now
+            state.resource_count = 0
+            state.start = now
 
         state.token_bucket = min(
             self._config.bucket_capacity,
-            state.token_bucket + self._config.bucket_refill_rate * elapsed,
+            state.token_bucket + self._config.bucket_refill_rate * bucket_elapsed,
         )
 
         if state.token_bucket < 1.0:
             return False
 
-        state.request_count += 1
-        if state.request_count > self._config.requests_per_minute:
+        if state.second_count >= self._config.requests_per_second:
             return False
 
+        if state.request_count >= self._config.requests_per_minute:
+            return False
+
+        if is_mutation and state.mutation_count >= self._config.mutations_per_minute:
+            return False
+
+        if is_batch and state.batch_operation_count >= self._config.batch_operations_per_minute:
+            return False
+
+        if resource_count > 0 and state.resource_count + resource_count > self._config.resources_per_second:
+            return False
+
+        if is_recursive and state.recursive_operation_count >= self._config.recursive_operations_per_minute:
+            return False
+
+        state.request_count += 1
+        state.second_count += 1
+        state.token_bucket -= 1.0
+        state.resource_count += resource_count
         if is_mutation:
             state.mutation_count += 1
-            if state.mutation_count > self._config.mutations_per_minute:
-                return False
-
         if is_batch:
             state.batch_operation_count += 1
-            if state.batch_operation_count > self._config.batch_operations_per_minute:
-                return False
-
-        if resource_count > 0:
-            state.resource_count += resource_count
-            if state.resource_count > self._config.resources_per_second:
-                return False
-
         if is_recursive:
             state.recursive_operation_count += 1
-            if state.recursive_operation_count > self._config.recursive_operations_per_minute:
-                return False
-
-        state.token_bucket -= 1.0
         return True
 
 

@@ -300,7 +300,7 @@ async def fs_batch(operations: list[dict],
 def build_remote_app(
     wiki_root: str,
     kb_root: str,
-    credential_registry: "CredentialRegistry",
+    credential_registry,
     *,
     rate_limiter=None,
     readiness_service=None,

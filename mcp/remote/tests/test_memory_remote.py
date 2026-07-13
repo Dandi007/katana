@@ -165,9 +165,11 @@ class TestMemoryRemoteAuth:
 
             entries = audit_logger.entries()
             assert len(entries) > 0
-            assert entries[-1].principal_id == "alice"
-            assert entries[-1].tenant == "uther"
-            assert entries[-1].result == "success"
+            last_entry = entries[-1]
+            assert last_entry.principal_id == "alice"
+            assert last_entry.tenant == "uther"
+            assert last_entry.result == "success"
+            assert last_entry.client_identity != "unknown"
 
     def test_token_not_in_audit_or_error(self, tmp_path):
         audit_logger = AuditLogger()
@@ -230,4 +232,8 @@ class TestMemoryRemoteAuth:
 
             entries = audit_logger.entries()
             assert len(entries) > 0
-            assert any(e.operation == "memory_create" and e.result == "success" for e in entries)
+            mutation_entries = [e for e in entries if e.operation == "memory_create" and e.result == "success"]
+            assert len(mutation_entries) > 0
+            mut_entry = mutation_entries[-1]
+            assert mut_entry.resulting_commit is not None, f"audit entry missing resulting_commit: {mut_entry}"
+            assert mut_entry.client_identity != "unknown", f"audit entry missing client_identity: {mut_entry}"

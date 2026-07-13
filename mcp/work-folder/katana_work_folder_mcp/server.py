@@ -287,7 +287,7 @@ async def wf_reindex(dry_run: bool = False,
 def build_remote_app(
     work_folder_path: str,
     kb_root: str,
-    credential_registry: "CredentialRegistry",
+    credential_registry,
     *,
     rate_limiter=None,
     readiness_service=None,

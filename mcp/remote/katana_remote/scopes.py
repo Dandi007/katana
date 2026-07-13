@@ -24,10 +24,12 @@ SCOPE_ALL = "*"
 ALL_SCOPES = {SCOPE_READ, SCOPE_QUERY, SCOPE_MUTATE, SCOPE_COMMAND, SCOPE_OPERATE, SCOPE_AUDIT}
 
 _READ_OPS = {
-    "fs_resolve", "fs_stat", "fs_list", "fs_glob", "fs_read",
+    "fs_resolve", "fs_stat", "fs_list", "fs_read",
     "memory_index", "memory_get", "memory_read",
     "wiki_list_docs", "wiki_lint_mechanical",
-    "wf_list", "wf_search", "wiki_search",
+    "wf_list",
+    "fs_capabilities",
+    "initialize", "tools/list",
 }
 
 _QUERY_OPS = {
@@ -68,8 +70,8 @@ for _op in _AUDIT_OPS:
     _OP_SCOPE_MAP[_op] = SCOPE_AUDIT
 
 
-def scope_required_for_operation(operation: str) -> str:
-    return _OP_SCOPE_MAP.get(operation, SCOPE_READ)
+def scope_required_for_operation(operation: str) -> str | None:
+    return _OP_SCOPE_MAP.get(operation)
 
 
 def requires_scope(principal_scopes: set[str], operation: str) -> bool:

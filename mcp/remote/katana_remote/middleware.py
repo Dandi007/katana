@@ -19,7 +19,7 @@ from katana_remote.auth import (
     FORBIDDEN,
     RATE_LIMITED,
 )
-from katana_remote.scopes import requires_scope
+from katana_remote.scopes import requires_scope, scope_required_for_operation
 from katana_remote.tenant import TenantResolver, validate_tenant_match
 from katana_remote.ratelimit import RateLimiter
 from katana_remote.readiness import ReadinessService
@@ -45,12 +45,97 @@ def _extract_operation_from_body(body: dict | None) -> str | None:
     return None
 
 
+def _extract_tenant_from_body_args(body: dict | None) -> str | None:
+    if body and "method" in body:
+        m = body.get("method", "")
+        params = body.get("params", {})
+        if m.startswith("tools/call"):
+            args = params.get("arguments", {})
+            if isinstance(args, dict) and "tenant" in args:
+                return args["tenant"]
+        if isinstance(params, dict) and "tenant" in params:
+            return params["tenant"]
+    return None
+
+
+def _extract_is_recursive(body: dict | None) -> bool:
+    if body and "method" in body:
+        params = body.get("params", {})
+        if isinstance(params, dict):
+            args = params.get("arguments", {})
+            if isinstance(args, dict):
+                return bool(args.get("recursive", False))
+    return False
+
+
+def _extract_resource_count(body: dict | None) -> int:
+    if body and "method" in body:
+        params = body.get("params", {})
+        if isinstance(params, dict):
+            args = params.get("arguments", {})
+            if isinstance(args, dict):
+                ops = args.get("operations", [])
+                if isinstance(ops, list):
+                    return len(ops)
+    return 0
+
+
 def _build_error_response(status_code: int, code: str, message: str,
                           retryable: bool = False) -> JSONResponse:
     return JSONResponse(
         {"code": code, "message": message, "retryable": retryable},
         status_code=status_code,
     )
+
+
+def _parse_response_body_for_audit(response_body: bytes) -> dict:
+    result = {}
+    try:
+        text = response_body.decode("utf-8", errors="replace")
+        for line in text.split("\n"):
+            if line.startswith("data: "):
+                try:
+                    data = json.loads(line[6:])
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    _extract_audit_fields(data, result)
+                continue
+        try:
+            data = json.loads(text)
+        except Exception:
+            return result
+        if isinstance(data, dict):
+            _extract_audit_fields(data, result)
+    except Exception:
+        pass
+    return result
+
+
+def _extract_audit_fields(data: dict, result: dict) -> None:
+    if "result" in data:
+        inner = data["result"]
+        if isinstance(inner, dict):
+            content = inner.get("content", [])
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and "text" in item:
+                        try:
+                            tool_result = json.loads(item["text"])
+                            if isinstance(tool_result, dict):
+                                if "commit" in tool_result and "resulting_commit" not in result:
+                                    result["resulting_commit"] = tool_result["commit"]
+                                elif "git" in tool_result and isinstance(tool_result["git"], dict):
+                                    if "detail" in tool_result["git"] and "resulting_commit" not in result:
+                                        result["resulting_commit"] = tool_result["git"]["detail"]
+                                if "resource_id" in tool_result and "resource_ids" not in result:
+                                    result["resource_ids"] = [tool_result["resource_id"]]
+                                if "mutation_id" in tool_result and "mutation_id" not in result:
+                                    result["mutation_id"] = tool_result["mutation_id"]
+                                if "base_commit" in tool_result and "base_commit" not in result:
+                                    result["base_commit"] = tool_result["base_commit"]
+                        except Exception:
+                            pass
 
 
 class AuthMiddleware:
@@ -111,6 +196,8 @@ class AuthMiddleware:
             return
 
         principal = auth_token.principal
+        client_identity = request.headers.get("user-agent", "unknown")
+
         url_tenant = _extract_tenant_from_path(path)
         if not validate_tenant_match(principal.tenant, url_tenant):
             response = _build_error_response(
@@ -127,7 +214,8 @@ class AuthMiddleware:
                 await response(scope, receive, send)
                 return
             r = JSONResponse(self._readiness.read_ready())
-            self._log_audit(principal, "read_ready", result="success")
+            self._log_audit(principal, "read_ready", result="success",
+                            client_identity=client_identity)
             await r(scope, receive, send)
             return
 
@@ -139,7 +227,8 @@ class AuthMiddleware:
                 await response(scope, receive, send)
                 return
             r = JSONResponse(self._readiness.write_ready())
-            self._log_audit(principal, "write_ready", result="success")
+            self._log_audit(principal, "write_ready", result="success",
+                            client_identity=client_identity)
             await r(scope, receive, send)
             return
 
@@ -166,7 +255,8 @@ class AuthMiddleware:
                     "server_time": e.server_time,
                 })
             r = JSONResponse({"entries": entries_dict})
-            self._log_audit(principal, "audit_query", result="success")
+            self._log_audit(principal, "audit_query", result="success",
+                            client_identity=client_identity)
             await r(scope, receive, send)
             return
 
@@ -178,14 +268,37 @@ class AuthMiddleware:
             except Exception:
                 body_obj = None
 
+        body_tenant = _extract_tenant_from_body_args(body_obj)
+        if body_tenant is not None and body_tenant != principal.tenant:
+            self._log_audit(principal, "unknown",
+                            error="body/tool-arg tenant mismatch", result="error",
+                            client_identity=client_identity)
+            response = _build_error_response(
+                FORBIDDEN, "TENANT_MISMATCH",
+                f"body/tool-arg tenant {body_tenant} does not match credential tenant {principal.tenant}")
+            await response(scope, receive, send)
+            return
+
         operation = _extract_operation_from_body(body_obj)
         if operation is None:
             parts = path.strip("/").split("/")
             operation = parts[-1] if parts else "unknown"
 
+        required_scope = scope_required_for_operation(operation)
+        if required_scope is None:
+            self._log_audit(principal, operation,
+                            error="unmapped operation", result="error",
+                            client_identity=client_identity)
+            response = _build_error_response(
+                FORBIDDEN, "FORBIDDEN",
+                f"operation {operation} is not mapped to any scope")
+            await response(scope, receive, send)
+            return
+
         if not requires_scope(principal.scopes, operation):
             self._log_audit(principal, operation,
-                            error="insufficient scope", result="error")
+                            error="insufficient scope", result="error",
+                            client_identity=client_identity)
             response = _build_error_response(
                 FORBIDDEN, "FORBIDDEN",
                 f"scope {principal.scopes} does not allow operation {operation}")
@@ -199,13 +312,17 @@ class AuthMiddleware:
             "wf_create", "wf_save", "wf_resume", "wf_reindex",
         }
         is_batch = operation == "fs_batch"
+        is_recursive = _extract_is_recursive(body_obj)
+        resource_count = _extract_resource_count(body_obj)
 
         if not self._rate_limiter.check(
             principal.principal_id, principal.tenant,
             is_mutation=is_mutation, is_batch=is_batch,
+            resource_count=resource_count, is_recursive=is_recursive,
         ):
             self._log_audit(principal, operation,
-                            error="rate limited", result="error")
+                            error="rate limited", result="error",
+                            client_identity=client_identity)
             response = _build_error_response(
                 RATE_LIMITED, "RATE_LIMITED",
                 "rate limit exceeded, retry later",
@@ -229,6 +346,7 @@ class AuthMiddleware:
 
         _response_started = False
         _response_status = 200
+        _response_body_chunks: list[bytes] = []
         original_send = send
 
         async def _wrapped_send(message: dict) -> None:
@@ -236,18 +354,35 @@ class AuthMiddleware:
             if message["type"] == "http.response.start":
                 _response_started = True
                 _response_status = message.get("status", 200)
+            elif message["type"] == "http.response.body":
+                body_chunk = message.get("body", b"")
+                if body_chunk:
+                    _response_body_chunks.append(body_chunk)
             await original_send(message)
 
         await self._app(scope, _wrapped_receive, _wrapped_send)
 
+        response_body = b"".join(_response_body_chunks)
+        audit_extra = _parse_response_body_for_audit(response_body)
+
         if _response_started and _response_status >= 400:
             self._log_audit(principal, operation,
-                            error=f"HTTP {_response_status}", result="error")
+                            error=f"HTTP {_response_status}", result="error",
+                            client_identity=client_identity,
+                            **audit_extra)
         else:
-            self._log_audit(principal, operation, result="success")
+            self._log_audit(principal, operation, result="success",
+                            client_identity=client_identity,
+                            **audit_extra)
 
     def _log_audit(self, principal, operation: str,
-                   result: str = "success", error: str | None = None) -> None:
+                   result: str = "success", error: str | None = None,
+                   client_identity: str = "unknown",
+                   resource_ids: list[str] | None = None,
+                   base_commit: str | None = None,
+                   resulting_commit: str | None = None,
+                   mutation_id: str | None = None,
+                   **extra) -> None:
         audit_log(
             self._audit,
             principal_id=principal.principal_id,
@@ -255,9 +390,15 @@ class AuthMiddleware:
             domain=self._domain,
             scopes=sorted(principal.scopes),
             operation=operation,
+            resource_ids=resource_ids,
+            base_commit=base_commit,
+            resulting_commit=resulting_commit,
+            mutation_id=mutation_id,
             result=result,
             error=error,
+            client_identity=client_identity,
             policy_version=self._policy_version,
+            **extra,
         )
 
 

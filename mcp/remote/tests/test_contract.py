@@ -172,6 +172,24 @@ class TestScopeEnforcement:
                         headers=_auth_header("minimal"))
         assert r.status_code == FORBIDDEN
 
+    def test_unknown_operation_with_read_scope_denied(self):
+        creds = CredentialRegistry()
+        creds.register("reader", "alice", "default", scopes={"read"})
+        app, _ = _make_test_app(credential_registry=creds)
+        client = TestClient(app)
+        r = client.post("/mcp", json={"method": "tools/call", "params": {"name": "unknown_op"}},
+                        headers=_auth_header("reader"))
+        assert r.status_code == FORBIDDEN
+
+    def test_fs_capabilities_read_scoped_allowed(self):
+        creds = CredentialRegistry()
+        creds.register("reader", "alice", "default", scopes={"read"})
+        app, _ = _make_test_app(credential_registry=creds)
+        client = TestClient(app)
+        r = client.post("/mcp", json={"method": "tools/call", "params": {"name": "fs_capabilities"}},
+                        headers=_auth_header("reader"))
+        assert r.status_code == 200
+
 
 class TestTenantConfinement:
     def test_url_tenant_mismatch_rejected(self):
@@ -192,6 +210,29 @@ class TestTenantConfinement:
         client = TestClient(app)
         r = client.post("/t/tenant-a/mcp",
                         json={"method": "tools/call", "params": {"name": "fs_read"}},
+                        headers=_auth_header("my-token"))
+        assert r.status_code == 200
+
+    def test_body_tenant_mismatch_rejected(self):
+        creds = CredentialRegistry()
+        creds.register("my-token", "alice", "tenant-a", scopes={"read"})
+        app, _ = _make_test_app(credential_registry=creds)
+        client = TestClient(app)
+        r = client.post("/t/tenant-a/mcp",
+                        json={"method": "tools/call", "params": {
+                            "name": "fs_read", "arguments": {"tenant": "tenant-b"}}},
+                        headers=_auth_header("my-token"))
+        assert r.status_code == FORBIDDEN
+        assert r.json()["code"] == "TENANT_MISMATCH"
+
+    def test_body_tenant_match_allowed(self):
+        creds = CredentialRegistry()
+        creds.register("my-token", "alice", "tenant-a", scopes={"read"})
+        app, _ = _make_test_app(credential_registry=creds)
+        client = TestClient(app)
+        r = client.post("/t/tenant-a/mcp",
+                        json={"method": "tools/call", "params": {
+                            "name": "fs_read", "arguments": {"tenant": "tenant-a"}}},
                         headers=_auth_header("my-token"))
         assert r.status_code == 200
 
@@ -224,7 +265,7 @@ class TestTokenRedaction:
 
 class TestRateLimit:
     def test_rate_limit_exceeded_returns_429(self):
-        config = RateLimitConfig(requests_per_second=1, requests_per_minute=3)
+        config = RateLimitConfig(requests_per_second=100, requests_per_minute=3)
         limiter = RateLimiter(config)
         creds = CredentialRegistry()
         creds.register("heavy-user", "alice", "default", scopes={"read"})

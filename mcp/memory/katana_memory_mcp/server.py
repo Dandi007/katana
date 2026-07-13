@@ -305,7 +305,7 @@ def build_app(data_root: str) -> Starlette:
 
 def build_remote_app(
     data_root: str,
-    credential_registry: "CredentialRegistry",
+    credential_registry,
     *,
     rate_limiter=None,
     readiness_service=None,

@@ -79,8 +79,19 @@ def test_empty_scope_denies_everything():
     assert not requires_scope(set(), "wiki_query")
 
 
-def test_unknown_operation_requires_read():
-    assert scope_required_for_operation("nonexistent_op") == SCOPE_READ
+def test_unknown_operation_returns_none():
+    assert scope_required_for_operation("nonexistent_op") is None
+
+
+def test_unknown_operation_requires_no_scope():
+    assert not requires_scope({SCOPE_READ}, "nonexistent_op")
+    assert not requires_scope({"read", "mutate", "query", "operate", "audit"}, "nonexistent_op")
+
+
+def test_fs_capabilities_requires_read_scope():
+    assert scope_required_for_operation("fs_capabilities") == SCOPE_READ
+    assert requires_scope({SCOPE_READ}, "fs_capabilities")
+    assert not requires_scope({"mutate"}, "fs_capabilities")
 
 
 def test_fs_glob_requires_query_scope():
@@ -93,13 +104,14 @@ def test_all_operations_covered():
         "fs_resolve", "fs_stat", "fs_list", "fs_read",
         "memory_index", "memory_get", "memory_read",
         "wiki_list_docs", "wiki_lint_mechanical",
-        "wf_list",
+        "wf_list", "fs_capabilities",
+        "initialize", "tools/list",
     ]:
         scope = scope_required_for_operation(op)
         assert scope == SCOPE_READ, f"{op} should require read, got {scope}"
 
     for op in [
-        "wiki_query", "wiki_search", "wf_search",
+        "fs_glob", "wiki_query", "wiki_search", "wf_search",
     ]:
         scope = scope_required_for_operation(op)
         assert scope == SCOPE_QUERY, f"{op} should require query, got {scope}"
