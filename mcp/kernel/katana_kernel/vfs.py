@@ -119,3 +119,15 @@ class GovernedVFS:
         self._check_write(op, args)
         resolved = self._resolve(path)
         resolved.mkdir(parents=True, exist_ok=True)
+
+    def stat(self, path: str) -> dict:
+        resolved = self._resolve(path)
+        if not resolved.exists():
+            raise VFSError(f"path not found: {path}")
+        st = resolved.stat()
+        return {
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+            "is_file": resolved.is_file(),
+            "is_dir": resolved.is_dir(),
+        }

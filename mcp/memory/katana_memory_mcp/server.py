@@ -8,6 +8,7 @@
 """
 import contextlib
 import os
+import re
 from pathlib import Path
 
 import uvicorn
@@ -26,6 +27,7 @@ from katana_kernel import (
 )
 from katana_memory_mcp import index as index_mod
 from katana_memory_mcp.store import MemoryStore
+from katana_memory_mcp.fs_tools import FSTools
 
 
 def _memory_policy() -> DomainPolicy:
@@ -33,16 +35,26 @@ def _memory_policy() -> DomainPolicy:
         if op in ("create", "update", "edit"):
             body = args.get("body")
             if body is not None:
-                if "## Fact" not in body:
+                if not re.search(r'^## Fact\b', body, re.MULTILINE):
                     raise ValueError("body must contain '## Fact' section")
-                if "## How to Verify" not in body:
+                if not re.search(r'^## How to Verify\b', body, re.MULTILINE):
                     raise ValueError("body must contain '## How to Verify' section")
         if op == "create" and not args.get("body"):
             raise ValueError("body is required for create")
+        if op.startswith("fs_") and op not in ("fs_batch", "fs_capabilities", "fs_resolve",
+                                                  "fs_stat", "fs_list", "fs_glob", "fs_read"):
+            content = args.get("content")
+            if content is not None:
+                if not re.search(r'^## Fact\b', content, re.MULTILINE):
+                    raise ValueError("content must contain '## Fact' section")
+                if not re.search(r'^## How to Verify\b', content, re.MULTILINE):
+                    raise ValueError("content must contain '## How to Verify' section")
 
     return DomainPolicy(
         domain="memory",
-        allowed_ops={"create", "update", "delete", "edit", "list", "get", "read"},
+        allowed_ops={"create", "update", "delete", "edit", "list", "get", "read",
+            "fs_create", "fs_write", "fs_edit", "fs_copy", "fs_rename",
+            "fs_delete", "fs_batch"},
         invariants=[_invariants],
     )
 
@@ -85,6 +97,7 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str,
         policy = _memory_policy()
         kernel.bind("memory", policy, vfs, ledger, manifest, repo_root)
     store = MemoryStore(kernel)
+    fs_tools = FSTools(kernel, tenant, repo_root)
 
     @m.tool()
     async def memory_index() -> dict:
@@ -127,7 +140,102 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str,
                            replace_all: bool = False,
                            expected_base_sha: str | None = None) -> dict:
         return store.edit_card(tenant, id, old_string, new_string, replace_all=replace_all,
-                               expected_base_sha=expected_base_sha)
+                                expected_base_sha=expected_base_sha)
+
+    # ── fs_* Full VFS tools ──────────────────────────────────────────────────
+
+    @m.tool()
+    async def fs_capabilities() -> dict:
+        return fs_tools.fs_capabilities()
+
+    @m.tool()
+    async def fs_resolve(path_or_id: str) -> dict:
+        return fs_tools.fs_resolve(path_or_id)
+
+    @m.tool()
+    async def fs_stat(path: str) -> dict:
+        return fs_tools.fs_stat(path)
+
+    @m.tool()
+    async def fs_list(path: str = "") -> dict:
+        return fs_tools.fs_list(path)
+
+    @m.tool()
+    async def fs_glob(pattern: str) -> dict:
+        return fs_tools.fs_glob(pattern)
+
+    @m.tool()
+    async def fs_read(path: str, offset: int | None = None,
+                       limit: int | None = None) -> dict:
+        return fs_tools.fs_read(path, offset=offset, limit=limit)
+
+    @m.tool()
+    async def fs_create(path: str, content: str,
+                        resource_id: str | None = None,
+                        expected_base_sha: str | None = None,
+                        idempotency_key: str | None = None) -> dict:
+        return fs_tools.fs_create(path, content, resource_id=resource_id,
+                                  expected_base_sha=expected_base_sha,
+                                  idempotency_key=idempotency_key)
+
+    @m.tool()
+    async def fs_write(path: str, content: str,
+                       resource_id: str | None = None,
+                       expected_base_sha: str | None = None,
+                       expected_resource_revision: str | None = None,
+                       idempotency_key: str | None = None) -> dict:
+        return fs_tools.fs_write(path, content, resource_id=resource_id,
+                                 expected_base_sha=expected_base_sha,
+                                 expected_resource_revision=expected_resource_revision,
+                                 idempotency_key=idempotency_key)
+
+    @m.tool()
+    async def fs_edit(path: str, old_string: str, new_string: str,
+                      resource_id: str | None = None,
+                      replace_all: bool = False,
+                      expected_base_sha: str | None = None,
+                      expected_resource_revision: str | None = None,
+                      idempotency_key: str | None = None) -> dict:
+        return fs_tools.fs_edit(path, old_string, new_string,
+                                resource_id=resource_id,
+                                replace_all=replace_all,
+                                expected_base_sha=expected_base_sha,
+                                expected_resource_revision=expected_resource_revision,
+                                idempotency_key=idempotency_key)
+
+    @m.tool()
+    async def fs_copy(source: str, dest: str,
+                      resource_id: str | None = None,
+                      expected_base_sha: str | None = None,
+                      idempotency_key: str | None = None) -> dict:
+        return fs_tools.fs_copy(source, dest, resource_id=resource_id,
+                                expected_base_sha=expected_base_sha,
+                                idempotency_key=idempotency_key)
+
+    @m.tool()
+    async def fs_rename(source: str, dest: str,
+                        resource_id: str | None = None,
+                        expected_base_sha: str | None = None,
+                        idempotency_key: str | None = None) -> dict:
+        return fs_tools.fs_rename(source, dest, resource_id=resource_id,
+                                  expected_base_sha=expected_base_sha,
+                                  idempotency_key=idempotency_key)
+
+    @m.tool()
+    async def fs_delete(path: str,
+                        resource_id: str | None = None,
+                        expected_base_sha: str | None = None,
+                        idempotency_key: str | None = None) -> dict:
+        return fs_tools.fs_delete(path, resource_id=resource_id,
+                                  expected_base_sha=expected_base_sha,
+                                  idempotency_key=idempotency_key)
+
+    @m.tool()
+    async def fs_batch(operations: list[dict],
+                       expected_base_commit: str | None = None,
+                       idempotency_key: str | None = None) -> dict:
+        return fs_tools.fs_batch(operations, expected_base_commit=expected_base_commit,
+                                  idempotency_key=idempotency_key)
 
     return m
 
@@ -192,6 +300,38 @@ def build_app(data_root: str) -> Starlette:
             *mounts,
         ],
         lifespan=lifespan,
+    )
+
+
+def build_remote_app(
+    data_root: str,
+    credential_registry,
+    *,
+    rate_limiter=None,
+    readiness_service=None,
+    audit_logger=None,
+    tenant_resolver=None,
+) -> Starlette:
+    """Build the memory app with remote auth middleware applied.
+
+    Returns a Starlette app with all routes (index, index.md, per-tenant MCP)
+    wrapped in the remote auth layer.
+    """
+    from katana_remote import create_remote_app, RateLimiter, ReadinessService, AuditLogger
+
+    inner = build_app(data_root)
+    rate_limiter = rate_limiter if rate_limiter is not None else RateLimiter()
+    readiness_service = readiness_service if readiness_service is not None else ReadinessService()
+    audit_logger = audit_logger if audit_logger is not None else AuditLogger()
+
+    return create_remote_app(
+        inner,
+        credential_registry=credential_registry,
+        rate_limiter=rate_limiter,
+        readiness_service=readiness_service,
+        audit_logger=audit_logger,
+        tenant_resolver=tenant_resolver,
+        domain="memory",
     )
 
 

@@ -1,0 +1,92 @@
+"""katana-remote — Remote HTTP transport layer with AuthN/Z, rate limit, readiness, audit."""
+from katana_remote.auth import (
+    AuthPrincipal,
+    AuthToken,
+    CredentialEntry,
+    CredentialRegistry,
+    UNAUTHORIZED,
+    FORBIDDEN,
+    RATE_LIMITED,
+    extract_bearer_token,
+    hash_token,
+)
+from katana_remote.scopes import (
+    SCOPE_READ,
+    SCOPE_QUERY,
+    SCOPE_MUTATE,
+    SCOPE_COMMAND,
+    SCOPE_OPERATE,
+    SCOPE_AUDIT,
+    ALL_SCOPES,
+    scope_required_for_operation,
+    requires_scope,
+)
+from katana_remote.tenant import (
+    TenantMapping,
+    TenantResolver,
+    validate_tenant_match,
+)
+from katana_remote.ratelimit import (
+    RateLimitConfig,
+    RateLimitState,
+    RateLimiter,
+    check_rate_limit,
+)
+from katana_remote.readiness import (
+    ReadinessState,
+    ReadinessService,
+    livez,
+    read_ready,
+    write_ready,
+)
+from katana_remote.audit import (
+    AuditLogger,
+    AuditEntry,
+    audit_log,
+    sanitize,
+)
+from katana_remote.middleware import (
+    AuthMiddleware,
+    create_remote_app,
+    wrap_fastmcp,
+)
+
+__all__ = [
+    "AuthPrincipal",
+    "AuthToken",
+    "CredentialEntry",
+    "CredentialRegistry",
+    "UNAUTHORIZED",
+    "FORBIDDEN",
+    "RATE_LIMITED",
+    "extract_bearer_token",
+    "hash_token",
+    "SCOPE_READ",
+    "SCOPE_QUERY",
+    "SCOPE_MUTATE",
+    "SCOPE_COMMAND",
+    "SCOPE_OPERATE",
+    "SCOPE_AUDIT",
+    "ALL_SCOPES",
+    "scope_required_for_operation",
+    "requires_scope",
+    "TenantMapping",
+    "TenantResolver",
+    "validate_tenant_match",
+    "RateLimitConfig",
+    "RateLimitState",
+    "RateLimiter",
+    "check_rate_limit",
+    "ReadinessState",
+    "ReadinessService",
+    "livez",
+    "read_ready",
+    "write_ready",
+    "AuditLogger",
+    "AuditEntry",
+    "audit_log",
+    "sanitize",
+    "AuthMiddleware",
+    "create_remote_app",
+    "wrap_fastmcp",
+]

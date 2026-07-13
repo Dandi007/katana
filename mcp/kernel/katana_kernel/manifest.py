@@ -26,7 +26,8 @@ class TransactionManifest:
         self._dir.mkdir(parents=True, exist_ok=True)
         self._staging_dir.mkdir(parents=True, exist_ok=True)
 
-    def record(self, domain: str, op: str, result: dict, git_result: dict | None = None) -> dict:
+    def record(self, domain: str, op: str, result: dict, git_result: dict | None = None,
+               changed_paths: list[str] | None = None) -> dict:
         self._ensure_dirs()
         ts = int(time.time() * 1_000_000)
         resource_id = result.get("id", "unknown")
@@ -39,6 +40,7 @@ class TransactionManifest:
             "op": op,
             "timestamp": ts,
             "result": {k: v for k, v in result.items() if k != "changed_paths"},
+            "changed_paths": changed_paths or [],
             "git": git_result or {},
         }
         staging_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
