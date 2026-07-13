@@ -295,15 +295,15 @@ def build_remote_app(
     tenant_resolver=None,
 ):
     """Build the work-folder app with remote auth middleware applied."""
-    from katana_remote import AuthMiddleware, RateLimiter, ReadinessService, AuditLogger
+    from katana_remote import create_remote_app, RateLimiter, ReadinessService, AuditLogger
 
     configure(work_folder_path, kb_root)
     inner = mcp.http_app()
-    rate_limiter = rate_limiter or RateLimiter()
-    readiness_service = readiness_service or ReadinessService()
-    audit_logger = audit_logger or AuditLogger()
+    rate_limiter = rate_limiter if rate_limiter is not None else RateLimiter()
+    readiness_service = readiness_service if readiness_service is not None else ReadinessService()
+    audit_logger = audit_logger if audit_logger is not None else AuditLogger()
 
-    return AuthMiddleware(
+    return create_remote_app(
         inner,
         credential_registry=credential_registry,
         rate_limiter=rate_limiter,

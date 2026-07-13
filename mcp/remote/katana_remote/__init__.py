@@ -46,7 +46,7 @@ from katana_remote.audit import (
     sanitize,
 )
 from katana_remote.middleware import (
-    RemoteAuthMiddleware,
+    AuthMiddleware,
     create_remote_app,
     wrap_fastmcp,
 )
@@ -86,7 +86,7 @@ __all__ = [
     "AuditEntry",
     "audit_log",
     "sanitize",
-    "RemoteAuthMiddleware",
+    "AuthMiddleware",
     "create_remote_app",
     "wrap_fastmcp",
 ]

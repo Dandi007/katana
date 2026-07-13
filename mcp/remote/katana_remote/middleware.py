@@ -1,21 +1,16 @@
 """Remote auth middleware: ASGI middleware that wraps FastMCP apps with auth.
 
-Integrates bearer authentication, scope enforcement, tenant confinement,
-rate limiting, readiness probes, and audit logging into a single ASGI
-middleware layer. Designed to work with FastMCP's streamable-http transport
-and Starlette-based apps.
-
 Design §5.1 / §7.1 / §7.2 / §7.5 / §7.3
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Awaitable
+from typing import Callable
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 
 from katana_remote.auth import (
     CredentialRegistry,
@@ -26,7 +21,7 @@ from katana_remote.auth import (
 )
 from katana_remote.scopes import requires_scope
 from katana_remote.tenant import TenantResolver, validate_tenant_match
-from katana_remote.ratelimit import RateLimiter, RateLimitConfig
+from katana_remote.ratelimit import RateLimiter
 from katana_remote.readiness import ReadinessService
 from katana_remote.audit import AuditLogger, audit_log
 
@@ -38,8 +33,7 @@ def _extract_tenant_from_path(path: str) -> str | None:
     return None
 
 
-def _extract_operation_from_path_and_body(path: str, body: dict | None) -> str:
-    parts = path.strip("/").split("/")
+def _extract_operation_from_body(body: dict | None) -> str | None:
     if body and "method" in body:
         m = body.get("method", "")
         if m.startswith("tools/call"):
@@ -48,9 +42,7 @@ def _extract_operation_from_path_and_body(path: str, body: dict | None) -> str:
             if name:
                 return name
         return m
-    if len(parts) >= 3 and parts[0] == "t":
-        return parts[-1]
-    return parts[-1] if parts else "unknown"
+    return None
 
 
 def _build_error_response(status_code: int, code: str, message: str,
@@ -73,19 +65,21 @@ class AuthMiddleware:
         tenant_resolver: TenantResolver | None = None,
         domain: str = "default",
         policy_version: str = "1.0",
-        public_paths: set[str] | None = None,
     ):
         self._app = app
         self._credentials = credential_registry
-        self._rate_limiter = rate_limiter or RateLimiter()
-        self._readiness = readiness_service or ReadinessService()
-        self._audit = audit_logger or AuditLogger()
-        self._tenants = tenant_resolver or TenantResolver()
+        self._rate_limiter = rate_limiter if rate_limiter is not None else RateLimiter()
+        self._readiness = readiness_service if readiness_service is not None else ReadinessService()
+        self._audit = audit_logger if audit_logger is not None else AuditLogger()
+        self._tenants = tenant_resolver if tenant_resolver is not None else TenantResolver()
         self._domain = domain
         self._policy_version = policy_version
-        self._public_paths = public_paths or set()
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] == "lifespan":
+            await self._app(scope, receive, send)
+            return
+
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
@@ -96,10 +90,6 @@ class AuthMiddleware:
         if path == "/livez":
             response = JSONResponse(self._readiness.livez())
             await response(scope, receive, send)
-            return
-
-        if path in self._public_paths:
-            await self._app(scope, receive, send)
             return
 
         auth_header = dict(request.headers)
@@ -137,7 +127,7 @@ class AuthMiddleware:
                 await response(scope, receive, send)
                 return
             r = JSONResponse(self._readiness.read_ready())
-            self._log_audit(principal, "read_ready", "readiness", result="success")
+            self._log_audit(principal, "read_ready", result="success")
             await r(scope, receive, send)
             return
 
@@ -149,7 +139,7 @@ class AuthMiddleware:
                 await response(scope, receive, send)
                 return
             r = JSONResponse(self._readiness.write_ready())
-            self._log_audit(principal, "write_ready", "readiness", result="success")
+            self._log_audit(principal, "write_ready", result="success")
             await r(scope, receive, send)
             return
 
@@ -160,10 +150,9 @@ class AuthMiddleware:
                     "insufficient scope for audit")
                 await response(scope, receive, send)
                 return
-            entries = [e.__dict__ if hasattr(e, "__dict__") else str(e) for e in self._audit.entries()]
             entries_dict = []
             for e in self._audit.entries():
-                d = {
+                entries_dict.append({
                     "request_id": e.request_id,
                     "mutation_id": e.mutation_id,
                     "principal_id": e.principal_id,
@@ -175,10 +164,9 @@ class AuthMiddleware:
                     "result": e.result,
                     "error": e.error,
                     "server_time": e.server_time,
-                }
-                entries_dict.append(d)
+                })
             r = JSONResponse({"entries": entries_dict})
-            self._log_audit(principal, "audit_query", "audit", result="success")
+            self._log_audit(principal, "audit_query", result="success")
             await r(scope, receive, send)
             return
 
@@ -190,10 +178,13 @@ class AuthMiddleware:
             except Exception:
                 body_obj = None
 
-        operation = _extract_operation_from_path_and_body(path, body_obj)
+        operation = _extract_operation_from_body(body_obj)
+        if operation is None:
+            parts = path.strip("/").split("/")
+            operation = parts[-1] if parts else "unknown"
 
         if not requires_scope(principal.scopes, operation):
-            self._log_audit(principal, operation, "mcp",
+            self._log_audit(principal, operation,
                             error="insufficient scope", result="error")
             response = _build_error_response(
                 FORBIDDEN, "FORBIDDEN",
@@ -213,7 +204,7 @@ class AuthMiddleware:
             principal.principal_id, principal.tenant,
             is_mutation=is_mutation, is_batch=is_batch,
         ):
-            self._log_audit(principal, operation, "mcp",
+            self._log_audit(principal, operation,
                             error="rate limited", result="error")
             response = _build_error_response(
                 RATE_LIMITED, "RATE_LIMITED",
@@ -221,6 +212,9 @@ class AuthMiddleware:
                 retryable=True)
             await response(scope, receive, send)
             return
+
+        _sent = False
+        original_receive = receive
 
         async def _wrapped_receive() -> dict:
             nonlocal _sent
@@ -233,21 +227,26 @@ class AuthMiddleware:
                 }
             return await original_receive()
 
-        _sent = False
-        original_receive = receive
+        _response_started = False
+        _response_status = 200
+        original_send = send
 
-        try:
-            await self._app(scope, _wrapped_receive, send)
-        except Exception as e:
-            self._log_audit(principal, operation, "mcp",
-                            error=str(e), result="error")
-            error_response = _build_error_response(500, "INTERNAL_ERROR", str(e))
-            await error_response(scope, receive, send)
-            return
+        async def _wrapped_send(message: dict) -> None:
+            nonlocal _response_started, _response_status
+            if message["type"] == "http.response.start":
+                _response_started = True
+                _response_status = message.get("status", 200)
+            await original_send(message)
 
-        self._log_audit(principal, operation, "mcp", result="success")
+        await self._app(scope, _wrapped_receive, _wrapped_send)
 
-    def _log_audit(self, principal, operation: str, endpoint_type: str,
+        if _response_started and _response_status >= 400:
+            self._log_audit(principal, operation,
+                            error=f"HTTP {_response_status}", result="error")
+        else:
+            self._log_audit(principal, operation, result="success")
+
+    def _log_audit(self, principal, operation: str,
                    result: str = "success", error: str | None = None) -> None:
         audit_log(
             self._audit,
@@ -272,7 +271,14 @@ def create_remote_app(
     audit_logger: AuditLogger | None = None,
     domain: str = "default",
 ):
-    return AuthMiddleware(
+    """Wrap an ASGI app with auth middleware, returning a Starlette app.
+
+    The returned Starlette app properly handles lifespan events for
+    FastMCP's session manager.
+    """
+    import contextlib
+
+    middleware = AuthMiddleware(
         inner_app,
         credential_registry=credential_registry,
         rate_limiter=rate_limiter,
@@ -280,6 +286,20 @@ def create_remote_app(
         audit_logger=audit_logger,
         tenant_resolver=tenant_resolver,
         domain=domain,
+    )
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(app):
+        if hasattr(inner_app, "router") and hasattr(inner_app.router, "lifespan_context"):
+            async with inner_app.router.lifespan_context(inner_app):
+                yield
+        else:
+            yield
+
+    from starlette.routing import Mount
+    return Starlette(
+        lifespan=_lifespan,
+        routes=[Mount("/", app=middleware)],
     )
 
 
@@ -293,8 +313,9 @@ def wrap_fastmcp(
     audit_logger: AuditLogger | None = None,
     domain: str = "default",
 ):
+    """Wrap a FastMCP instance with auth middleware, returning a Starlette app."""
     inner_app = fastmcp_instance.http_app() if hasattr(fastmcp_instance, "http_app") else fastmcp_instance
-    return AuthMiddleware(
+    return create_remote_app(
         inner_app,
         credential_registry=credential_registry,
         rate_limiter=rate_limiter,

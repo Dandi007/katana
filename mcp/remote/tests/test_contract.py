@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from katana_remote import (
-    AuthMiddleware,
     CredentialRegistry,
     RateLimiter,
     RateLimitConfig,
@@ -27,6 +26,7 @@ from katana_remote.auth import extract_bearer_token, hash_token
 
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 from starlette.testclient import TestClient
 
 
@@ -41,25 +41,23 @@ def _make_simple_app():
         return JSONResponse({"jsonrpc": "2.0", "result": {"ok": True}, "id": body.get("id", 0)})
 
     return Starlette(routes=[
-        {"path": "/mcp", "endpoint": mcp_endpoint, "methods": ["POST"]},
-        {"path": "/t/{tenant}/mcp", "endpoint": mcp_endpoint, "methods": ["POST"]},
+        Route("/mcp", mcp_endpoint, methods=["POST"]),
+        Route("/t/{tenant}/mcp", mcp_endpoint, methods=["POST"]),
     ])
 
 
 def _make_test_app(credential_registry=None, rate_limiter=None, readiness_service=None, audit_logger=None):
+    from katana_remote.middleware import create_remote_app
     inner = _make_simple_app()
     creds = credential_registry or CredentialRegistry()
-    middleware = AuthMiddleware(
+    return create_remote_app(
         inner,
         credential_registry=creds,
         rate_limiter=rate_limiter,
         readiness_service=readiness_service,
         audit_logger=audit_logger,
         domain="test",
-    )
-    app = Starlette()
-    app.mount("/", middleware)
-    return app, creds
+    ), creds
 
 
 def _auth_header(token):
