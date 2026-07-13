@@ -284,6 +284,36 @@ async def wf_reindex(dry_run: bool = False,
     return _patch_store_result(result, "index_path")
 
 
+def build_remote_app(
+    work_folder_path: str,
+    kb_root: str,
+    credential_registry: "CredentialRegistry",
+    *,
+    rate_limiter=None,
+    readiness_service=None,
+    audit_logger=None,
+    tenant_resolver=None,
+):
+    """Build the work-folder app with remote auth middleware applied."""
+    from katana_remote import AuthMiddleware, RateLimiter, ReadinessService, AuditLogger
+
+    configure(work_folder_path, kb_root)
+    inner = mcp.http_app()
+    rate_limiter = rate_limiter or RateLimiter()
+    readiness_service = readiness_service or ReadinessService()
+    audit_logger = audit_logger or AuditLogger()
+
+    return AuthMiddleware(
+        inner,
+        credential_registry=credential_registry,
+        rate_limiter=rate_limiter,
+        readiness_service=readiness_service,
+        audit_logger=audit_logger,
+        tenant_resolver=tenant_resolver,
+        domain="work-folder",
+    )
+
+
 def main() -> None:
     wf_path = config.resolve("work_folder_path", default="docs/work-records", env_var="KATANA_WORK_FOLDER")
     kb = config.kb_root()

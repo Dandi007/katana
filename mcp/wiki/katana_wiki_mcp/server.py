@@ -297,6 +297,36 @@ async def fs_batch(operations: list[dict],
                               idempotency_key=idempotency_key)
 
 
+def build_remote_app(
+    wiki_root: str,
+    kb_root: str,
+    credential_registry: "CredentialRegistry",
+    *,
+    rate_limiter=None,
+    readiness_service=None,
+    audit_logger=None,
+    tenant_resolver=None,
+):
+    """Build the wiki app with remote auth middleware applied."""
+    from katana_remote import AuthMiddleware, RateLimiter, ReadinessService, AuditLogger
+
+    configure(wiki_root, kb_root)
+    inner = mcp.http_app()
+    rate_limiter = rate_limiter or RateLimiter()
+    readiness_service = readiness_service or ReadinessService()
+    audit_logger = audit_logger or AuditLogger()
+
+    return AuthMiddleware(
+        inner,
+        credential_registry=credential_registry,
+        rate_limiter=rate_limiter,
+        readiness_service=readiness_service,
+        audit_logger=audit_logger,
+        tenant_resolver=tenant_resolver,
+        domain="wiki",
+    )
+
+
 def main() -> None:
     wiki_root = config.resolve("wiki_root", default=".", env_var="KATANA_WIKI_ROOT")
     kb = config.kb_root()

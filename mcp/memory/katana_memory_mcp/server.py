@@ -303,6 +303,38 @@ def build_app(data_root: str) -> Starlette:
     )
 
 
+def build_remote_app(
+    data_root: str,
+    credential_registry: "CredentialRegistry",
+    *,
+    rate_limiter=None,
+    readiness_service=None,
+    audit_logger=None,
+    tenant_resolver=None,
+) -> Starlette:
+    """Build the memory app with remote auth middleware applied.
+
+    Returns a Starlette app with all routes (index, index.md, per-tenant MCP)
+    wrapped in the remote auth layer.
+    """
+    from katana_remote import AuthMiddleware, RateLimiter, ReadinessService, AuditLogger
+
+    inner = build_app(data_root)
+    rate_limiter = rate_limiter or RateLimiter()
+    readiness_service = readiness_service or ReadinessService()
+    audit_logger = audit_logger or AuditLogger()
+
+    return AuthMiddleware(
+        inner,
+        credential_registry=credential_registry,
+        rate_limiter=rate_limiter,
+        readiness_service=readiness_service,
+        audit_logger=audit_logger,
+        tenant_resolver=tenant_resolver,
+        domain="memory",
+    )
+
+
 def main() -> None:
     data_root = _resolve_data_root()
     host = os.environ.get("KATANA_MEMORY_MCP_HOST", "127.0.0.1")
