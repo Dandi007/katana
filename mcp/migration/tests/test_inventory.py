@@ -10,6 +10,7 @@ from katana_migration.inventory import (
     ACTION_REJECT,
     EXC_BINARY,
     EXC_CASEFOLD_COLLISION,
+    EXC_DESTINATION_PATH_CONFLICT,
     EXC_DUPLICATE_BASENAME,
     EXC_DUPLICATE_ID,
     EXC_EXECUTABLE,
@@ -390,7 +391,25 @@ def test_yaml_parse_error_rejected(manifest):
         assert obj["action"] == ACTION_REJECT
 
 
-def test_missing_brief_rejected(manifest):
+def test_missing_brief_rejected(tmp_path):
+    root = tmp_path / "memory"
+    root.mkdir()
+    (root / "missing-fields.md").write_text(
+        "---\nid: m-111111\n---\n\nMissing fields\n",
+        encoding="utf-8",
+    )
+    config = [{
+        "name": "memory",
+        "root": str(root),
+        "source_repo": "/test/memory",
+        "source_commit": "0000000000000000000000000000000000000000",
+        "object_class": "memory_canonical",
+        "prefix": "m-",
+        "destination_repo": "/test/memory",
+        "default_action": "preserve",
+        "include": ["*.md"],
+    }]
+    manifest = run_inventory(config, migration_run_id="missing-memory-fields")
     missing = [r for r in manifest["objects"] if r["exception_code"] == EXC_MISSING_BRIEF]
     assert len(missing) >= 1
     for obj in missing:
@@ -420,10 +439,10 @@ def test_duplicate_detection(tmp_path):
         "root": str(root),
         "source_repo": "/test",
         "source_commit": "0000000000000000000000000000000000000000",
-        "object_class": "test",
-        "prefix": "t-",
+        "object_class": "memory_legacy",
+        "prefix": "m-",
         "destination_repo": "/test",
-        "default_action": "preserve",
+        "default_action": "id_backfill",
         "include": ["*.md"],
     }]
     manifest = run_inventory(config, migration_run_id="dup-test")
@@ -446,8 +465,8 @@ def test_duplicate_basename_detection(tmp_path):
         "root": str(root),
         "source_repo": "/test",
         "source_commit": "0000000000000000000000000000000000000000",
-        "object_class": "test",
-        "prefix": "t-",
+        "object_class": "wiki_writable",
+        "prefix": "w-",
         "destination_repo": "/test",
         "default_action": "preserve",
         "include": ["**/*.md"],
@@ -460,6 +479,163 @@ def test_duplicate_basename_detection(tmp_path):
     for obj in dup_basenames:
         assert obj["action"] == ACTION_REJECT
         assert "note.md" in obj["reason"]
+
+
+def _work_folder_source_set(root, *, source_repo="/test/work-source", destination_repo="/test/work"):
+    return {
+        "name": source_repo,
+        "root": str(root),
+        "source_repo": source_repo,
+        "source_commit": "0000000000000000000000000000000000000000",
+        "object_class": "work_folder",
+        "prefix": "wf-",
+        "destination_repo": destination_repo,
+        "default_action": "preserve",
+        "include": ["**/*"],
+    }
+
+
+def _write_work_folder(folder, *, resource_id=None):
+    folder.mkdir(parents=True)
+    id_line = f"id: {resource_id}\n" if resource_id else "id: legacy-folder-id\n"
+    (folder / "_brief.md").write_text(
+        f"---\n{id_line}title: Fixture\nstatus: active\n---\n\n**Goal:** Test\n",
+        encoding="utf-8",
+    )
+    (folder / "progress.md").write_text("# Progress\n", encoding="utf-8")
+    (folder / "context.md").write_text("# Context\n", encoding="utf-8")
+    run_dir = folder / "runs" / "001" / "output"
+    run_dir.mkdir(parents=True)
+    (run_dir / "cmd.txt").write_text("command\n", encoding="utf-8")
+    (run_dir / "err.txt").write_text("", encoding="utf-8")
+    (run_dir / "meta.json").write_text('{"status": "ok"}\n', encoding="utf-8")
+
+
+def test_real_scale_work_folders_use_path_identity_and_rehearse(tmp_path):
+    root = tmp_path / "work-records"
+    folder_count = 200
+    for index in range(folder_count):
+        _write_work_folder(root / "2026" / "07" / f"{index % 31 + 1:02d}" / f"task-{index:03d}")
+
+    config = [_work_folder_source_set(root)]
+    manifest = run_inventory(config, migration_run_id="work-folder-scale")
+    repeated = run_inventory(config, migration_run_id="work-folder-scale")
+
+    assert manifest == repeated
+    assert manifest["summary"] == {
+        "tracked": folder_count * 6,
+        "preserved": folder_count * 6,
+        "transformed": 0,
+        "archived": 0,
+        "rejected": 0,
+        "unclassified": 0,
+        "invariant_holds": True,
+    }
+
+    by_folder = {}
+    for obj in manifest["objects"]:
+        assert obj["action"] == ACTION_PRESERVE
+        assert obj["destination_path"] == obj["source_path"]
+        assert obj["exception_code"] is None
+        by_folder.setdefault(obj["work_folder_path"], set()).add(obj["domain_resource_id"])
+
+    assert len(by_folder) == folder_count
+    assert all(len(ids) == 1 for ids in by_folder.values())
+    folder_ids = {next(iter(ids)) for ids in by_folder.values()}
+    assert len(folder_ids) == folder_count
+    assert all(resource_id.startswith("wf-") and len(resource_id) == 9 for resource_id in folder_ids)
+
+    from katana_migration.rehearsal import run_rehearsal
+
+    result = run_rehearsal(
+        manifest,
+        str(tmp_path / "rehearsal"),
+        committer_date="2026-01-01T00:00:00+0000",
+    )
+    assert result["invariant_holds"] is True
+
+
+def test_missing_brief_is_applied_to_the_work_folder_only(tmp_path):
+    root = tmp_path / "work-records"
+    good = root / "2026" / "07" / "01" / "with-brief"
+    missing = root / "2026" / "07" / "02" / "without-brief"
+    _write_work_folder(good)
+    missing.mkdir(parents=True)
+    (missing / "progress.md").write_text("# Progress\n", encoding="utf-8")
+    (missing / "context.md").write_text("# Context\n", encoding="utf-8")
+
+    manifest = run_inventory([_work_folder_source_set(root)], migration_run_id="missing-brief")
+    good_records = [obj for obj in manifest["objects"] if obj["work_folder_path"].endswith("with-brief")]
+    missing_records = [obj for obj in manifest["objects"] if obj["work_folder_path"].endswith("without-brief")]
+
+    assert good_records
+    assert all(obj["action"] == ACTION_PRESERVE for obj in good_records)
+    assert all(obj["exception_code"] is None for obj in good_records)
+    assert missing_records
+    assert all(obj["action"] == ACTION_REJECT for obj in missing_records)
+    assert all(obj["exception_code"] == EXC_MISSING_BRIEF for obj in missing_records)
+    assert not any(
+        obj["source_path"].endswith("_brief.md") and obj["exception_code"] == EXC_MISSING_BRIEF
+        for obj in manifest["objects"]
+    )
+
+
+def test_structure_preserving_wiki_raw_allows_repeated_basenames_and_content(tmp_path):
+    root = tmp_path / "wiki"
+    for directory in (root / "转换文档" / "a", root / "转换文档" / "b"):
+        directory.mkdir(parents=True)
+        (directory / "report.md").write_text("# Same report\n", encoding="utf-8")
+
+    config = [{
+        "name": "wiki",
+        "root": str(root),
+        "source_repo": "/test/wiki-source",
+        "source_commit": "0000000000000000000000000000000000000000",
+        "object_class": "wiki",
+        "prefix": "w-",
+        "destination_repo": "/test/wiki",
+        "default_action": "preserve",
+        "auto_classify": True,
+        "include": ["**/*.md"],
+    }]
+    manifest = run_inventory(config, migration_run_id="wiki-raw-paths")
+
+    assert manifest["summary"]["rejected"] == 0
+    assert {obj["object_class"] for obj in manifest["objects"]} == {"wiki_raw"}
+    assert len({obj["domain_resource_id"] for obj in manifest["objects"]}) == 2
+
+
+def test_work_folder_duplicate_id_rejects_both_folders(tmp_path):
+    root = tmp_path / "work-records"
+    _write_work_folder(root / "2026" / "07" / "01" / "first", resource_id="wf-abc123")
+    _write_work_folder(root / "2026" / "07" / "02" / "second", resource_id="wf-abc123")
+
+    manifest = run_inventory([_work_folder_source_set(root)], migration_run_id="duplicate-folder-id")
+
+    assert manifest["objects"]
+    assert all(obj["action"] == ACTION_REJECT for obj in manifest["objects"])
+    assert all(obj["exception_code"] == EXC_DUPLICATE_ID for obj in manifest["objects"])
+
+
+def test_distinct_sources_mapping_to_same_destination_path_are_rejected(tmp_path):
+    first_root = tmp_path / "first-source"
+    second_root = tmp_path / "second-source"
+    relative_folder = ("2026", "07", "01", "same-destination")
+    _write_work_folder(first_root.joinpath(*relative_folder))
+    _write_work_folder(second_root.joinpath(*relative_folder))
+
+    config = [
+        _work_folder_source_set(first_root, source_repo="/test/first"),
+        _work_folder_source_set(second_root, source_repo="/test/second"),
+    ]
+    manifest = run_inventory(config, migration_run_id="destination-conflict")
+
+    assert manifest["objects"]
+    assert all(obj["action"] == ACTION_REJECT for obj in manifest["objects"])
+    assert all(
+        obj["exception_code"] == EXC_DESTINATION_PATH_CONFLICT
+        for obj in manifest["objects"]
+    )
 
 
 def test_path_length_exception(tmp_path, monkeypatch):
