@@ -75,6 +75,8 @@ _PATH_PRESERVING_CLASSES = {"work_folder", "wiki_raw"}
 _WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]+)?\]\]")
 _MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 _BARE_ID_RE = re.compile(r"(?<!\w)([mw]f?-[0-9a-f]{6})(?!\w)")
+_FRONTMATTER_END_RE = re.compile(rb"\n---[ \t]*(?=\n|$)")
+_FRONTMATTER_ID_RE = re.compile(rb"(?m)^id[ \t]*:")
 
 # Git commit date format (ISO 8601, used by git)
 _GIT_DATE_FMT = "%Y-%m-%dT%H:%M:%S%z"
@@ -121,14 +123,12 @@ def _is_nfc_normalized(content: bytes) -> bool:
 def _extract_body_bytes(content: bytes) -> bytes:
     if not content.startswith(b"---\n"):
         return content
-    try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        return content
-    fm_end = re.search(r"\n---[ \t]*(?=\n|$)", text[4:])
+    fm_end = _FRONTMATTER_END_RE.search(content, 4)
     if fm_end is None:
         return content
-    body_start = 4 + fm_end.end()
+    body_start = fm_end.end()
+    if content[body_start:body_start + 1] == b"\n":
+        body_start += 1
     return content[body_start:]
 
 
@@ -624,14 +624,27 @@ class RehearsalEngine:
             )
 
         orig_body = _extract_body_bytes(content)
-        fm, body, _ = _parse_frontmatter(content)
+        fm_end = _FRONTMATTER_END_RE.search(content, 4) if content.startswith(b"---\n") else None
 
-        if fm is not None:
-            fm["id"] = resource_id
-            new_content = _write_frontmatter(fm, body)
+        if fm_end is not None:
+            frontmatter = content[4:fm_end.start() + 1]
+            parsed_fm, _, _ = _parse_frontmatter(content)
+            has_id = (
+                (parsed_fm is not None and "id" in parsed_fm)
+                or _FRONTMATTER_ID_RE.search(frontmatter) is not None
+            )
+            if has_id:
+                if parsed_fm is not None and str(parsed_fm.get("id")) != resource_id:
+                    raise RehearsalError(
+                        f"Existing id does not match domain_resource_id for {obj['destination_path']}"
+                    )
+                new_content = content
+            else:
+                id_line = f"id: {resource_id}\n".encode("utf-8")
+                new_content = content[:4] + id_line + content[4:]
         else:
-            fm = {"id": resource_id}
-            new_content = _write_frontmatter(fm, content)
+            id_line = f"id: {resource_id}\n".encode("utf-8")
+            new_content = b"---\n" + id_line + b"---\n" + content
 
         new_body = _extract_body_bytes(new_content)
         if new_body != orig_body:

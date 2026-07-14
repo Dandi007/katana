@@ -29,6 +29,8 @@ from katana_migration.rehearsal import (
     GATE_UNICODE_NFC,
     RehearsalError,
     RehearsalEngine,
+    _extract_body_bytes,
+    _parse_frontmatter,
     run_rehearsal,
 )
 
@@ -190,6 +192,25 @@ def dest_root(tmp_path):
     return dest
 
 
+@pytest.fixture
+def nested_legacy_card():
+    return (
+        "---\n"
+        'name: "katana-memory-mcp-service"\n'
+        "description: Legacy memory \u2014 operator copy\n"
+        "metadata:\n"
+        '  source: "/data/vault/memory"\n'
+        "  labels:\n"
+        "    - migration\n"
+        '    - "MCP \u2014 rehearsal"\n'
+        "status: active\n"
+        "---\n"
+        "\n"
+        "## Fact\n"
+        "Nested metadata, quotes, and unicode must survive.\n"
+    ).encode("utf-8")
+
+
 # ── Basic engine tests ────────────────────────────────────────────────────────
 
 def test_engine_runs_without_error(manifest, dest_root):
@@ -266,6 +287,53 @@ def test_id_backfill_body_bytes_preserved(manifest, dest_root):
         assert body == source_body, (
             f"Body bytes changed for {obj['destination_path']}"
         )
+
+
+def test_id_backfill_surgically_inserts_into_nested_frontmatter(tmp_path, nested_legacy_card):
+    engine = RehearsalEngine({}, str(tmp_path))
+    obj = {
+        "destination_path": "katana-memory-mcp-service.md",
+        "domain_resource_id": "m-a1b2c3",
+    }
+    target = tmp_path / obj["destination_path"]
+
+    engine._apply_id_backfill(target, obj, nested_legacy_card, target)
+
+    actual = target.read_bytes()
+    expected = nested_legacy_card[:4] + b"id: m-a1b2c3\n" + nested_legacy_card[4:]
+    assert actual == expected
+    assert _extract_body_bytes(actual) == _extract_body_bytes(nested_legacy_card)
+    frontmatter, _, _ = _parse_frontmatter(actual)
+    assert frontmatter is not None
+    assert frontmatter["id"] == "m-a1b2c3"
+
+    repeated_target = tmp_path / "repeated.md"
+    engine._apply_id_backfill(repeated_target, obj, nested_legacy_card, repeated_target)
+    assert repeated_target.read_bytes() == actual
+
+    idempotent_target = tmp_path / "idempotent.md"
+    engine._apply_id_backfill(idempotent_target, obj, actual, idempotent_target)
+    assert idempotent_target.read_bytes() == actual
+    assert actual.count(b"\nid: m-a1b2c3\n") == 1
+
+
+def test_id_backfill_adds_minimal_frontmatter_without_changing_body(tmp_path):
+    content = b"# Legacy card\r\n\r\nBody bytes stay exact.\r\n"
+    engine = RehearsalEngine({}, str(tmp_path))
+    obj = {
+        "destination_path": "legacy-no-frontmatter.md",
+        "domain_resource_id": "m-d4e5f6",
+    }
+    target = tmp_path / obj["destination_path"]
+
+    engine._apply_id_backfill(target, obj, content, target)
+
+    actual = target.read_bytes()
+    assert actual == b"---\nid: m-d4e5f6\n---\n" + content
+    assert _extract_body_bytes(actual) == content
+    frontmatter, _, _ = _parse_frontmatter(actual)
+    assert frontmatter is not None
+    assert frontmatter["id"] == "m-d4e5f6"
 
 
 def test_normalize_emits_diff_manifest(manifest, dest_root):
