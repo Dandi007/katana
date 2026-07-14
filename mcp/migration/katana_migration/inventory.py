@@ -41,6 +41,7 @@ EXC_YAML_PARSE = "YAML_PARSE_ERROR"
 EXC_MISSING_BRIEF = "MISSING_BRIEF"
 EXC_DUPLICATE_BASENAME = "DUPLICATE_BASENAME"
 EXC_DUPLICATE_ID = "DUPLICATE_ID"
+EXC_DESTINATION_PATH_CONFLICT = "DESTINATION_PATH_CONFLICT"
 EXC_CASEFOLD_COLLISION = "CASEFOLD_COLLISION"
 EXC_PATH_LENGTH = "PATH_LENGTH_EXCEEDED"
 EXC_SYMLINK = "SYMLINK"
@@ -68,6 +69,11 @@ MAX_PATH_LENGTH = 4096
 
 # Wiki schema-scope basenames that are expected to be enumerated
 _WIKI_SCHEMA_BASENAMES = {"WIKI.md", "log.md"}
+
+# These classes retain their source hierarchy at the destination.  Their
+# identity and collision keys therefore include the complete relative path.
+_PATH_PRESERVING_CLASSES = {"work_folder", "wiki_raw"}
+_WORK_FOLDER_MARKERS = {"_brief.md", "progress.md", "CLAUDE.md"}
 
 # Credential-related path patterns
 _CREDENTIAL_PATTERNS = [
@@ -290,7 +296,9 @@ def scan_file(
                 resource_id = existing_id
             elif object_class in ("memory_canonical", "memory_legacy"):
                 exceptions.append((EXC_MISSING_BRIEF, f"Invalid existing ID format: {existing_id}"))
-            if not fm.get("name") or not fm.get("description"):
+            if object_class in ("memory_canonical", "memory_legacy") and (
+                not fm.get("name") or not fm.get("description")
+            ):
                 exceptions.append((EXC_MISSING_BRIEF, "Missing required fields (name/description) in frontmatter"))
         elif fm is None:
             exceptions.append((EXC_YAML_PARSE, "Failed to parse YAML frontmatter"))
@@ -335,6 +343,68 @@ def scan_file(
 
 # ── Source-set traversal ──────────────────────────────────────────────────────
 
+def _is_path_preserving(object_class: str) -> bool:
+    return object_class in _PATH_PRESERVING_CLASSES
+
+
+def _set_exception(record: dict, code: str, reason: str) -> None:
+    if record["exception_code"] is None:
+        record["exception_code"] = code
+        record["reason"] = reason
+    record["action"] = ACTION_REJECT
+
+
+def _work_folder_roots(root: Path, paths: list[Path]) -> list[Path]:
+    roots = {
+        p.relative_to(root).parent
+        for p in paths
+        if p.name in _WORK_FOLDER_MARKERS
+    }
+    return sorted(roots, key=lambda p: (-len(p.parts), p.as_posix()))
+
+
+def _containing_work_folder(rel_path: Path, folder_roots: list[Path]) -> Path | None:
+    for folder in folder_roots:
+        try:
+            rel_path.relative_to(folder)
+        except ValueError:
+            continue
+        return folder
+    return None
+
+
+def _work_folder_id(
+    root: Path,
+    folder: Path,
+    destination_repo: str,
+    prefix: str,
+    ledger: object | None,
+) -> str:
+    brief = root / folder / "_brief.md"
+    if brief.is_file() and not brief.is_symlink():
+        try:
+            fm = _parse_memory_frontmatter(brief.read_bytes())
+        except OSError:
+            fm = None
+        if fm is not None:
+            existing_id = str(fm.get("id", ""))
+            if WF_ID_RE.match(existing_id):
+                return existing_id
+
+    identity = f"{destination_repo}\0{folder.as_posix()}".encode("utf-8")
+    return deterministic_id(identity, prefix, ledger=ledger)
+
+
+def _path_resource_id(
+    destination_repo: str,
+    destination_path: str,
+    prefix: str,
+    ledger: object | None,
+) -> str:
+    identity = f"{destination_repo}\0{destination_path}".encode("utf-8")
+    return deterministic_id(identity, prefix, ledger=ledger)
+
+
 def _scan_source_set(
     ss: dict,
     migration_run_id: str,
@@ -343,10 +413,12 @@ def _scan_source_set(
     root = Path(ss["root"])
     records: list[dict] = []
     seen_basenames: set[str] = set()
-    seen_ids: set[str] = set()
-    casefold_map: dict[str, str] = {}
+    seen_ids: dict[str, tuple[str, str]] = {}
+    flat_casefold_map: dict[str, str] = {}
+    path_casefold_map: dict[str, str] = {}
     redirect_map: dict[str, str] = {}
 
+    matched_paths: dict[str, Path] = {}
     for pattern in ss.get("include", ["**/*"]):
         if os.path.isabs(pattern):
             resolved = Path(pattern)
@@ -362,67 +434,183 @@ def _scan_source_set(
                 continue
             if p.name.startswith(".") and not ss.get("include_dotfiles", False):
                 continue
+            matched_paths[str(p)] = p
 
-            rel_path = str(p.relative_to(root))
+    paths = sorted(matched_paths.values(), key=lambda p: str(p.relative_to(root)))
+    folder_roots = _work_folder_roots(root, paths) if ss.get("object_class") == "work_folder" else []
+    destination_repo = ss.get("destination_repo", ss["source_repo"])
+    folder_ids = {
+        folder: _work_folder_id(root, folder, destination_repo, ss["prefix"], ledger)
+        for folder in folder_roots
+    }
 
-            if ss.get("object_class") == "wiki" and ss.get("auto_classify", True):
-                object_class = _classify_wiki_file(rel_path)
-                if object_class is None:
-                    object_class = "wiki_unknown"
-                    default_action = ACTION_PRESERVE
-                else:
-                    default_action = ACTION_PRESERVE
+    for p in paths:
+        rel_path = str(p.relative_to(root))
+
+        if ss.get("object_class") == "wiki" and ss.get("auto_classify", True):
+            object_class = _classify_wiki_file(rel_path)
+            if object_class is None:
+                object_class = "wiki_unknown"
+                default_action = ACTION_PRESERVE
             else:
-                object_class = ss.get("object_class", "unknown")
-                default_action = ss.get("default_action", ACTION_PRESERVE)
+                default_action = ACTION_PRESERVE
+        else:
+            object_class = ss.get("object_class", "unknown")
+            default_action = ss.get("default_action", ACTION_PRESERVE)
 
-            record = scan_file(
-                path=p,
-                root=root,
-                source_repo=ss["source_repo"],
-                source_commit=ss.get("source_commit", "0000000000000000000000000000000000000000"),
-                object_class=object_class,
-                prefix=ss["prefix"],
-                destination_repo=ss.get("destination_repo", ss["source_repo"]),
-                default_action=default_action,
-                migration_run_id=migration_run_id,
-                ledger=ledger,
+        record = scan_file(
+            path=p,
+            root=root,
+            source_repo=ss["source_repo"],
+            source_commit=ss.get("source_commit", "0000000000000000000000000000000000000000"),
+            object_class=object_class,
+            prefix=ss["prefix"],
+            destination_repo=destination_repo,
+            default_action=default_action,
+            migration_run_id=migration_run_id,
+            ledger=ledger,
+        )
+
+        work_folder = None
+        if object_class == "work_folder":
+            work_folder = _containing_work_folder(Path(rel_path), folder_roots)
+            record["work_folder_path"] = work_folder.as_posix() if work_folder is not None else None
+            if work_folder is not None:
+                resource_id = folder_ids[work_folder]
+            else:
+                resource_id = _path_resource_id(
+                    destination_repo, record["destination_path"], ss["prefix"], ledger
+                )
+            record["domain_resource_id"] = resource_id
+            record["vfs_node_id"] = resource_id
+        elif object_class == "wiki_raw":
+            resource_id = _path_resource_id(
+                destination_repo, record["destination_path"], ss["prefix"], ledger
             )
+            record["domain_resource_id"] = resource_id
+            record["vfs_node_id"] = resource_id
 
-            basename = Path(record["source_path"]).name
+        basename = Path(record["source_path"]).name
+        if not _is_path_preserving(object_class):
             if basename in seen_basenames:
-                if record["exception_code"] is None:
-                    record["exception_code"] = EXC_DUPLICATE_BASENAME
-                    record["reason"] = f"Duplicate basename: {basename}"
-                    record["action"] = ACTION_REJECT
+                _set_exception(record, EXC_DUPLICATE_BASENAME, f"Duplicate basename: {basename}")
             seen_basenames.add(basename)
 
-            casefold_name = basename.casefold()
-            if casefold_name in casefold_map and casefold_map[casefold_name] != basename:
-                if record["exception_code"] is None:
-                    record["exception_code"] = EXC_CASEFOLD_COLLISION
-                    record["reason"] = f"Casefold collision with {casefold_map[casefold_name]}: {basename}"
-                    record["action"] = ACTION_REJECT
+            casefold_name = unicodedata.normalize("NFC", basename).casefold()
+            if casefold_name in flat_casefold_map and flat_casefold_map[casefold_name] != basename:
+                _set_exception(
+                    record,
+                    EXC_CASEFOLD_COLLISION,
+                    f"Casefold collision with {flat_casefold_map[casefold_name]}: {basename}",
+                )
             else:
-                casefold_map[casefold_name] = basename
+                flat_casefold_map[casefold_name] = basename
+        else:
+            destination_path = record["destination_path"]
+            casefold_path = unicodedata.normalize("NFC", destination_path).casefold()
+            if (
+                casefold_path in path_casefold_map
+                and path_casefold_map[casefold_path] != destination_path
+            ):
+                _set_exception(
+                    record,
+                    EXC_CASEFOLD_COLLISION,
+                    f"Casefold collision with {path_casefold_map[casefold_path]}: {destination_path}",
+                )
+            else:
+                path_casefold_map[casefold_path] = destination_path
 
-            if record["domain_resource_id"] and record["domain_resource_id"] in seen_ids:
-                if record["exception_code"] is None:
-                    record["exception_code"] = EXC_DUPLICATE_ID
-                    record["reason"] = f"Duplicate ID: {record['domain_resource_id']}"
-                    record["action"] = ACTION_REJECT
-            if record["domain_resource_id"]:
-                seen_ids.add(record["domain_resource_id"])
+        identity_path = (
+            record.get("work_folder_path")
+            if record.get("work_folder_path") is not None
+            else record["destination_path"]
+        )
+        identity = (object_class, identity_path)
+        resource_id = record["domain_resource_id"]
+        if resource_id and resource_id in seen_ids and seen_ids[resource_id] != identity:
+            _set_exception(record, EXC_DUPLICATE_ID, f"Duplicate ID: {resource_id}")
+        elif resource_id:
+            seen_ids[resource_id] = identity
 
-            if record["action"] == ACTION_ID_BACKFILL and record["domain_resource_id"]:
-                redirect_map[record["source_path"]] = record["domain_resource_id"]
+        if record["action"] == ACTION_ID_BACKFILL and record["domain_resource_id"]:
+            redirect_map[record["source_path"]] = record["domain_resource_id"]
 
-            records.append(record)
+        records.append(record)
+
+    if folder_roots:
+        for folder in folder_roots:
+            brief = root / folder / "_brief.md"
+            if brief.is_file() and not brief.is_symlink():
+                continue
+            folder_path = folder.as_posix()
+            for record in records:
+                if record.get("work_folder_path") == folder_path:
+                    _set_exception(
+                        record,
+                        EXC_MISSING_BRIEF,
+                        f"Work folder missing _brief.md: {folder_path}",
+                    )
 
     return records, redirect_map
 
 
 # ── Manifest assembly ─────────────────────────────────────────────────────────
+
+def _mark_global_conflicts(records: list[dict]) -> None:
+    destination_groups: dict[tuple[str, str], list[dict]] = {}
+    casefold_groups: dict[tuple[str, str], list[dict]] = {}
+
+    for record in records:
+        destination_repo = record["destination_repo"]
+        destination_path = record["destination_path"]
+        destination_groups.setdefault((destination_repo, destination_path), []).append(record)
+        casefold_path = unicodedata.normalize("NFC", destination_path).casefold()
+        casefold_groups.setdefault((destination_repo, casefold_path), []).append(record)
+
+    for (_, destination_path), conflicting in destination_groups.items():
+        if len(conflicting) < 2:
+            continue
+        for record in conflicting:
+            _set_exception(
+                record,
+                EXC_DESTINATION_PATH_CONFLICT,
+                f"Multiple sources map to destination path: {destination_path}",
+            )
+
+    for conflicting in casefold_groups.values():
+        paths = {record["destination_path"] for record in conflicting}
+        if len(paths) < 2:
+            continue
+        rendered_paths = ", ".join(sorted(paths))
+        for record in conflicting:
+            _set_exception(
+                record,
+                EXC_CASEFOLD_COLLISION,
+                f"Destination path casefold collision: {rendered_paths}",
+            )
+
+    path_id_groups: dict[tuple[str, str], dict[tuple[str, str, str], list[dict]]] = {}
+    for record in records:
+        if not _is_path_preserving(record["object_class"]):
+            continue
+        resource_id = record.get("domain_resource_id")
+        if not resource_id:
+            continue
+        identity_path = record.get("work_folder_path") or record["source_path"]
+        source_identity = (
+            record["source_repo"],
+            record["source_commit"],
+            identity_path,
+        )
+        key = (record["destination_repo"], resource_id)
+        path_id_groups.setdefault(key, {}).setdefault(source_identity, []).append(record)
+
+    for (_, resource_id), identities in path_id_groups.items():
+        if len(identities) < 2:
+            continue
+        for identity_records in identities.values():
+            for record in identity_records:
+                _set_exception(record, EXC_DUPLICATE_ID, f"Duplicate ID: {resource_id}")
 
 def compute_summary(records: list[dict]) -> dict:
     tracked = len(records)
@@ -467,6 +655,7 @@ def build_manifest(
         all_redirects.update(redirects)
 
     all_records.sort(key=lambda r: (r["source_repo"], r["source_path"]))
+    _mark_global_conflicts(all_records)
 
     summary = compute_summary(all_records)
 
@@ -479,6 +668,7 @@ def build_manifest(
                 "source_commit": ss.get("source_commit", "0000000000000000000000000000000000000000"),
                 "object_class": ss.get("object_class", "unknown"),
                 "root": ss["root"],
+                "destination_repo": ss.get("destination_repo", ss["source_repo"]),
             }
             for ss in source_sets
         ],

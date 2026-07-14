@@ -59,6 +59,7 @@ _BLOB_OID_CACHE: dict[bytes, str] = {}
 _MEMORY_ID_RE = re.compile(r"^m-[0-9a-f]{6}$")
 _WIKI_ID_RE = re.compile(r"^w-[0-9a-f]{6}$")
 _WF_ID_RE = re.compile(r"^wf-[0-9a-f]{6}$")
+_PATH_PRESERVING_CLASSES = {"work_folder", "wiki_raw"}
 
 # Reference extraction patterns
 _WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]+)?\]\]")
@@ -746,7 +747,8 @@ class RehearsalEngine:
     def _apply_integrity_gate(self, dest_path: Path, objects: list[dict]) -> None:
         errors: list[dict] = []
         dest_str = str(dest_path)
-        basename_casefold: dict[str, str] = {}
+        flat_casefold: dict[str, str] = {}
+        path_casefold: dict[str, str] = {}
 
         for obj in objects:
             if obj.get("action") == ACTION_REJECT:
@@ -811,15 +813,28 @@ class RehearsalEngine:
                     "reason": f"Path exceeds {MAX_PATH_LENGTH} bytes",
                 })
 
-            casefold_name = basename.casefold()
-            if casefold_name in basename_casefold and basename_casefold[casefold_name] != basename:
-                errors.append({
-                    "code": GATE_CASEFOLD,
-                    "path": obj["destination_path"],
-                    "reason": f"Casefold collision with {basename_casefold[casefold_name]}: {basename}",
-                })
+            if obj.get("object_class") in _PATH_PRESERVING_CLASSES:
+                collision_key = unicodedata.normalize("NFC", obj["destination_path"]).casefold()
+                previous = path_casefold.get(collision_key)
+                if previous is not None and previous != obj["destination_path"]:
+                    errors.append({
+                        "code": GATE_CASEFOLD,
+                        "path": obj["destination_path"],
+                        "reason": f"Casefold collision with {previous}: {obj['destination_path']}",
+                    })
+                else:
+                    path_casefold[collision_key] = obj["destination_path"]
             else:
-                basename_casefold[casefold_name] = basename
+                collision_key = unicodedata.normalize("NFC", basename).casefold()
+                previous = flat_casefold.get(collision_key)
+                if previous is not None and previous != basename:
+                    errors.append({
+                        "code": GATE_CASEFOLD,
+                        "path": obj["destination_path"],
+                        "reason": f"Casefold collision with {previous}: {basename}",
+                    })
+                else:
+                    flat_casefold[collision_key] = basename
 
             if not _is_nfc_normalized(content):
                 errors.append({

@@ -342,22 +342,28 @@ def id_gate(manifest: dict, dest_root: str) -> dict:
     objects = manifest.get("objects", [])
     redirect_map = manifest.get("redirect_map", {})
 
-    assigned_ids: set[str] = set()
-    rejected_ids: set[str] = set()
+    assigned_ids: dict[str, set[tuple[str, str, str]]] = {}
+    rejected_ids: dict[str, set[tuple[str, str, str]]] = {}
+
+    def identity(obj: dict) -> tuple[str, str, str]:
+        if obj.get("object_class") == "work_folder" and obj.get("work_folder_path") is not None:
+            return ("work_folder", obj.get("destination_repo", "default"), obj["work_folder_path"])
+        return ("object", obj.get("destination_repo", "default"), obj["destination_path"])
 
     for obj in objects:
         rid = obj.get("domain_resource_id")
         if rid:
             if obj.get("action") == ACTION_REJECT:
-                rejected_ids.add(rid)
+                rejected_ids.setdefault(rid, set()).add(identity(obj))
             else:
-                assigned_ids.add(rid)
+                assigned_ids.setdefault(rid, set()).add(identity(obj))
 
     for obj in objects:
         if obj.get("action") == ACTION_REJECT:
             continue
         rid = obj.get("domain_resource_id")
-        if rid and rid in rejected_ids:
+        conflicting_rejections = rejected_ids.get(rid, set()) - {identity(obj)} if rid else set()
+        if conflicting_rejections:
             failures.append({
                 "check": "rejected_id_reused",
                 "path": obj["destination_path"],
