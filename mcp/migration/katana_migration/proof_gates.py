@@ -15,7 +15,6 @@ import os
 import re
 import stat
 import subprocess
-import unicodedata
 from pathlib import Path
 
 from katana_migration.inventory import (
@@ -29,7 +28,9 @@ from katana_migration.inventory import (
     ACTION_REWRITE,
     MAX_BASENAME_LENGTH,
     MAX_PATH_LENGTH,
-    sha256_hex,
+    _casefold_key,
+    _casefold_signature,
+    _casefold_value,
 )
 from katana_migration.rehearsal import (
     DISPOSITION_BROKEN_NEW,
@@ -330,6 +331,7 @@ def id_gate(manifest: dict, dest_root: str) -> dict:
     checked: list[str] = [
         "canonical_id_preserved",
         "legacy_id_stable",
+        "distinct_source_identities_have_unique_ids",
         "rejected_id_not_reused",
         "rename_redirect_map_complete",
     ]
@@ -342,8 +344,8 @@ def id_gate(manifest: dict, dest_root: str) -> dict:
 
     def identity(obj: dict) -> tuple[str, str, str]:
         if obj.get("object_class") == "work_folder" and obj.get("work_folder_path") is not None:
-            return ("work_folder", obj.get("destination_repo", "default"), obj["work_folder_path"])
-        return ("object", obj.get("destination_repo", "default"), obj["destination_path"])
+            return ("work_folder", obj.get("source_repo", "default"), obj["work_folder_path"])
+        return (obj.get("object_class", "object"), obj.get("source_repo", "default"), obj["source_path"])
 
     for obj in objects:
         rid = obj.get("domain_resource_id")
@@ -363,6 +365,13 @@ def id_gate(manifest: dict, dest_root: str) -> dict:
                 "check": "rejected_id_reused",
                 "path": obj["destination_path"],
                 "detail": f"ID {rid} was assigned to a rejected object and is now reused",
+            })
+
+    for rid, identities in assigned_ids.items():
+        if len(identities) > 1:
+            failures.append({
+                "check": "duplicate_active_id",
+                "detail": f"ID {rid} is assigned to distinct source identities: {sorted(identities)}",
             })
 
     for obj in objects:
@@ -433,7 +442,9 @@ def reference_gate(manifest: dict, dest_root: str) -> dict:
     _guard_no_production_paths(dest_root)
     checked: list[str] = [
         "reference_manifest_present",
-        "new_broken_minus_acknowledged_old_broken_equals_zero",
+        "net_new_broken_equals_zero",
+        "reference_counts_match_entries",
+        "rehearsal_constraint_matches_gate",
         "resolved_refs_same_target_id",
         "redirected_refs_different_target_id",
         "broken_old_ack_no_old_target",
@@ -449,6 +460,10 @@ def reference_gate(manifest: dict, dest_root: str) -> dict:
     for dest_repo in domain_groups:
         refs_path = Path(dest_root) / dest_repo.lstrip("/") / "references.json"
         if not refs_path.exists():
+            failures.append({
+                "check": "reference_manifest_missing",
+                "detail": f"references.json is missing in {dest_repo}",
+            })
             continue
 
         refs = _read_json_or_none(refs_path)
@@ -462,12 +477,42 @@ def reference_gate(manifest: dict, dest_root: str) -> dict:
         entries = refs.get("entries", [])
         old_broken_ack = refs.get("old_broken_acknowledged", 0)
         new_broken = refs.get("new_broken", 0)
+        net_new_broken = refs.get("net_new_broken", new_broken)
+        counted_old_ack = sum(
+            1 for entry in entries
+            if entry.get("disposition") == DISPOSITION_BROKEN_OLD_ACK
+        )
+        counted_new_broken = sum(
+            1 for entry in entries
+            if entry.get("disposition") == DISPOSITION_BROKEN_NEW
+        )
 
-        if new_broken - old_broken_ack != 0:
+        if old_broken_ack != counted_old_ack:
             failures.append({
-                "check": "new_broken_minus_acknowledged_old_broken_equals_zero",
-                "detail": f"new_broken={new_broken} - old_broken_acknowledged={old_broken_ack} = "
-                           f"{new_broken - old_broken_ack} != 0",
+                "check": "old_broken_acknowledged_count_mismatch",
+                "detail": f"old_broken_acknowledged={old_broken_ack}, entries={counted_old_ack}",
+            })
+        if new_broken != counted_new_broken or net_new_broken != counted_new_broken:
+            failures.append({
+                "check": "new_broken_count_mismatch",
+                "detail": (
+                    f"new_broken={new_broken}, net_new_broken={net_new_broken}, "
+                    f"entries={counted_new_broken}"
+                ),
+            })
+        if counted_new_broken != 0:
+            failures.append({
+                "check": "net_new_broken_equals_zero",
+                "detail": f"net_new_broken={counted_new_broken} != 0",
+            })
+        expected_constraint = counted_new_broken == 0
+        if refs.get("constraint_holds") is not expected_constraint:
+            failures.append({
+                "check": "rehearsal_constraint_mismatch",
+                "detail": (
+                    f"constraint_holds={refs.get('constraint_holds')} but "
+                    f"net_new_broken={counted_new_broken}"
+                ),
             })
 
         for entry in entries:
@@ -532,6 +577,18 @@ def integrity_gate(manifest: dict, dest_root: str) -> dict:
     ]
     failures: list[dict] = []
     objects = manifest.get("objects", [])
+    baseline_entries = manifest.get("acknowledged_baseline", {}).get(
+        "casefold_collisions", []
+    )
+    baseline_signatures = {
+        _casefold_signature(
+            entry["destination_repo"],
+            entry["collision_key"],
+            entry["destination_paths"],
+        )
+        for entry in baseline_entries
+    }
+    acknowledged_casefold: list[dict] = []
 
     domain_groups: dict[str, list[dict]] = {}
     for obj in objects:
@@ -560,7 +617,37 @@ def integrity_gate(manifest: dict, dest_root: str) -> dict:
                     "detail": f"git fsck error: {e}",
                 })
 
-        basename_casefold: dict[str, str] = {}
+        casefold_groups: dict[str, list[dict]] = {}
+        for obj in domain_objects:
+            casefold_groups.setdefault(_casefold_key(obj), []).append(obj)
+        for collision_key, conflicting in casefold_groups.items():
+            paths = sorted({_casefold_value(obj) for obj in conflicting})
+            if len(paths) < 2:
+                continue
+            signature = _casefold_signature(dest_repo, collision_key, paths)
+            migration_introduced = any(
+                obj.get("casefold_collision_status") == "migration_introduced"
+                for obj in conflicting
+            )
+            active_paths = {
+                _casefold_value(obj)
+                for obj in conflicting
+                if obj.get("action") != ACTION_REJECT
+            }
+            if signature in baseline_signatures and not migration_introduced:
+                acknowledged_casefold.append({
+                    "repo": dest_repo,
+                    "collision_key": collision_key,
+                    "paths": paths,
+                })
+            elif migration_introduced or len(active_paths) > 1:
+                failures.append({
+                    "check": "casefold_collision",
+                    "repo": dest_repo,
+                    "path": paths[-1],
+                    "detail": f"Migration-introduced casefold collision: {', '.join(paths)}",
+                })
+
         for obj in domain_objects:
             if obj.get("action") == ACTION_REJECT:
                 continue
@@ -636,18 +723,9 @@ def integrity_gate(manifest: dict, dest_root: str) -> dict:
                     "detail": f"Path exceeds 4096 bytes: {len(path_encoded)}",
                 })
 
-            casefold_name = basename.casefold()
-            if casefold_name in basename_casefold and basename_casefold[casefold_name] != basename:
-                failures.append({
-                    "check": "casefold_collision",
-                    "path": obj["destination_path"],
-                    "detail": f"Casefold collision with {basename_casefold[casefold_name]}: {basename}",
-                })
-            else:
-                basename_casefold[casefold_name] = basename
-
     status = "PASS" if not failures else "FAIL"
     record = _gate_record("integrity", status, checked, failures)
+    record["acknowledged"] = acknowledged_casefold
     record["evidence_digest"] = _make_evidence_digest(record)
     return record
 
@@ -664,8 +742,6 @@ def history_gate(manifest: dict, dest_root: str) -> dict:
     failures: list[dict] = []
     objects = manifest.get("objects", [])
 
-    in_scope_paths = {obj["destination_path"] for obj in objects}
-
     domain_groups: dict[str, list[dict]] = {}
     for obj in objects:
         dest = obj.get("destination_repo", "default")
@@ -676,28 +752,52 @@ def history_gate(manifest: dict, dest_root: str) -> dict:
         if not (dest_path / ".git").exists():
             continue
 
+        in_scope_paths = {
+            path
+            for obj in domain_objects
+            for path in (obj["source_path"], obj["destination_path"])
+        }
+        for obj in domain_objects:
+            if obj.get("action") == ACTION_ARCHIVE:
+                in_scope_paths.add(f"_archive/{obj['destination_path']}")
+            elif obj.get("action") == ACTION_QUARANTINE:
+                in_scope_paths.add(f"_quarantine/{obj['destination_path']}")
+            if obj.get("action") in (ACTION_NORMALIZE, ACTION_REWRITE, ACTION_MERGE):
+                materialized = _object_destination(Path("."), obj).as_posix()
+                in_scope_paths.add(f"{materialized}.diff_manifest.json")
+        generated_paths = {
+            "MIGRATION_BASE.json", "redirects.json", "references.json", ".gitkeep"
+        }
+
         try:
-            result = subprocess.run(
+            head_result = subprocess.run(
                 ["git", "ls-tree", "-r", "--name-only", "HEAD"],
                 cwd=str(dest_path), capture_output=True, text=True, timeout=15
             )
-            if result.returncode == 0:
-                tree_paths = set(result.stdout.strip().split("\n")) - {""}
-                scoped = {
-                    p for p in tree_paths
-                    if not p.startswith(".migration")
-                    and p not in ("MIGRATION_BASE.json", "redirects.json", "references.json", ".gitkeep")
-                    and not p.startswith("_archive/")
-                    and not p.startswith("_quarantine/")
-                    and not p.endswith(".diff_manifest.json")
-                }
-                out_of_scope = scoped - in_scope_paths
+            history_result = subprocess.run(
+                ["git", "log", "--format=", "--name-only", "HEAD"],
+                cwd=str(dest_path), capture_output=True, text=True, timeout=30
+            )
+            if head_result.returncode == 0 and history_result.returncode == 0:
+                head_paths = set(head_result.stdout.splitlines()) - {""}
+                history_paths = set(history_result.stdout.splitlines()) - {""}
+                tracked_paths = head_paths | history_paths
+                scoped = {p for p in tracked_paths if not p.startswith(".migration")}
+                out_of_scope = scoped - in_scope_paths - generated_paths
                 if out_of_scope:
                     failures.append({
                         "check": "out_of_scope_leak",
                         "repo": dest_repo,
-                        "detail": f"Out-of-scope paths in HEAD: {sorted(out_of_scope)}",
+                        "detail": f"Out-of-scope paths in reachable history: {sorted(out_of_scope)}",
                     })
+            else:
+                failures.append({
+                    "check": "git_history_inspection_error",
+                    "repo": dest_repo,
+                    "detail": (
+                        f"ls-tree={head_result.returncode}, git-log={history_result.returncode}"
+                    ),
+                })
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
             failures.append({
                 "check": "git_ls_tree_error",

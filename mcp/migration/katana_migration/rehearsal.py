@@ -13,13 +13,17 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
+import tempfile
 import unicodedata
 from pathlib import Path
 
 import yaml
+
+from katana_migration.inventory import _casefold_key, _casefold_signature, _casefold_value
 
 # ── Re-exported constants (mirrors inventory.py) ──────────────────────────────
 
@@ -69,7 +73,6 @@ _BLOB_OID_CACHE: dict[bytes, str] = {}
 _MEMORY_ID_RE = re.compile(r"^m-[0-9a-f]{6}$")
 _WIKI_ID_RE = re.compile(r"^w-[0-9a-f]{6}$")
 _WF_ID_RE = re.compile(r"^wf-[0-9a-f]{6}$")
-_PATH_PRESERVING_CLASSES = {"work_folder", "wiki_raw"}
 
 # Reference extraction patterns
 _WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]+)?\]\]")
@@ -332,7 +335,7 @@ class RehearsalEngine:
         ]
 
         if git_source_repos:
-            self._init_dest_repo_from_git(dest_path, git_source_repos)
+            self._init_dest_repo_from_git(dest_path, git_source_repos, objects)
         else:
             self._init_dest_repo_empty(dest_path)
 
@@ -356,14 +359,13 @@ class RehearsalEngine:
 
         old_broken = sum(1 for ref in references if ref["disposition"] == DISPOSITION_BROKEN_OLD_ACK)
         new_broken = sum(1 for ref in references if ref["disposition"] == DISPOSITION_BROKEN_NEW)
-        total_broken_before = sum(1 for ref in references if ref["old_target_id"] is None)
-        total_broken_after = sum(1 for ref in references if ref["new_target_id"] is None)
-        constraint_holds = (total_broken_after == total_broken_before)
+        constraint_holds = new_broken == 0
 
         references_json = {
             "constraint_holds": constraint_holds,
             "old_broken_acknowledged": old_broken,
             "new_broken": new_broken,
+            "net_new_broken": new_broken,
             "entries": references,
         }
         self._emit_catalogs(dest_path, objects, redirect_map, references_json)
@@ -375,6 +377,7 @@ class RehearsalEngine:
             "reference_count": len(references),
             "old_broken_acknowledged": old_broken,
             "new_broken": new_broken,
+            "net_new_broken": new_broken,
             "constraint_holds": constraint_holds,
             "invariant_holds": constraint_holds,
         }
@@ -385,7 +388,12 @@ class RehearsalEngine:
         marker.write_text("")
         self._git_add_and_commit(dest_path, ["."], "Initial empty commit (rehearsal)")
 
-    def _init_dest_repo_from_git(self, dest_path: Path, source_sets: list[dict]) -> None:
+    def _init_dest_repo_from_git(
+        self,
+        dest_path: Path,
+        source_sets: list[dict],
+        objects: list[dict],
+    ) -> None:
         if not source_sets:
             self._init_dest_repo_empty(dest_path)
             return
@@ -397,20 +405,14 @@ class RehearsalEngine:
         if source_root and Path(source_root).exists():
             if (Path(source_root) / ".git").exists():
                 subprocess.run(
-                    ["git", "clone", "--no-local", str(source_root), str(dest_path)],
+                    ["git", "clone", "--no-local", "--no-tags", str(source_root), str(dest_path)],
                     check=True, capture_output=True
                 )
-                if source_commit and source_commit != "0" * 40:
-                    try:
-                        subprocess.run(
-                            ["git", "checkout", source_commit],
-                            cwd=str(dest_path), check=True, capture_output=True
-                        )
-                    except subprocess.CalledProcessError:
-                        subprocess.run(
-                            ["git", "checkout", "-b", "rehearsal-branch", source_commit],
-                            cwd=str(dest_path), check=True, capture_output=True
-                        )
+                self._filter_history(
+                    dest_path,
+                    source_commit,
+                    self._source_set_paths(primary, objects),
+                )
             else:
                 self._init_dest_repo_empty(dest_path)
                 self._copy_source_tree(dest_path, source_root)
@@ -419,9 +421,94 @@ class RehearsalEngine:
             self._init_dest_repo_empty(dest_path)
 
         if len(source_sets) > 1:
-            self._merge_source_repos(dest_path, source_sets)
+            self._merge_source_repos(dest_path, source_sets, objects)
 
-    def _merge_source_repos(self, dest_path: Path, source_sets: list[dict]) -> None:
+    def _source_set_paths(self, source_set: dict, objects: list[dict]) -> set[str]:
+        root = Path(source_set.get("root", ""))
+        paths = set()
+        for obj in objects:
+            if obj.get("source_repo") != source_set.get("source_repo"):
+                continue
+            if obj.get("source_commit") != source_set.get("source_commit", "0" * 40):
+                continue
+            source_path = obj.get("source_path", "")
+            if source_path and (root / source_path).exists():
+                paths.add(source_path)
+        return paths
+
+    def _filter_history(
+        self,
+        repo_path: Path,
+        source_commit: str,
+        allowed_paths: set[str],
+    ) -> None:
+        if not allowed_paths:
+            raise RehearsalError("Cannot extract history without in-scope source paths")
+
+        try:
+            subprocess.run(
+                ["git", "checkout", "-B", "migration-source", source_commit],
+                cwd=str(repo_path), check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "remote", "remove", "origin"],
+                cwd=str(repo_path), check=True, capture_output=True,
+            )
+
+            branches = subprocess.run(
+                ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+                cwd=str(repo_path), check=True, capture_output=True, text=True,
+            ).stdout.splitlines()
+            for branch in branches:
+                if branch != "migration-source":
+                    subprocess.run(
+                        ["git", "branch", "-D", branch],
+                        cwd=str(repo_path), check=True, capture_output=True,
+                    )
+
+            pathspec_file = repo_path / ".git" / "migration-pathspec"
+            pathspecs = [b"."] + [
+                f":(top,exclude,literal){path}".encode("utf-8")
+                for path in sorted(allowed_paths)
+            ]
+            pathspec_file.write_bytes(b"\0".join(pathspecs) + b"\0")
+            index_filter = (
+                "git rm -r --cached --ignore-unmatch "
+                f"--pathspec-from-file={shlex.quote(str(pathspec_file))} "
+                "--pathspec-file-nul"
+            )
+            subprocess.run(
+                [
+                    "git", "filter-branch", "--force", "--prune-empty",
+                    "--index-filter", index_filter, "--", "migration-source",
+                ],
+                cwd=str(repo_path), check=True, capture_output=True,
+                env={**self._git_env, "FILTER_BRANCH_SQUELCH_WARNING": "1"},
+            )
+            pathspec_file.unlink(missing_ok=True)
+
+            original_refs = subprocess.run(
+                ["git", "for-each-ref", "--format=%(refname)", "refs/original"],
+                cwd=str(repo_path), check=True, capture_output=True, text=True,
+            ).stdout.splitlines()
+            for ref in original_refs:
+                subprocess.run(
+                    ["git", "update-ref", "-d", ref],
+                    cwd=str(repo_path), check=True, capture_output=True,
+                )
+            subprocess.run(
+                ["git", "checkout", "-f", "migration-source"],
+                cwd=str(repo_path), check=True, capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as e:
+            raise RehearsalError(f"Path-filtered history extraction failed: {e}") from e
+
+    def _merge_source_repos(
+        self,
+        dest_path: Path,
+        source_sets: list[dict],
+        objects: list[dict],
+    ) -> None:
         for i, ss in enumerate(source_sets[1:], start=1):
             source_root = ss.get("root", "")
             source_commit = ss.get("source_commit", "0" * 40)
@@ -438,39 +525,44 @@ class RehearsalEngine:
                 )
 
             try:
-                subprocess.run(
-                    ["git", "remote", "add", remote_name, str(source_root)],
-                    cwd=str(dest_path), check=True, capture_output=True
-                )
-            except subprocess.CalledProcessError as e:
-                raise RehearsalError(
-                    f"Failed to add remote {remote_name} for source set {i}: {e}"
-                ) from e
-
-            try:
-                subprocess.run(
-                    ["git", "fetch", remote_name, "--tags"],
-                    cwd=str(dest_path), check=True, capture_output=True
-                )
-            except subprocess.CalledProcessError as e:
-                raise RehearsalError(
-                    f"Failed to fetch from remote {remote_name} for source set {i}: {e}"
-                ) from e
-
-            if source_commit and source_commit != "0" * 40:
-                fetch_ref = source_commit
-            else:
-                fetch_ref = f"{remote_name}/main"
-
-            try:
-                subprocess.run(
-                    ["git", "merge", "--allow-unrelated-histories", "-m",
-                     f"Merge source set {i} ({ss.get('name', 'unnamed')})",
-                     fetch_ref],
-                    cwd=str(dest_path), check=True, capture_output=True,
-                    env={**os.environ, **self._git_env}
-                )
-            except subprocess.CalledProcessError as e:
+                with tempfile.TemporaryDirectory(
+                    prefix=f"migration-source-{i}-", dir=str(dest_path.parent)
+                ) as temp_dir:
+                    filtered_repo = Path(temp_dir) / "repo"
+                    subprocess.run(
+                        [
+                            "git", "clone", "--no-local", "--no-tags",
+                            str(source_root), str(filtered_repo),
+                        ],
+                        check=True, capture_output=True,
+                    )
+                    self._filter_history(
+                        filtered_repo,
+                        source_commit,
+                        self._source_set_paths(ss, objects),
+                    )
+                    subprocess.run(
+                        ["git", "remote", "add", remote_name, str(filtered_repo)],
+                        cwd=str(dest_path), check=True, capture_output=True,
+                    )
+                    subprocess.run(
+                        ["git", "fetch", remote_name, "migration-source"],
+                        cwd=str(dest_path), check=True, capture_output=True,
+                    )
+                    subprocess.run(
+                        [
+                            "git", "merge", "--allow-unrelated-histories", "-m",
+                            f"Merge source set {i} ({ss.get('name', 'unnamed')})",
+                            "FETCH_HEAD",
+                        ],
+                        cwd=str(dest_path), check=True, capture_output=True,
+                        env={**os.environ, **self._git_env},
+                    )
+                    subprocess.run(
+                        ["git", "remote", "remove", remote_name],
+                        cwd=str(dest_path), check=True, capture_output=True,
+                    )
+            except (OSError, subprocess.CalledProcessError) as e:
                 raise RehearsalError(
                     f"Merge failed for source set {i} ({ss.get('name', 'unnamed')}): {e}. "
                     f"Rehearsal halted — no silent degradation."
@@ -802,9 +894,33 @@ class RehearsalEngine:
 
     def _apply_integrity_gate(self, dest_path: Path, objects: list[dict]) -> None:
         errors: list[dict] = []
-        dest_str = str(dest_path)
-        flat_casefold: dict[str, str] = {}
-        path_casefold: dict[str, str] = {}
+        baseline_entries = self.manifest.get("acknowledged_baseline", {}).get(
+            "casefold_collisions", []
+        )
+        baseline_signatures = {
+            _casefold_signature(
+                entry["destination_repo"],
+                entry["collision_key"],
+                entry["destination_paths"],
+            )
+            for entry in baseline_entries
+        }
+        active_casefold_groups: dict[tuple[str, str], list[dict]] = {}
+        for obj in objects:
+            if obj.get("action") != ACTION_REJECT:
+                key = (obj.get("destination_repo", "default"), _casefold_key(obj))
+                active_casefold_groups.setdefault(key, []).append(obj)
+        for (destination_repo, collision_key), conflicting in active_casefold_groups.items():
+            paths = sorted({_casefold_value(obj) for obj in conflicting})
+            if len(paths) < 2:
+                continue
+            if _casefold_signature(destination_repo, collision_key, paths) in baseline_signatures:
+                continue
+            errors.append({
+                "code": GATE_CASEFOLD,
+                "path": paths[-1],
+                "reason": f"Migration-introduced casefold collision: {', '.join(paths)}",
+            })
 
         for obj in objects:
             if obj.get("action") == ACTION_REJECT:
@@ -869,29 +985,6 @@ class RehearsalEngine:
                     "path": obj["destination_path"],
                     "reason": f"Path exceeds {MAX_PATH_LENGTH} bytes",
                 })
-
-            if obj.get("object_class") in _PATH_PRESERVING_CLASSES:
-                collision_key = unicodedata.normalize("NFC", obj["destination_path"]).casefold()
-                previous = path_casefold.get(collision_key)
-                if previous is not None and previous != obj["destination_path"]:
-                    errors.append({
-                        "code": GATE_CASEFOLD,
-                        "path": obj["destination_path"],
-                        "reason": f"Casefold collision with {previous}: {obj['destination_path']}",
-                    })
-                else:
-                    path_casefold[collision_key] = obj["destination_path"]
-            else:
-                collision_key = unicodedata.normalize("NFC", basename).casefold()
-                previous = flat_casefold.get(collision_key)
-                if previous is not None and previous != basename:
-                    errors.append({
-                        "code": GATE_CASEFOLD,
-                        "path": obj["destination_path"],
-                        "reason": f"Casefold collision with {previous}: {basename}",
-                    })
-                else:
-                    flat_casefold[collision_key] = basename
 
             if not _is_nfc_normalized(content):
                 errors.append({
@@ -1014,9 +1107,8 @@ class RehearsalEngine:
         references: list[dict],
         redirect_map: dict,
     ) -> str:
-        old_broken = sum(1 for ref in references if ref["disposition"] == DISPOSITION_BROKEN_OLD_ACK)
         new_broken = sum(1 for ref in references if ref["disposition"] == DISPOSITION_BROKEN_NEW)
-        constraint_holds = (new_broken - old_broken) == 0
+        constraint_holds = new_broken == 0
 
         marker = {
             "marker": "MIGRATION_BASE",

@@ -376,6 +376,17 @@ def test_id_gate_fail_rejected_id_reused(manifest, dest_root, rehearsed):
     assert any("rejected_id_reused" in f["check"] for f in result["failures"])
 
 
+def test_id_gate_fail_distinct_active_objects_share_id(manifest, dest_root, rehearsed):
+    active = [obj for obj in manifest["objects"] if obj["action"] != "reject"]
+    assert len(active) >= 2
+    active[1]["domain_resource_id"] = active[0]["domain_resource_id"]
+
+    result = id_gate(manifest, str(dest_root))
+
+    assert result["status"] == "FAIL"
+    assert any(failure["check"] == "duplicate_active_id" for failure in result["failures"])
+
+
 def test_id_gate_fail_canonical_id_missing(manifest, dest_root, rehearsed):
     canonical_objs = [o for o in manifest["objects"] if o.get("object_class") == "memory_canonical"]
     if canonical_objs:
@@ -387,8 +398,9 @@ def test_id_gate_fail_canonical_id_missing(manifest, dest_root, rehearsed):
 
 def test_reference_gate_pass(manifest, dest_root, rehearsed):
     result = reference_gate(manifest, str(dest_root))
+    assert result["status"] == "PASS"
     assert result["evidence_digest"] != ""
-    assert "new_broken_minus_acknowledged_old_broken_equals_zero" in result["checked"]
+    assert "net_new_broken_equals_zero" in result["checked"]
 
 
 def test_reference_gate_pass_no_broken_refs(manifest, dest_root, tmp_path):
@@ -437,7 +449,7 @@ def test_reference_gate_fail_tampered_refs_json(manifest, dest_root, rehearsed):
 
     result = reference_gate(manifest, str(dest_root))
     assert result["status"] == "FAIL"
-    assert any("new_broken_minus" in f["check"] for f in result["failures"])
+    assert any("new_broken" in f["check"] for f in result["failures"])
 
 
 def test_reference_gate_fail_inject_new_broken(manifest, dest_root, rehearsed):
@@ -454,7 +466,27 @@ def test_reference_gate_fail_inject_new_broken(manifest, dest_root, rehearsed):
 
     result = reference_gate(manifest, str(dest_root))
     assert result["status"] == "FAIL"
-    assert any("new_broken_minus" in f["check"] for f in result["failures"])
+    assert any("new_broken" in f["check"] for f in result["failures"])
+
+
+def test_reference_gate_fail_actual_newly_broken_reference(manifest, dest_root, rehearsed):
+    refs_path = dest_root / "data" / "wiki" / "references.json"
+    refs = json.loads(refs_path.read_text())
+    resolved = next(
+        entry for entry in refs["entries"]
+        if entry["disposition"] == "resolved" and entry["old_target_id"] is not None
+    )
+    resolved["disposition"] = "broken_new"
+    resolved["new_target_id"] = None
+    refs["new_broken"] = 1
+    refs["net_new_broken"] = 1
+    refs["constraint_holds"] = False
+    refs_path.write_text(json.dumps(refs))
+
+    result = reference_gate(manifest, str(dest_root))
+
+    assert result["status"] == "FAIL"
+    assert any(failure["check"] == "net_new_broken_equals_zero" for failure in result["failures"])
 
 
 def test_reference_gate_pass_old_broken_ack_gt_zero(manifest, dest_root, tmp_path):
@@ -491,14 +523,11 @@ def test_reference_gate_pass_old_broken_ack_gt_zero(manifest, dest_root, tmp_pat
     assert refs["old_broken_acknowledged"] >= 2
     assert refs["new_broken"] == 0
 
-    refs["new_broken"] = refs["old_broken_acknowledged"]
-    refs_path.write_text(json.dumps(refs))
-
     result = reference_gate(m, str(dest))
     assert result["status"] == "PASS", (
         f"Expected PASS when old_broken_ack={refs['old_broken_acknowledged']}, "
         f"new_broken={refs['new_broken']}, "
-        f"new_broken - old_broken_ack = {refs['new_broken'] - refs['old_broken_acknowledged']}"
+        "because the acknowledged baseline is not part of net-new broken links"
     )
 
 
@@ -544,10 +573,10 @@ def test_reference_gate_fail_new_broken_gt_old_broken_ack_with_nonzero_ack(manif
         f"new_broken={refs['new_broken']}, "
         f"new_broken - old_broken_ack = {refs['new_broken'] - refs['old_broken_acknowledged']}"
     )
-    assert any("new_broken_minus" in f["check"] for f in result["failures"])
+    assert any("new_broken" in f["check"] for f in result["failures"])
 
 
-def test_reference_gate_fail_new_broken_less_than_old_broken_ack(manifest, dest_root, tmp_path):
+def test_reference_gate_pass_zero_new_broken_with_larger_acknowledged_baseline(manifest, dest_root, tmp_path):
     from katana_migration.inventory import run_inventory
     from katana_migration.rehearsal import run_rehearsal
 
@@ -584,11 +613,7 @@ def test_reference_gate_fail_new_broken_less_than_old_broken_ack(manifest, dest_
     refs_path.write_text(json.dumps(refs))
 
     result = reference_gate(m, str(dest))
-    assert result["status"] == "FAIL", (
-        f"Expected FAIL when old_broken_ack={refs['old_broken_acknowledged']}, "
-        f"new_broken=0, "
-        f"new_broken - old_broken_ack = {0 - refs['old_broken_acknowledged']}"
-    )
+    assert result["status"] == "PASS", result["failures"]
 
 
 # ── Integrity gate tests ───────────────────────────────────────────────────────
@@ -840,7 +865,7 @@ def test_integrity_gate_fail_unicode_nfc(manifest, dest_root, tmp_path):
     assert any("nfc" in f["check"] for f in result["failures"])
 
 
-def test_integrity_gate_fail_casefold(manifest, dest_root, tmp_path):
+def test_integrity_gate_acknowledges_preexisting_casefold(manifest, dest_root, tmp_path):
     from katana_migration.inventory import run_inventory
 
     source_root = tmp_path / "int_case_source"
@@ -861,10 +886,6 @@ def test_integrity_gate_fail_casefold(manifest, dest_root, tmp_path):
     }]
     m = run_inventory(config, migration_run_id="int-case-test")
 
-    for obj in m["objects"]:
-        obj["action"] = "preserve"
-        obj["exception_code"] = None
-
     dest = tmp_path / "int_case_dest"
     dest.mkdir()
     dest_path = dest / "data" / "test"
@@ -881,8 +902,47 @@ def test_integrity_gate_fail_casefold(manifest, dest_root, tmp_path):
     )
 
     result = integrity_gate(m, str(dest))
+    assert result["status"] == "PASS"
+    assert result["failures"] == []
+    assert len(result["acknowledged"]) == 1
+
+
+def test_integrity_gate_fails_migration_introduced_casefold(tmp_path):
+    from katana_migration.inventory import run_inventory
+
+    upper_root = tmp_path / "int_case_upper"
+    lower_root = tmp_path / "int_case_lower"
+    upper_root.mkdir()
+    lower_root.mkdir()
+    (upper_root / "INDEX.md").write_text("# upper\n", encoding="utf-8")
+    (lower_root / "index.md").write_text("# lower\n", encoding="utf-8")
+
+    def source_set(root, source_repo):
+        return {
+            "name": source_repo,
+            "root": str(root),
+            "source_repo": source_repo,
+            "source_commit": "0" * 40,
+            "object_class": "wiki_writable",
+            "prefix": "w-",
+            "destination_repo": "/data/test",
+            "default_action": "preserve",
+            "include": ["*.md"],
+        }
+
+    manifest = run_inventory(
+        [source_set(upper_root, "/source/upper"), source_set(lower_root, "/source/lower")],
+        migration_run_id="introduced-casefold",
+    )
+    dest = tmp_path / "introduced_case_dest"
+    domain = dest / "data" / "test"
+    domain.mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main", str(domain)], check=True, capture_output=True)
+
+    result = integrity_gate(manifest, str(dest))
+
     assert result["status"] == "FAIL"
-    assert any("casefold" in f["check"] for f in result["failures"])
+    assert any(failure["check"] == "casefold_collision" for failure in result["failures"])
 
 
 def test_integrity_gate_fail_path_length(manifest, dest_root, tmp_path, monkeypatch):

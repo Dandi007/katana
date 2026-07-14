@@ -499,9 +499,13 @@ def test_reference_constraint_computed_not_hardcoded(manifest, dest_root, tmp_pa
         refs_path = dest_root / domain_name.lstrip("/") / "references.json"
         if refs_path.exists():
             refs = json.loads(refs_path.read_text())
-            total_broken_before = sum(1 for e in refs["entries"] if e["old_target_id"] is None)
-            total_broken_after = sum(1 for e in refs["entries"] if e["new_target_id"] is None)
-            assert refs["constraint_holds"] == (total_broken_after == total_broken_before)
+            counted_new_broken = sum(
+                1 for entry in refs["entries"]
+                if entry["disposition"] == DISPOSITION_BROKEN_NEW
+            )
+            assert refs["constraint_holds"] == (counted_new_broken == 0)
+            assert refs["new_broken"] == counted_new_broken
+            assert refs["net_new_broken"] == counted_new_broken
             assert refs["new_broken"] >= 0
             assert refs["old_broken_acknowledged"] >= 0
 
@@ -629,6 +633,67 @@ def test_reference_with_known_broken_baseline(manifest, dest_root, tmp_path):
     assert refs["constraint_holds"] is True
 
 
+def test_reference_newly_broken_count_and_gate_conclusion_match(tmp_path):
+    from katana_migration.inventory import run_inventory
+    from katana_migration.proof_gates import reference_gate
+
+    memory_root = tmp_path / "reference_memory"
+    wiki_root = tmp_path / "reference_wiki"
+    memory_root.mkdir()
+    wiki_root.mkdir()
+    (memory_root / "target.md").write_text(
+        "---\nid: m-abc123\nname: target\ndescription: target\n---\n",
+        encoding="utf-8",
+    )
+    (wiki_root / "source.md").write_text(
+        "Resolved: [[m-abc123]]\nAcknowledged: [[m-dead00]]\n",
+        encoding="utf-8",
+    )
+    manifest = run_inventory([
+        {
+            "name": "memory",
+            "root": str(memory_root),
+            "source_repo": "/source/memory",
+            "source_commit": "0" * 40,
+            "object_class": "memory_canonical",
+            "prefix": "m-",
+            "destination_repo": "/data/memory",
+            "default_action": "preserve",
+            "include": ["*.md"],
+        },
+        {
+            "name": "wiki",
+            "root": str(wiki_root),
+            "source_repo": "/source/wiki",
+            "source_commit": "0" * 40,
+            "object_class": "wiki_writable",
+            "prefix": "w-",
+            "destination_repo": "/data/wiki",
+            "default_action": "rewrite",
+            "include": ["*.md"],
+        },
+    ], migration_run_id="newly-broken-reference")
+    wiki_object = next(obj for obj in manifest["objects"] if obj["object_class"] == "wiki_writable")
+    wiki_object["reference_rewrites"] = [{"old": "m-abc123", "new": "m-ffffff"}]
+    destination = tmp_path / "reference_destination"
+
+    result = run_rehearsal(
+        manifest,
+        str(destination),
+        committer_date="2026-01-01T00:00:00+0000",
+    )
+    references = json.loads(
+        (destination / "data" / "wiki" / "references.json").read_text()
+    )
+
+    assert references["old_broken_acknowledged"] > 0
+    assert references["new_broken"] > 0
+    assert references["net_new_broken"] == references["new_broken"]
+    assert references["constraint_holds"] is False
+    assert result["domain_results"]["/data/wiki"]["constraint_holds"] is False
+    assert reference_gate(manifest, str(destination))["status"] == "FAIL"
+
+
 # ── Integrity gate tests ──────────────────────────────────────────────────────
 
 def test_integrity_gate_symlink_raises(manifest, dest_root):
@@ -719,7 +784,7 @@ def test_integrity_gate_path_length_raises(manifest, dest_root, tmp_path, monkey
         run_rehearsal(m, str(dest), committer_date="2026-01-01T00:00:00+0000")
 
 
-def test_integrity_gate_casefold_collision_raises(manifest, dest_root, tmp_path):
+def test_integrity_gate_preexisting_casefold_collision_is_acknowledged(manifest, dest_root, tmp_path):
     from katana_migration.inventory import run_inventory
 
     source_root = None
@@ -747,14 +812,50 @@ def test_integrity_gate_casefold_collision_raises(manifest, dest_root, tmp_path)
     }]
     m = run_inventory(config, migration_run_id="casefold-test")
 
-    for obj in m["objects"]:
-        obj["action"] = ACTION_PRESERVE
-
     dest = tmp_path / "casefold_dest"
     dest.mkdir()
 
+    result = run_rehearsal(m, str(dest), committer_date="2026-01-01T00:00:00+0000")
+    assert result["invariant_holds"] is True
+    assert len(m["acknowledged_baseline"]["casefold_collisions"]) == 1
+
+
+def test_integrity_gate_migration_introduced_casefold_collision_raises(tmp_path):
+    from katana_migration.inventory import run_inventory
+
+    upper_root = tmp_path / "upper_source"
+    lower_root = tmp_path / "lower_source"
+    upper_root.mkdir()
+    lower_root.mkdir()
+    (upper_root / "INDEX.md").write_text("# upper\n", encoding="utf-8")
+    (lower_root / "index.md").write_text("# lower\n", encoding="utf-8")
+
+    def source_set(root, source_repo):
+        return {
+            "name": source_repo,
+            "root": str(root),
+            "source_repo": source_repo,
+            "source_commit": "0" * 40,
+            "object_class": "wiki_writable",
+            "prefix": "w-",
+            "destination_repo": "/data/wiki",
+            "default_action": "preserve",
+            "include": ["*.md"],
+        }
+
+    manifest = run_inventory(
+        [source_set(upper_root, "/source/upper"), source_set(lower_root, "/source/lower")],
+        migration_run_id="introduced-casefold",
+    )
+    for obj in manifest["objects"]:
+        obj["action"] = ACTION_PRESERVE
+
     with pytest.raises(RehearsalError, match="Integrity gate failed"):
-        run_rehearsal(m, str(dest), committer_date="2026-01-01T00:00:00+0000")
+        run_rehearsal(
+            manifest,
+            str(tmp_path / "introduced_casefold_dest"),
+            committer_date="2026-01-01T00:00:00+0000",
+        )
 
 
 def test_unicode_content_is_normalized_to_nfc(manifest, dest_root):
@@ -1042,6 +1143,67 @@ def test_filtered_history_no_other_paths_leak(manifest, dest_root, tmp_path):
     assert not secret_path.exists(), (
         "secret.bin leaked into destination despite not being in manifest"
     )
+
+
+def test_git_history_extraction_keeps_only_domain_scope(tmp_path):
+    from katana_migration.inventory import run_inventory
+    from katana_migration.proof_gates import history_gate
+
+    source = tmp_path / "git_history_source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(source)], check=True, capture_output=True)
+    (source / "in-scope.md").write_text("first\n", encoding="utf-8")
+    (source / "DeepThought").mkdir()
+    (source / "DeepThought" / "other-domain.md").write_text("secret\n", encoding="utf-8")
+    git_env = {
+        **os.environ,
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00+0000",
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00+0000",
+    }
+    subprocess.run(["git", "add", "."], cwd=str(source), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=str(source), check=True, capture_output=True, env=git_env,
+    )
+    (source / "in-scope.md").write_text("second\n", encoding="utf-8")
+    (source / "DeepThought" / "other-domain.md").write_text("secret two\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(source), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "updates"],
+        cwd=str(source), check=True, capture_output=True, env=git_env,
+    )
+    source_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(source), check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    manifest = run_inventory([{
+        "name": "scoped_history",
+        "root": str(source),
+        "source_repo": "/source/combined",
+        "source_commit": source_commit,
+        "object_class": "wiki_writable",
+        "prefix": "w-",
+        "destination_repo": "/data/wiki",
+        "default_action": "preserve",
+        "include": ["in-scope.md"],
+    }], migration_run_id="scoped-history")
+    destination = tmp_path / "git_history_dest"
+
+    run_rehearsal(
+        manifest,
+        str(destination),
+        committer_date="2026-01-01T00:00:00+0000",
+    )
+    domain = destination / "data" / "wiki"
+    history_paths = set(subprocess.run(
+        ["git", "log", "--format=", "--name-only", "HEAD"],
+        cwd=str(domain), check=True, capture_output=True, text=True,
+    ).stdout.splitlines())
+
+    assert "in-scope.md" in history_paths
+    assert "DeepThought/other-domain.md" not in history_paths
+    assert not (domain / "DeepThought" / "other-domain.md").exists()
+    assert history_gate(manifest, str(destination))["status"] == "PASS"
 
 
 def test_path_filter_verification_raises_on_leak(manifest, dest_root, tmp_path):
