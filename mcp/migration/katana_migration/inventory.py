@@ -17,6 +17,7 @@ a given ledger state.
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -59,9 +60,19 @@ ACTION_NORMALIZE = "normalize"
 ACTION_REWRITE = "rewrite"
 ACTION_MERGE = "merge"
 ACTION_ARCHIVE = "archive"
+ACTION_QUARANTINE = "quarantine"
 ACTION_REJECT = "reject"
 
-_TRANSFORM_ACTIONS = {ACTION_ID_BACKFILL, ACTION_NORMALIZE, ACTION_REWRITE, ACTION_MERGE}
+_TRANSFORM_ACTIONS = {
+    ACTION_ID_BACKFILL,
+    ACTION_NORMALIZE,
+    ACTION_REWRITE,
+    ACTION_MERGE,
+    ACTION_QUARANTINE,
+}
+
+NORMALIZE_EXECUTABLE = "clear_executable_bit"
+NORMALIZE_UNICODE_NFC = "unicode_nfc"
 
 # Path length limits
 MAX_BASENAME_LENGTH = 255
@@ -73,7 +84,6 @@ _WIKI_SCHEMA_BASENAMES = {"WIKI.md", "log.md"}
 # These classes retain their source hierarchy at the destination.  Their
 # identity and collision keys therefore include the complete relative path.
 _PATH_PRESERVING_CLASSES = {"work_folder", "wiki_raw"}
-_WORK_FOLDER_MARKERS = {"_brief.md", "progress.md", "CLAUDE.md"}
 
 # Credential-related path patterns
 _CREDENTIAL_PATTERNS = [
@@ -226,6 +236,12 @@ def scan_file(
             "pre_hash": None,
             "post_hash": None,
             "allowed_transformations": [],
+            "normalizations": [],
+            "preservation_modes": [],
+            "brief_backfill_needed": False,
+            "quarantine_path": None,
+            "disposition": ACTION_REJECT,
+            "exception_codes": [exception_code],
             "reference_rewrites": [],
             "exception_code": exception_code,
             "reason": reason,
@@ -253,6 +269,12 @@ def scan_file(
             "pre_hash": None,
             "post_hash": None,
             "allowed_transformations": [],
+            "normalizations": [],
+            "preservation_modes": [],
+            "brief_backfill_needed": False,
+            "quarantine_path": None,
+            "disposition": ACTION_REJECT,
+            "exception_codes": [EXC_READ_ERROR],
             "reference_rewrites": [],
             "exception_code": EXC_READ_ERROR,
             "reason": f"Failed to read file: {e}",
@@ -307,14 +329,46 @@ def scan_file(
                 if not fm.get("name") or not fm.get("description"):
                     exceptions.append((EXC_MISSING_BRIEF, "Missing required fields (name/description) in frontmatter"))
 
-    if exceptions:
-        action = ACTION_REJECT
-    elif existing_id and object_class == "memory_canonical":
+    if existing_id and object_class == "memory_canonical":
         action = ACTION_PRESERVE
     elif object_class == "memory_legacy" and not existing_id:
         action = ACTION_ID_BACKFILL
     else:
         action = default_action
+
+    exception_codes = [code for code, _ in exceptions]
+    normalizations = []
+    preservation_modes = []
+    if EXC_EXECUTABLE in exception_codes:
+        normalizations.append(NORMALIZE_EXECUTABLE)
+    if EXC_UNICODE_NFC in exception_codes:
+        normalizations.append(NORMALIZE_UNICODE_NFC)
+    if EXC_BINARY in exception_codes:
+        preservation_modes.append("binary_bytes")
+    if EXC_LFS_POINTER in exception_codes:
+        preservation_modes.append("lfs_pointer")
+
+    # Content anomalies have explicit, non-destructive dispositions.  Structural
+    # conflicts and invalid memory metadata remain blocking.
+    blocking_codes = {EXC_PATH_LENGTH, EXC_MISSING_BRIEF}
+    if any(code in blocking_codes for code in exception_codes):
+        action = ACTION_REJECT
+    elif EXC_YAML_PARSE in exception_codes:
+        action = ACTION_QUARANTINE
+        normalizations = [
+            item for item in normalizations if item == NORMALIZE_EXECUTABLE
+        ]
+    elif EXC_BINARY in exception_codes or EXC_LFS_POINTER in exception_codes:
+        action = ACTION_NORMALIZE if normalizations else ACTION_PRESERVE
+    elif normalizations and action == ACTION_PRESERVE:
+        action = ACTION_NORMALIZE
+
+    disposition = action
+    quarantine_path = f"_quarantine/{rel_path}" if action == ACTION_QUARANTINE else None
+    post_hash = file_sha256
+    if action == ACTION_NORMALIZE and NORMALIZE_UNICODE_NFC in normalizations:
+        normalized = unicodedata.normalize("NFC", content.decode("utf-8")).encode("utf-8")
+        post_hash = sha256_hex(normalized)
 
     return {
         "migration_run_id": migration_run_id,
@@ -333,8 +387,14 @@ def scan_file(
         "vfs_node_id": resource_id,
         "action": action,
         "pre_hash": file_sha256,
-        "post_hash": file_sha256,
-        "allowed_transformations": [],
+        "post_hash": post_hash,
+        "allowed_transformations": list(normalizations),
+        "normalizations": normalizations,
+        "preservation_modes": preservation_modes,
+        "brief_backfill_needed": False,
+        "quarantine_path": quarantine_path,
+        "disposition": disposition,
+        "exception_codes": exception_codes,
         "reference_rewrites": [],
         "exception_code": exceptions[0][0] if exceptions else None,
         "reason": exceptions[0][1] if exceptions else None,
@@ -348,18 +408,47 @@ def _is_path_preserving(object_class: str) -> bool:
 
 
 def _set_exception(record: dict, code: str, reason: str) -> None:
-    if record["exception_code"] is None:
+    codes = record.setdefault("exception_codes", [])
+    if code not in codes:
+        codes.append(code)
+    if record["exception_code"] is None or record["action"] != ACTION_REJECT:
         record["exception_code"] = code
         record["reason"] = reason
     record["action"] = ACTION_REJECT
+    record["disposition"] = ACTION_REJECT
+    record["quarantine_path"] = None
 
 
-def _work_folder_roots(root: Path, paths: list[Path]) -> list[Path]:
-    roots = {
-        p.relative_to(root).parent
-        for p in paths
-        if p.name in _WORK_FOLDER_MARKERS
-    }
+def _date_topic_root(rel_path: Path) -> Path | None:
+    parts = rel_path.parts
+    if len(parts) < 5 or not re.fullmatch(r"\d{4}", parts[0]):
+        return None
+    try:
+        datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except (ValueError, TypeError):
+        return None
+    return Path(*parts[:4])
+
+
+def _work_folder_roots(
+    root: Path,
+    paths: list[Path],
+    root_depth: int | None = None,
+) -> list[Path]:
+    """Return structural topic roots, never marker-bearing nested directories."""
+    roots: set[Path] = set()
+    for path in paths:
+        rel_path = path.relative_to(root)
+        if root_depth is None:
+            folder = _date_topic_root(rel_path)
+        elif root_depth == 0:
+            folder = Path(".")
+        elif len(rel_path.parts) > root_depth:
+            folder = Path(*rel_path.parts[:root_depth])
+        else:
+            folder = None
+        if folder is not None:
+            roots.add(folder)
     return sorted(roots, key=lambda p: (-len(p.parts), p.as_posix()))
 
 
@@ -437,7 +526,11 @@ def _scan_source_set(
             matched_paths[str(p)] = p
 
     paths = sorted(matched_paths.values(), key=lambda p: str(p.relative_to(root)))
-    folder_roots = _work_folder_roots(root, paths) if ss.get("object_class") == "work_folder" else []
+    folder_roots = (
+        _work_folder_roots(root, paths, ss.get("work_folder_root_depth"))
+        if ss.get("object_class") == "work_folder"
+        else []
+    )
     destination_repo = ss.get("destination_repo", ss["source_repo"])
     folder_ids = {
         folder: _work_folder_id(root, folder, destination_repo, ss["prefix"], ledger)
@@ -483,6 +576,8 @@ def _scan_source_set(
                 )
             record["domain_resource_id"] = resource_id
             record["vfs_node_id"] = resource_id
+            if work_folder is not None and record["action"] == ACTION_PRESERVE:
+                record["disposition"] = "preserve-active"
         elif object_class == "wiki_raw":
             resource_id = _path_resource_id(
                 destination_repo, record["destination_path"], ss["prefix"], ledger
@@ -545,11 +640,16 @@ def _scan_source_set(
             folder_path = folder.as_posix()
             for record in records:
                 if record.get("work_folder_path") == folder_path:
-                    _set_exception(
-                        record,
-                        EXC_MISSING_BRIEF,
-                        f"Work folder missing _brief.md: {folder_path}",
-                    )
+                    record["brief_backfill_needed"] = True
+                    codes = record.setdefault("exception_codes", [])
+                    if EXC_MISSING_BRIEF not in codes:
+                        codes.append(EXC_MISSING_BRIEF)
+                    if record["action"] != ACTION_REJECT:
+                        if record["exception_code"] is None:
+                            record["exception_code"] = EXC_MISSING_BRIEF
+                            record["reason"] = f"Work folder missing _brief.md: {folder_path}"
+                        if record["action"] == ACTION_PRESERVE:
+                            record["disposition"] = "preserve-active"
 
     return records, redirect_map
 
@@ -669,6 +769,7 @@ def build_manifest(
                 "object_class": ss.get("object_class", "unknown"),
                 "root": ss["root"],
                 "destination_repo": ss.get("destination_repo", ss["source_repo"]),
+                "work_folder_root_depth": ss.get("work_folder_root_depth"),
             }
             for ss in source_sets
         ],

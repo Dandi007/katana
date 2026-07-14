@@ -6,7 +6,9 @@ import pytest
 
 from katana_migration.inventory import (
     ACTION_ID_BACKFILL,
+    ACTION_NORMALIZE,
     ACTION_PRESERVE,
+    ACTION_QUARANTINE,
     ACTION_REJECT,
     EXC_BINARY,
     EXC_CASEFOLD_COLLISION,
@@ -18,6 +20,7 @@ from katana_migration.inventory import (
     EXC_MISSING_BRIEF,
     EXC_PATH_LENGTH,
     EXC_SYMLINK,
+    EXC_UNICODE_NFC,
     EXC_YAML_PARSE,
     build_manifest,
     compute_summary,
@@ -115,6 +118,7 @@ def source_root(tmp_path):
         "---\nid: m-111111\n---\n\nMissing fields\n",
         encoding="utf-8",
     )
+    (exc_dir / "not-nfc.md").write_text("Cafe\u0301\n", encoding="utf-8")
     symlink_path = exc_dir / "symlink.md"
     try:
         symlink_path.symlink_to(exc_dir / "binary.bin")
@@ -243,6 +247,12 @@ _REQUIRED_FIELDS = [
     "pre_hash",
     "post_hash",
     "allowed_transformations",
+    "normalizations",
+    "preservation_modes",
+    "brief_backfill_needed",
+    "quarantine_path",
+    "disposition",
+    "exception_codes",
     "reference_rewrites",
     "exception_code",
     "reason",
@@ -362,33 +372,46 @@ def test_exception_codes_present(manifest):
         )
 
 
-def test_binary_file_rejected(manifest):
+def test_binary_file_preserved(manifest):
     binary = [r for r in manifest["objects"] if "binary" in r["source_path"].lower()]
     assert len(binary) >= 1
     for obj in binary:
         assert obj["exception_code"] == EXC_BINARY
-        assert obj["action"] == ACTION_REJECT
+        assert obj["action"] == ACTION_PRESERVE
+        assert obj["preservation_modes"] == ["binary_bytes"]
+        assert obj["disposition"] == ACTION_PRESERVE
 
 
-def test_lfs_pointer_rejected(manifest):
+def test_lfs_pointer_preserved(manifest):
     lfs = [r for r in manifest["objects"] if r["exception_code"] == EXC_LFS_POINTER]
     assert len(lfs) >= 1
     for obj in lfs:
-        assert obj["action"] == ACTION_REJECT
+        assert obj["action"] == ACTION_PRESERVE
+        assert obj["preservation_modes"] == ["lfs_pointer"]
+        assert obj["lfs_oid"] == "abc123def456789"
 
 
-def test_executable_rejected(manifest):
+def test_executable_is_normalized(manifest):
     executable = [r for r in manifest["objects"] if r["exception_code"] == EXC_EXECUTABLE]
     assert len(executable) >= 1
     for obj in executable:
-        assert obj["action"] == ACTION_REJECT
+        assert obj["action"] == ACTION_NORMALIZE
+        assert obj["normalizations"] == ["clear_executable_bit"]
 
 
-def test_yaml_parse_error_rejected(manifest):
+def test_yaml_parse_error_quarantined(manifest):
     yaml_err = [r for r in manifest["objects"] if r["exception_code"] == EXC_YAML_PARSE]
     assert len(yaml_err) >= 1
     for obj in yaml_err:
-        assert obj["action"] == ACTION_REJECT
+        assert obj["action"] == ACTION_QUARANTINE
+        assert obj["quarantine_path"] == f"_quarantine/{obj['destination_path']}"
+
+
+def test_non_nfc_content_is_normalized(manifest):
+    not_nfc = [r for r in manifest["objects"] if r["exception_code"] == EXC_UNICODE_NFC]
+    assert len(not_nfc) == 1
+    assert not_nfc[0]["action"] == ACTION_NORMALIZE
+    assert not_nfc[0]["normalizations"] == ["unicode_nfc"]
 
 
 def test_missing_brief_rejected(tmp_path):
@@ -572,12 +595,78 @@ def test_missing_brief_is_applied_to_the_work_folder_only(tmp_path):
     assert all(obj["action"] == ACTION_PRESERVE for obj in good_records)
     assert all(obj["exception_code"] is None for obj in good_records)
     assert missing_records
-    assert all(obj["action"] == ACTION_REJECT for obj in missing_records)
+    assert all(obj["action"] == ACTION_PRESERVE for obj in missing_records)
     assert all(obj["exception_code"] == EXC_MISSING_BRIEF for obj in missing_records)
+    assert all(obj["brief_backfill_needed"] is True for obj in missing_records)
+    assert all(obj["disposition"] == "preserve-active" for obj in missing_records)
     assert not any(
         obj["source_path"].endswith("_brief.md") and obj["exception_code"] == EXC_MISSING_BRIEF
         for obj in manifest["objects"]
     )
+
+    from katana_migration.rehearsal import run_rehearsal
+
+    destination = tmp_path / "missing-brief-rehearsal"
+    run_rehearsal(manifest, str(destination), committer_date="2026-01-01T00:00:00+0000")
+    domain = destination / "test" / "work"
+    for obj in missing_records:
+        assert (domain / obj["destination_path"]).exists()
+        assert not (domain / "_archive" / obj["destination_path"]).exists()
+
+
+def test_nested_work_folder_artifacts_share_structural_root(tmp_path):
+    root = tmp_path / "work-records"
+    topic = root / "2026" / "03" / "14" / "loop-engine-brainstorm"
+    _write_work_folder(topic, resource_id="wf-abc123")
+
+    fixtures = {
+        "templates/progress.md": "# Progress template\n",
+        "archive/legacy-v1/CLAUDE.md": "# Legacy instructions\n",
+        "logs/progress.md": "# Generated progress\n",
+        "work-tracker-v2-draft/AGENTS.md": "# Draft agent\n",
+        "runs/20260314/output/result.md": "# Run output\n",
+    }
+    for relative_path, content in fixtures.items():
+        path = topic / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    config = [_work_folder_source_set(root)]
+    manifest = run_inventory(config, migration_run_id="nested-artifacts")
+    repeated = run_inventory(config, migration_run_id="nested-artifacts")
+
+    assert manifest == repeated
+    assert manifest["objects"]
+    assert {obj["work_folder_path"] for obj in manifest["objects"]} == {
+        "2026/03/14/loop-engine-brainstorm"
+    }
+    assert {obj["domain_resource_id"] for obj in manifest["objects"]} == {"wf-abc123"}
+    assert all(obj["action"] == ACTION_PRESERVE for obj in manifest["objects"])
+    assert all(obj["disposition"] == "preserve-active" for obj in manifest["objects"])
+    assert not any(
+        EXC_MISSING_BRIEF in obj["exception_codes"] for obj in manifest["objects"]
+    )
+    assert manifest["summary"]["unclassified"] == 0
+    assert manifest["summary"]["invariant_holds"] is True
+
+
+def test_source_set_can_declare_equivalent_work_folder_depth(tmp_path):
+    root = tmp_path / "project-records"
+    topic = root / "active" / "topic-one"
+    _write_work_folder(topic, resource_id="wf-123abc")
+    template = topic / "templates" / "progress.md"
+    template.parent.mkdir(parents=True)
+    template.write_text("# Template\n", encoding="utf-8")
+
+    source_set = _work_folder_source_set(root)
+    source_set["work_folder_root_depth"] = 2
+    manifest = run_inventory([source_set], migration_run_id="declared-root-depth")
+
+    assert {obj["work_folder_path"] for obj in manifest["objects"]} == {
+        "active/topic-one"
+    }
+    assert {obj["domain_resource_id"] for obj in manifest["objects"]} == {"wf-123abc"}
+    assert all(obj["action"] == ACTION_PRESERVE for obj in manifest["objects"])
 
 
 def test_structure_preserving_wiki_raw_allows_repeated_basenames_and_content(tmp_path):

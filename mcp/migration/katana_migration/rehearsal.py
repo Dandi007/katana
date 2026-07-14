@@ -29,9 +29,19 @@ ACTION_NORMALIZE = "normalize"
 ACTION_REWRITE = "rewrite"
 ACTION_MERGE = "merge"
 ACTION_ARCHIVE = "archive"
+ACTION_QUARANTINE = "quarantine"
 ACTION_REJECT = "reject"
 
-_TRANSFORM_ACTIONS = {ACTION_ID_BACKFILL, ACTION_NORMALIZE, ACTION_REWRITE, ACTION_MERGE}
+_TRANSFORM_ACTIONS = {
+    ACTION_ID_BACKFILL,
+    ACTION_NORMALIZE,
+    ACTION_REWRITE,
+    ACTION_MERGE,
+    ACTION_QUARANTINE,
+}
+
+NORMALIZE_EXECUTABLE = "clear_executable_bit"
+NORMALIZE_UNICODE_NFC = "unicode_nfc"
 
 # Integrity gate codes
 GATE_SYMLINK = "SYMLINK"
@@ -104,7 +114,7 @@ def _is_nfc_normalized(content: bytes) -> bool:
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
-        return False
+        return True
     return unicodedata.is_normalized("NFC", text)
 
 
@@ -510,15 +520,17 @@ class RehearsalEngine:
         for obj in objects:
             action = obj.get("action", ACTION_PRESERVE)
             if action == ACTION_REJECT:
+                rejected_target = dest_path / obj["destination_path"]
+                if rejected_target.is_file() or rejected_target.is_symlink():
+                    rejected_target.unlink()
                 continue
-            if action == ACTION_ARCHIVE:
-                archive_dir = dest_path / "_archive"
-                archive_dir.mkdir(parents=True, exist_ok=True)
-                target = archive_dir / obj["destination_path"]
-            else:
-                target = dest_path / obj["destination_path"]
+            target = self._materialized_path(dest_path, obj)
 
             target.parent.mkdir(parents=True, exist_ok=True)
+
+            original_target = dest_path / obj["destination_path"]
+            if target != original_target and original_target.is_file():
+                original_target.unlink()
 
             source_root = self._find_source_root(obj)
             if source_root is None:
@@ -540,6 +552,14 @@ class RehearsalEngine:
                 ) from e
 
             self._materialize_one(target, obj, content, source_file)
+
+    def _materialized_path(self, dest_path: Path, obj: dict) -> Path:
+        action = obj.get("action", ACTION_PRESERVE)
+        if action == ACTION_ARCHIVE:
+            return dest_path / "_archive" / obj["destination_path"]
+        if action == ACTION_QUARANTINE:
+            return dest_path / "_quarantine" / obj["destination_path"]
+        return dest_path / obj["destination_path"]
 
     def _find_source_root(self, obj: dict) -> str | None:
         source_repo = obj.get("source_repo", "")
@@ -575,8 +595,13 @@ class RehearsalEngine:
             self._apply_merge(target, obj, content, source_file)
         elif action == ACTION_ARCHIVE:
             self._apply_preserve(target, obj, content, source_file)
+        elif action == ACTION_QUARANTINE:
+            self._apply_preserve(target, obj, content, source_file)
         else:
             target.write_bytes(content)
+
+        if action != ACTION_NORMALIZE:
+            self._apply_declared_normalizations(target, obj)
 
     def _apply_preserve(self, target: Path, obj: dict, content: bytes, source_file: Path) -> None:
         target.write_bytes(content)
@@ -618,6 +643,7 @@ class RehearsalEngine:
 
     def _apply_normalize(self, target: Path, obj: dict, content: bytes, source_file: Path) -> None:
         object_class = obj.get("object_class", "unknown")
+        normalizations = obj.get("normalizations", [])
         fm, body, _ = _parse_frontmatter(content)
 
         diff_manifest: dict[str, object] = {
@@ -626,7 +652,9 @@ class RehearsalEngine:
             "changes": {},
         }
 
-        if fm is not None:
+        if normalizations:
+            new_content = content
+        elif fm is not None:
             canonical_keys = _canonical_frontmatter_keys(object_class)
             if canonical_keys:
                 ordered = {}
@@ -649,14 +677,29 @@ class RehearsalEngine:
         else:
             new_content = content
 
-        if not _is_nfc_normalized(new_content):
+        if NORMALIZE_UNICODE_NFC in normalizations and not _is_nfc_normalized(new_content):
             new_content = unicodedata.normalize("NFC", new_content.decode("utf-8")).encode("utf-8")
             diff_manifest["changes"]["unicode_normalization"] = "applied_NFC"
 
         target.write_bytes(new_content)
+        if NORMALIZE_EXECUTABLE in normalizations:
+            target.chmod(target.stat().st_mode & ~0o111)
+            diff_manifest["changes"]["executable_bit"] = "cleared"
 
         diff_path = target.parent / f"{target.name}.diff_manifest.json"
         diff_path.write_text(json.dumps(diff_manifest, indent=2, sort_keys=True, ensure_ascii=False))
+
+    def _apply_declared_normalizations(self, target: Path, obj: dict) -> None:
+        normalizations = obj.get("normalizations", obj.get("allowed_transformations", []))
+        if NORMALIZE_UNICODE_NFC in normalizations:
+            content = target.read_bytes()
+            try:
+                normalized = unicodedata.normalize("NFC", content.decode("utf-8")).encode("utf-8")
+            except UnicodeDecodeError:
+                normalized = content
+            target.write_bytes(normalized)
+        if NORMALIZE_EXECUTABLE in normalizations:
+            target.chmod(target.stat().st_mode & ~0o111)
 
     def _apply_rewrite(self, target: Path, obj: dict, content: bytes, source_file: Path) -> None:
         object_class = obj.get("object_class", "unknown")
@@ -754,7 +797,7 @@ class RehearsalEngine:
             if obj.get("action") == ACTION_REJECT:
                 continue
 
-            target = dest_path / obj["destination_path"]
+            target = self._materialized_path(dest_path, obj)
             if not target.exists():
                 continue
 
@@ -776,14 +819,15 @@ class RehearsalEngine:
                 })
                 continue
 
-            if _is_binary(content):
+            preservation_modes = set(obj.get("preservation_modes", []))
+            if _is_binary(content) and "binary_bytes" not in preservation_modes:
                 errors.append({
                     "code": GATE_BINARY,
                     "path": obj["destination_path"],
                     "reason": "File contains binary bytes",
                 })
 
-            if _is_lfs_pointer(content):
+            if _is_lfs_pointer(content) and "lfs_pointer" not in preservation_modes:
                 errors.append({
                     "code": GATE_LFS,
                     "path": obj["destination_path"],
