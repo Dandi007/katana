@@ -624,6 +624,7 @@ def test_integrity_gate_fail_binary(manifest, dest_root, tmp_path):
     for obj in m["objects"]:
         obj["action"] = "preserve"
         obj["exception_code"] = None
+        obj["preservation_modes"] = []
 
     dest = tmp_path / "int_dest"
     dest.mkdir()
@@ -722,6 +723,7 @@ def test_integrity_gate_fail_lfs(manifest, dest_root, tmp_path):
     for obj in m["objects"]:
         obj["action"] = "preserve"
         obj["exception_code"] = None
+        obj["preservation_modes"] = []
 
     dest = tmp_path / "int_lfs_dest"
     dest.mkdir()

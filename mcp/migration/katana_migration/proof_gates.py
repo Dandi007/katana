@@ -24,6 +24,7 @@ from katana_migration.inventory import (
     ACTION_MERGE,
     ACTION_NORMALIZE,
     ACTION_PRESERVE,
+    ACTION_QUARANTINE,
     ACTION_REJECT,
     ACTION_REWRITE,
     MAX_BASENAME_LENGTH,
@@ -68,6 +69,14 @@ def _read_json_or_none(path: Path) -> dict | None:
         return json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _object_destination(dest_path: Path, obj: dict) -> Path:
+    if obj.get("action") == ACTION_ARCHIVE:
+        return dest_path / "_archive" / obj["destination_path"]
+    if obj.get("action") == ACTION_QUARANTINE:
+        return dest_path / "_quarantine" / obj["destination_path"]
+    return dest_path / obj["destination_path"]
 
 
 def _make_evidence_digest(record: dict) -> str:
@@ -133,11 +142,6 @@ def parity_gate(manifest: dict, dest_root: str) -> dict:
             "detail": "Manifest invariant_holds is False",
         })
 
-    manifest_dest_paths = {
-        obj["destination_path"]: obj
-        for obj in objects
-    }
-
     domain_groups: dict[str, list[dict]] = {}
     for obj in objects:
         dest = obj.get("destination_repo", "default")
@@ -149,12 +153,12 @@ def parity_gate(manifest: dict, dest_root: str) -> dict:
             continue
 
         materialized = set()
-        expected = set()
         for obj in domain_objects:
-            expected.add(obj["destination_path"])
             if obj.get("action") != ACTION_REJECT:
                 if obj.get("action") == ACTION_ARCHIVE:
                     materialized.add(f"_archive/{obj['destination_path']}")
+                elif obj.get("action") == ACTION_QUARANTINE:
+                    materialized.add(f"_quarantine/{obj['destination_path']}")
                 else:
                     materialized.add(obj["destination_path"])
 
@@ -167,27 +171,19 @@ def parity_gate(manifest: dict, dest_root: str) -> dict:
                     continue
                 if rel in ("MIGRATION_BASE.json", "redirects.json", "references.json", ".gitkeep"):
                     continue
-                if rel.startswith("_archive/"):
-                    inner_rel = rel[len("_archive/"):]
-                    if inner_rel not in manifest_dest_paths:
-                        failures.append({
-                            "check": "extra_archived_object",
-                            "detail": f"Archived object '{rel}' not in manifest",
-                        })
-                elif rel not in manifest_dest_paths:
-                    if not rel.endswith(".diff_manifest.json"):
-                        failures.append({
-                            "check": "extra_object",
-                            "detail": f"Object '{rel}' in destination but not in manifest",
-                        })
+                if rel.endswith(".diff_manifest.json"):
+                    continue
+                if rel not in materialized:
+                    failures.append({
+                        "check": "extra_object",
+                        "detail": f"Object '{rel}' is not materialized at its manifest disposition",
+                    })
 
         for obj in domain_objects:
             if obj.get("action") == ACTION_REJECT:
                 continue
             obj_path = obj["destination_path"]
-            expected_path = dest_path / obj_path
-            if obj.get("action") == ACTION_ARCHIVE:
-                expected_path = dest_path / "_archive" / obj_path
+            expected_path = _object_destination(dest_path, obj)
             if not expected_path.exists():
                 failures.append({
                     "check": "missing_object",
@@ -216,9 +212,8 @@ def hash_gate(manifest: dict, dest_root: str) -> dict:
             continue
 
         dest_repo = obj.get("destination_repo", "default")
-        dest_path = Path(dest_root) / dest_repo.lstrip("/") / obj["destination_path"]
-        if action == ACTION_ARCHIVE:
-            dest_path = Path(dest_root) / dest_repo.lstrip("/") / "_archive" / obj["destination_path"]
+        domain_path = Path(dest_root) / dest_repo.lstrip("/")
+        dest_path = _object_destination(domain_path, obj)
 
         if not dest_path.exists():
             failures.append({
@@ -240,7 +235,7 @@ def hash_gate(manifest: dict, dest_root: str) -> dict:
 
         dest_sha = _sha256_hex(dest_content)
 
-        if action == ACTION_PRESERVE:
+        if action in (ACTION_PRESERVE, ACTION_QUARANTINE):
             checked.append("preserve_destination_sha256")
             expected_sha = obj.get("sha256") or obj.get("pre_hash")
             if expected_sha and dest_sha != expected_sha:
@@ -570,12 +565,8 @@ def integrity_gate(manifest: dict, dest_root: str) -> dict:
             if obj.get("action") == ACTION_REJECT:
                 continue
 
-            archive_prefix = ""
-            if obj.get("action") == ACTION_ARCHIVE:
-                archive_prefix = "_archive/"
-
             obj_path = Path(obj["destination_path"])
-            target = dest_path / archive_prefix / obj_path
+            target = _object_destination(dest_path, obj)
 
             if not target.exists():
                 continue
@@ -598,14 +589,15 @@ def integrity_gate(manifest: dict, dest_root: str) -> dict:
                 })
                 continue
 
-            if _is_binary(content):
+            preservation_modes = set(obj.get("preservation_modes", []))
+            if _is_binary(content) and "binary_bytes" not in preservation_modes:
                 failures.append({
                     "check": "binary_bytes",
                     "path": obj["destination_path"],
                     "detail": "File contains binary bytes",
                 })
 
-            if _is_lfs_pointer(content):
+            if _is_lfs_pointer(content) and "lfs_pointer" not in preservation_modes:
                 failures.append({
                     "check": "lfs_pointer",
                     "path": obj["destination_path"],
@@ -696,6 +688,8 @@ def history_gate(manifest: dict, dest_root: str) -> dict:
                     if not p.startswith(".migration")
                     and p not in ("MIGRATION_BASE.json", "redirects.json", "references.json", ".gitkeep")
                     and not p.startswith("_archive/")
+                    and not p.startswith("_quarantine/")
+                    and not p.endswith(".diff_manifest.json")
                 }
                 out_of_scope = scoped - in_scope_paths
                 if out_of_scope:
@@ -715,10 +709,7 @@ def history_gate(manifest: dict, dest_root: str) -> dict:
         for obj in domain_objects:
             if obj.get("action") == ACTION_REJECT:
                 continue
-            archive_prefix = ""
-            if obj.get("action") == ACTION_ARCHIVE:
-                archive_prefix = "_archive/"
-            target = dest_path / archive_prefix / obj["destination_path"]
+            target = _object_destination(dest_path, obj)
             if not target.exists():
                 continue
 
@@ -736,7 +727,7 @@ def history_gate(manifest: dict, dest_root: str) -> dict:
                 continue
 
             action = obj.get("action", ACTION_PRESERVE)
-            if action == ACTION_PRESERVE:
+            if action in (ACTION_PRESERVE, ACTION_QUARANTINE):
                 if dest_content != source_content:
                     failures.append({
                         "check": "head_content_mismatch",

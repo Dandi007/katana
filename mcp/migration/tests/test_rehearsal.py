@@ -13,6 +13,7 @@ from katana_migration.rehearsal import (
     ACTION_MERGE,
     ACTION_NORMALIZE,
     ACTION_PRESERVE,
+    ACTION_QUARANTINE,
     ACTION_REJECT,
     ACTION_REWRITE,
     DISPOSITION_BROKEN_NEW,
@@ -94,6 +95,10 @@ def source_root(tmp_path):
     exe_path.chmod(0o755)
     (exc_dir / "lfs-pointer.md").write_text(
         "version https://git-lfs.github.com/spec/v1\noid sha256:abc123def456789\nsize 1234\n",
+        encoding="utf-8",
+    )
+    (exc_dir / "bad-yaml.md").write_text(
+        "---\nkey: \"unclosed\n---\n\nOriginal body\n",
         encoding="utf-8",
     )
     symlink_path = exc_dir / "symlink.md"
@@ -570,40 +575,42 @@ def test_integrity_gate_symlink_raises(manifest, dest_root):
         run_rehearsal(manifest, str(dest_root), committer_date="2026-01-01T00:00:00+0000")
 
 
-def test_integrity_gate_binary_raises(manifest, dest_root):
+def test_binary_bytes_are_preserved(manifest, dest_root):
     binary = [o for o in manifest["objects"] if o.get("exception_code") == "BINARY_BYTES"]
     if not binary:
         pytest.skip("No binary fixtures")
 
+    run_rehearsal(manifest, str(dest_root), committer_date="2026-01-01T00:00:00+0000")
     for obj in binary:
-        obj["action"] = ACTION_PRESERVE
-
-    with pytest.raises(RehearsalError, match="Integrity gate failed"):
-        run_rehearsal(manifest, str(dest_root), committer_date="2026-01-01T00:00:00+0000")
+        target = dest_root / obj["destination_repo"].lstrip("/") / obj["destination_path"]
+        assert target.read_bytes() == b"\x00\x01\x02\x03\xFF\xFE"
 
 
-def test_integrity_gate_lfs_raises(manifest, dest_root):
+def test_lfs_pointer_is_preserved(manifest, dest_root):
     lfs = [o for o in manifest["objects"] if o.get("exception_code") == "LFS_POINTER"]
     if not lfs:
         pytest.skip("No LFS fixtures")
 
+    run_rehearsal(manifest, str(dest_root), committer_date="2026-01-01T00:00:00+0000")
     for obj in lfs:
-        obj["action"] = ACTION_PRESERVE
+        target = dest_root / obj["destination_repo"].lstrip("/") / obj["destination_path"]
+        assert target.read_bytes() == (
+            b"version https://git-lfs.github.com/spec/v1\n"
+            b"oid sha256:abc123def456789\nsize 1234\n"
+        )
 
-    with pytest.raises(RehearsalError, match="Integrity gate failed"):
-        run_rehearsal(manifest, str(dest_root), committer_date="2026-01-01T00:00:00+0000")
 
-
-def test_integrity_gate_executable_raises(manifest, dest_root):
+def test_executable_bit_is_cleared(manifest, dest_root):
     executable = [o for o in manifest["objects"] if o.get("exception_code") == "EXECUTABLE_BIT"]
     if not executable:
         pytest.skip("No executable fixtures")
 
+    assert all(obj["action"] == ACTION_NORMALIZE for obj in executable)
+    run_rehearsal(manifest, str(dest_root), committer_date="2026-01-01T00:00:00+0000")
     for obj in executable:
-        obj["action"] = ACTION_PRESERVE
-
-    with pytest.raises(RehearsalError, match="Integrity gate failed"):
-        run_rehearsal(manifest, str(dest_root), committer_date="2026-01-01T00:00:00+0000")
+        target = dest_root / obj["destination_repo"].lstrip("/") / obj["destination_path"]
+        assert target.stat().st_mode & 0o111 == 0
+        assert target.read_text(encoding="utf-8") == "#!/bin/bash\necho hello\n"
 
 
 def test_integrity_gate_path_length_raises(manifest, dest_root, tmp_path, monkeypatch):
@@ -682,16 +689,65 @@ def test_integrity_gate_casefold_collision_raises(manifest, dest_root, tmp_path)
         run_rehearsal(m, str(dest), committer_date="2026-01-01T00:00:00+0000")
 
 
-def test_integrity_gate_unicode_nfc_raises(manifest, dest_root):
+def test_unicode_content_is_normalized_to_nfc(manifest, dest_root):
     not_nfc = [o for o in manifest["objects"] if "not-nfc" in o.get("source_path", "")]
     if not not_nfc:
         pytest.skip("No non-NFC fixture")
 
+    assert all(obj["action"] == ACTION_NORMALIZE for obj in not_nfc)
+    run_rehearsal(manifest, str(dest_root), committer_date="2026-01-01T00:00:00+0000")
     for obj in not_nfc:
-        obj["action"] = ACTION_PRESERVE
+        target = dest_root / obj["destination_repo"].lstrip("/") / obj["destination_path"]
+        assert target.read_text(encoding="utf-8") == "Caf\u00e9\n"
 
-    with pytest.raises(RehearsalError, match="Integrity gate failed"):
-        run_rehearsal(manifest, str(dest_root), committer_date="2026-01-01T00:00:00+0000")
+
+def test_yaml_parse_error_is_quarantined_byte_for_byte(manifest, dest_root):
+    yaml_errors = [o for o in manifest["objects"] if o.get("exception_code") == "YAML_PARSE_ERROR"]
+    assert len(yaml_errors) == 1
+    obj = yaml_errors[0]
+    assert obj["action"] == ACTION_QUARANTINE
+
+    run_rehearsal(manifest, str(dest_root), committer_date="2026-01-01T00:00:00+0000")
+
+    domain = dest_root / obj["destination_repo"].lstrip("/")
+    source = Path(next(
+        ss["root"] for ss in manifest["source_sets"] if ss["source_repo"] == obj["source_repo"]
+    )) / obj["source_path"]
+    quarantined = domain / obj["quarantine_path"]
+    assert quarantined.read_bytes() == source.read_bytes()
+    assert not (domain / obj["destination_path"]).exists()
+    assert not (domain / "_archive" / obj["destination_path"]).exists()
+
+
+def test_anomaly_dispositions_pass_proof_gates(source_root, dest_root):
+    from katana_migration.inventory import run_inventory
+    from katana_migration.proof_gates import run_all_gates
+
+    source_set = {
+        "name": "exceptions",
+        "root": str(source_root / "exceptions"),
+        "source_repo": "/data/exceptions",
+        "source_commit": "0000000000000000000000000000000000000000",
+        "object_class": "unknown",
+        "prefix": "m-",
+        "destination_repo": "/data/memory",
+        "default_action": "preserve",
+        "include": ["**/*"],
+    }
+    anomaly_manifest = run_inventory([source_set], migration_run_id="anomaly-proof-gates")
+    run_rehearsal(
+        anomaly_manifest,
+        str(dest_root),
+        committer_date="2026-01-01T00:00:00+0000",
+    )
+    report = run_all_gates(
+        anomaly_manifest,
+        str(dest_root),
+        committer_date="2026-01-01T00:00:00+0000",
+    )
+
+    assert report["status"] == "PASS", report["gates"]
+    assert report["total_gates"] == 7
 
 
 def test_blocking_exceptions_set(manifest, dest_root):
@@ -1162,7 +1218,13 @@ def test_full_run_all_domains(manifest, dest_root):
 
 def test_manifest_all_actions_present(manifest):
     actions = {o["action"] for o in manifest["objects"]}
-    expected = {ACTION_PRESERVE, ACTION_ID_BACKFILL, ACTION_REJECT}
+    expected = {
+        ACTION_PRESERVE,
+        ACTION_ID_BACKFILL,
+        ACTION_NORMALIZE,
+        ACTION_QUARANTINE,
+        ACTION_REJECT,
+    }
     assert expected.issubset(actions), f"Missing expected actions: {expected - actions}"
 
 
