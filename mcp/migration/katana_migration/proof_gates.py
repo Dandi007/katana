@@ -771,11 +771,17 @@ def history_gate(manifest: dict, dest_root: str) -> dict:
 
         try:
             head_result = subprocess.run(
-                ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+                [
+                    "git", "-c", "core.quotePath=false", "ls-tree",
+                    "-r", "--name-only", "HEAD",
+                ],
                 cwd=str(dest_path), capture_output=True, text=True, timeout=15
             )
             history_result = subprocess.run(
-                ["git", "log", "--format=", "--name-only", "HEAD"],
+                [
+                    "git", "-c", "core.quotePath=false", "log",
+                    "--format=", "--name-only", "HEAD",
+                ],
                 cwd=str(dest_path), capture_output=True, text=True, timeout=30
             )
             if head_result.returncode == 0 and history_result.returncode == 0:
@@ -888,11 +894,15 @@ def idempotency_gate(manifest: dict, dest_root: str, *,
 
         try:
             r1 = subprocess.run(
-                ["git", "ls-tree", "-r", "HEAD"],
+                [
+                    "git", "-c", "core.quotePath=false", "ls-tree", "-r", "HEAD",
+                ],
                 cwd=str(orig_dest), capture_output=True, text=True, timeout=15
             )
             r2 = subprocess.run(
-                ["git", "ls-tree", "-r", "HEAD"],
+                [
+                    "git", "-c", "core.quotePath=false", "ls-tree", "-r", "HEAD",
+                ],
                 cwd=str(rerun_dest_path), capture_output=True, text=True, timeout=15
             )
             if r1.returncode == 0 and r2.returncode == 0:
