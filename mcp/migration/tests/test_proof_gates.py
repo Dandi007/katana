@@ -7,6 +7,7 @@ no production data roots touched.
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -994,11 +995,90 @@ def test_integrity_gate_fail_path_length(manifest, dest_root, tmp_path, monkeypa
 
 # ── History gate tests ─────────────────────────────────────────────────────────
 
+@pytest.fixture
+def unicode_history_repo(tmp_path):
+    dest_root = tmp_path / "unicode_history_dest"
+    repo = dest_root / "data" / "test"
+    repo.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=str(repo), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "core.quotePath", "true"],
+        cwd=str(repo), check=True, capture_output=True,
+    )
+
+    def commit(message):
+        subprocess.run(
+            ["git", "add", "-A"], cwd=str(repo), check=True, capture_output=True
+        )
+        subprocess.run(
+            [
+                "git", "-c", "user.name=Proof Gate Test",
+                "-c", "user.email=proof-gate@example.com",
+                "commit", "-m", message,
+            ],
+            cwd=str(repo), check=True, capture_output=True,
+        )
+
+    source_path = "知识库/初稿—🚀.md"
+    destination_path = "知识库/定稿—🚀.md"
+    source_file = repo / source_path
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("# 合法历史\n", encoding="utf-8")
+    commit("add unicode source")
+    source_file.rename(repo / destination_path)
+    commit("rename unicode source")
+
+    manifest = {
+        "objects": [{
+            "source_repo": "/data/test",
+            "source_path": source_path,
+            "destination_repo": "/data/test",
+            "destination_path": destination_path,
+            "action": "preserve",
+        }],
+        "source_sets": [],
+    }
+    return manifest, dest_root, repo, commit
+
+
 def test_history_gate_pass(manifest, dest_root, rehearsed):
     result = history_gate(manifest, str(dest_root))
     assert result["status"] == "PASS"
     assert result["failures"] == []
     assert result["evidence_digest"] != ""
+
+
+def test_history_gate_passes_in_scope_unicode_paths(unicode_history_repo):
+    manifest, dest_root, _, _ = unicode_history_repo
+
+    result = history_gate(manifest, str(dest_root))
+
+    assert result["status"] == "PASS"
+    assert result["failures"] == []
+
+
+def test_history_gate_fails_unicode_leak_with_raw_deterministic_detail(
+    unicode_history_repo,
+):
+    manifest, dest_root, repo, commit = unicode_history_repo
+    leak_path = ".trash/中文—🚨.md"
+    leak_file = repo / leak_path
+    leak_file.parent.mkdir()
+    leak_file.write_text("# 越界\n", encoding="utf-8")
+    commit("add unicode leak")
+    leak_file.unlink()
+    commit("remove unicode leak")
+
+    first = history_gate(manifest, str(dest_root))
+    second = history_gate(manifest, str(dest_root))
+
+    assert first == second
+    assert first["status"] == "FAIL"
+    failure = next(f for f in first["failures"] if f["check"] == "out_of_scope_leak")
+    assert leak_path in failure["detail"]
+    assert re.search(r"\\[0-7]{3}", failure["detail"]) is None
 
 
 def test_history_gate_fail_out_of_scope_leak(manifest, dest_root, rehearsed):
@@ -1019,6 +1099,7 @@ def test_history_gate_fail_out_of_scope_leak(manifest, dest_root, rehearsed):
     result = history_gate(manifest, str(dest_root))
     assert result["status"] == "FAIL"
     assert any("out_of_scope" in f["check"] for f in result["failures"])
+    assert any("leaked_file.md" in f["detail"] for f in result["failures"])
 
 
 def test_history_gate_fail_content_mismatch(manifest, dest_root, rehearsed):
