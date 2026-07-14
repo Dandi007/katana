@@ -451,7 +451,7 @@ def test_symlink_rejected(manifest):
 
 # ── Duplicate / collision detection ───────────────────────────────────────────
 
-def test_duplicate_detection(tmp_path):
+def test_same_content_at_distinct_source_paths_gets_distinct_ids(tmp_path):
     root = tmp_path / "dup_test"
     root.mkdir()
     (root / "a.md").write_text("content A", encoding="utf-8")
@@ -470,8 +470,110 @@ def test_duplicate_detection(tmp_path):
     }]
     manifest = run_inventory(config, migration_run_id="dup-test")
 
-    duplicate_ids = [r for r in manifest["objects"] if r["exception_code"] == EXC_DUPLICATE_ID]
-    assert len(duplicate_ids) >= 1, "Duplicate IDs not detected for same-content files"
+    assert len({obj["domain_resource_id"] for obj in manifest["objects"]}) == 2
+    assert not any(EXC_DUPLICATE_ID in obj["exception_codes"] for obj in manifest["objects"])
+
+
+def test_true_existing_id_duplicate_rejects_both_objects(tmp_path):
+    root = tmp_path / "true_duplicate"
+    root.mkdir()
+    for name in ("a.md", "b.md"):
+        (root / name).write_text(
+            "---\nid: m-abc123\nname: duplicate\ndescription: duplicate id\n---\n",
+            encoding="utf-8",
+        )
+
+    config = [{
+        "name": "true_duplicate",
+        "root": str(root),
+        "source_repo": "/test/memory",
+        "source_commit": "0" * 40,
+        "object_class": "memory_canonical",
+        "prefix": "m-",
+        "destination_repo": "/test/memory",
+        "default_action": "preserve",
+        "include": ["*.md"],
+    }]
+    manifest = run_inventory(config, migration_run_id="true-duplicate")
+
+    assert {obj["domain_resource_id"] for obj in manifest["objects"]} == {"m-abc123"}
+    assert all(obj["action"] == ACTION_REJECT for obj in manifest["objects"])
+    assert all(EXC_DUPLICATE_ID in obj["exception_codes"] for obj in manifest["objects"])
+
+
+def test_derived_id_collision_rehashes_and_reserves_rejected_id(tmp_path, monkeypatch):
+    import katana_migration.inventory as inventory_module
+
+    real_sha256 = inventory_module.hashlib.sha256
+
+    class _Digest:
+        def __init__(self, value):
+            self.value = value
+
+        def hexdigest(self):
+            return self.value
+
+    def colliding_sha256(content=b""):
+        if content.endswith((1).to_bytes(4, "big")):
+            return _Digest("b" * 64)
+        if b"wiki_writable" in content:
+            return _Digest("a" * 64)
+        return real_sha256(content)
+
+    monkeypatch.setattr(inventory_module.hashlib, "sha256", colliding_sha256)
+    monkeypatch.setattr(inventory_module, "MAX_BASENAME_LENGTH", 10)
+
+    root = tmp_path / "collision"
+    root.mkdir()
+    (root / "a-rejected.md").write_text("same", encoding="utf-8")
+    (root / "z.md").write_text("same", encoding="utf-8")
+    config = [{
+        "name": "collision",
+        "root": str(root),
+        "source_repo": "/test/wiki",
+        "source_commit": "0" * 40,
+        "object_class": "wiki_writable",
+        "prefix": "w-",
+        "destination_repo": "/test/wiki",
+        "default_action": "preserve",
+        "include": ["*.md"],
+    }]
+
+    manifest = run_inventory(config, migration_run_id="forced-collision")
+    by_path = {obj["source_path"]: obj for obj in manifest["objects"]}
+
+    assert by_path["a-rejected.md"]["action"] == ACTION_REJECT
+    assert by_path["a-rejected.md"]["domain_resource_id"] == "w-aaaaaa"
+    assert by_path["z.md"]["action"] == ACTION_PRESERVE
+    assert by_path["z.md"]["domain_resource_id"] == "w-bbbbbb"
+    assert not any(EXC_DUPLICATE_ID in obj["exception_codes"] for obj in manifest["objects"])
+
+
+def test_many_similar_deep_source_paths_have_no_derived_id_collisions(tmp_path):
+    root = tmp_path / "many-wiki-paths"
+    for index in range(1_000):
+        directory = root / f"topic-{index:04d}" / "runs" / f"{index:06d}" / "output"
+        directory.mkdir(parents=True)
+        name = "AGENTS.md" if index % 2 == 0 else "CLAUDE.md"
+        (directory / name).write_text("identical content\n", encoding="utf-8")
+
+    config = [{
+        "name": "many_paths",
+        "root": str(root),
+        "source_repo": "/test/wiki",
+        "source_commit": "0" * 40,
+        "object_class": "wiki_writable",
+        "prefix": "w-",
+        "destination_repo": "/test/wiki",
+        "default_action": "preserve",
+        "include": ["**/*.md"],
+    }]
+    manifest = run_inventory(config, migration_run_id="many-paths")
+
+    ids = [obj["domain_resource_id"] for obj in manifest["objects"]]
+    assert len(ids) == 1_000
+    assert len(set(ids)) == len(ids)
+    assert not any(EXC_DUPLICATE_ID in obj["exception_codes"] for obj in manifest["objects"])
 
 
 def test_duplicate_basename_detection(tmp_path):
@@ -502,6 +604,68 @@ def test_duplicate_basename_detection(tmp_path):
     for obj in dup_basenames:
         assert obj["action"] == ACTION_REJECT
         assert "note.md" in obj["reason"]
+
+
+def test_preexisting_casefold_pair_is_acknowledged_not_rejected(tmp_path):
+    root = tmp_path / "preexisting_casefold"
+    root.mkdir()
+    (root / "INDEX.md").write_text("upper\n", encoding="utf-8")
+    (root / "index.md").write_text("lower\n", encoding="utf-8")
+    config = [{
+        "name": "preexisting_casefold",
+        "root": str(root),
+        "source_repo": "/test/work",
+        "source_commit": "1" * 40,
+        "object_class": "work_folder",
+        "prefix": "wf-",
+        "destination_repo": "/test/work",
+        "default_action": "preserve",
+        "include": ["*.md"],
+        "work_folder_root_depth": 0,
+    }]
+
+    manifest = run_inventory(config, migration_run_id="preexisting-casefold")
+
+    assert all(obj["action"] == ACTION_PRESERVE for obj in manifest["objects"])
+    assert all(
+        obj["casefold_collision_status"] == "acknowledged_pre_existing"
+        for obj in manifest["objects"]
+    )
+    baseline = manifest["acknowledged_baseline"]["casefold_collisions"]
+    assert len(baseline) == 1
+    assert baseline[0]["destination_paths"] == ["INDEX.md", "index.md"]
+
+
+def test_casefold_pair_created_by_combining_sources_is_rejected(tmp_path):
+    upper_root = tmp_path / "upper"
+    lower_root = tmp_path / "lower"
+    upper_root.mkdir()
+    lower_root.mkdir()
+    (upper_root / "INDEX.md").write_text("upper\n", encoding="utf-8")
+    (lower_root / "index.md").write_text("lower\n", encoding="utf-8")
+
+    def source_set(root, source_repo):
+        return {
+            "name": source_repo,
+            "root": str(root),
+            "source_repo": source_repo,
+            "source_commit": "0" * 40,
+            "object_class": "wiki_writable",
+            "prefix": "w-",
+            "destination_repo": "/test/wiki",
+            "default_action": "preserve",
+            "include": ["*.md"],
+        }
+
+    manifest = run_inventory(
+        [source_set(upper_root, "/test/upper"), source_set(lower_root, "/test/lower")],
+        migration_run_id="introduced-casefold",
+    )
+
+    assert all(obj["action"] == ACTION_REJECT for obj in manifest["objects"])
+    assert all(obj["casefold_collision_status"] == "migration_introduced" for obj in manifest["objects"])
+    assert all(EXC_CASEFOLD_COLLISION in obj["exception_codes"] for obj in manifest["objects"])
+    assert manifest["acknowledged_baseline"]["casefold_collisions"] == []
 
 
 def _work_folder_source_set(root, *, source_repo="/test/work-source", destination_repo="/test/work"):

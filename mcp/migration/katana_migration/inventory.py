@@ -5,13 +5,11 @@ produces a deterministic, immutable migration manifest (§8.4 fields),
 and verifies the global invariant tracked == preserved + transformed +
 archived + rejected with unclassified == 0.
 
-ID generation uses content-hash determinism (SHA-256 prefix) rather than
-the kernel ResourceIdLedger's random gen_id.  The prefix/length alignment
-(m-/w-/wf- + 6 hex) matches the kernel convention.  Tombstone avoidance
-is integrated via an optional ledger_path: when a ledger is provided,
-minted IDs that collide with a tombstone are iteratively re-hashed
-(content + counter) until a free ID is found, preserving determinism for
-a given ledger state.
+ID generation uses a source identity hash (SHA-256 prefix) rather than the
+kernel ResourceIdLedger's random gen_id.  The prefix/length alignment
+(m-/w-/wf- + 6 hex) matches the kernel convention.  IDs are allocated in a
+stable source-identity order so the short namespace remains collision-free
+within a manifest, including IDs reserved by rejected objects and a ledger.
 """
 
 from __future__ import annotations
@@ -99,17 +97,28 @@ def _is_credential_path(path: str) -> bool:
 
 # ── ID generation ─────────────────────────────────────────────────────────────
 
-def deterministic_id(content: bytes, prefix: str, ledger: object | None = None) -> str:
-    h = hashlib.sha256(content).hexdigest()
-    candidate = prefix + h[:6]
-    if ledger is None or not hasattr(ledger, "is_tombstoned"):
-        return candidate
+def deterministic_id(
+    content: bytes,
+    prefix: str,
+    ledger: object | None = None,
+    reserved: set[str] | None = None,
+) -> str:
     counter = 0
-    while ledger.is_tombstoned(candidate):
+    while True:
+        candidate_content = content if counter == 0 else content + counter.to_bytes(4, "big")
+        candidate = prefix + hashlib.sha256(candidate_content).hexdigest()[:6]
+        tombstoned = (
+            ledger is not None
+            and hasattr(ledger, "is_tombstoned")
+            and ledger.is_tombstoned(candidate)
+        )
+        if not tombstoned and (reserved is None or candidate not in reserved):
+            return candidate
         counter += 1
-        h = hashlib.sha256(content + counter.to_bytes(4, "big")).hexdigest()
-        candidate = prefix + h[:6]
-    return candidate
+
+
+def _source_identity(source_repo: str, object_class: str, source_path: str) -> bytes:
+    return f"{source_repo}\0{object_class}\0{source_path}".encode("utf-8")
 
 
 def sha256_hex(content: bytes) -> str:
@@ -307,7 +316,9 @@ def scan_file(
     file_mode = oct(st.st_mode)[-6:]
     lfs_oid = _extract_lfs_oid(content)
 
-    resource_id = deterministic_id(content, prefix, ledger=ledger)
+    id_identity = _source_identity(source_repo, object_class, rel_path)
+    resource_id = deterministic_id(id_identity, prefix, ledger=ledger)
+    id_kind = "derived"
 
     existing_id = None
     if content.startswith(b"---\n"):
@@ -316,8 +327,12 @@ def scan_file(
             existing_id = str(fm["id"])
             if object_class in ("memory_canonical", "memory_legacy") and MEMORY_ID_RE.match(existing_id):
                 resource_id = existing_id
+                id_kind = "existing"
             elif object_class in ("memory_canonical", "memory_legacy"):
                 exceptions.append((EXC_MISSING_BRIEF, f"Invalid existing ID format: {existing_id}"))
+            elif object_class.startswith("wiki_") and WIKI_ID_RE.match(existing_id):
+                resource_id = existing_id
+                id_kind = "existing"
             if object_class in ("memory_canonical", "memory_legacy") and (
                 not fm.get("name") or not fm.get("description")
             ):
@@ -398,6 +413,10 @@ def scan_file(
         "reference_rewrites": [],
         "exception_code": exceptions[0][0] if exceptions else None,
         "reason": exceptions[0][1] if exceptions else None,
+        "_id_identity": id_identity.decode("utf-8"),
+        "_id_kind": id_kind,
+        "_id_prefix": prefix,
+        "_source_root": str(root),
     }
 
 
@@ -465,10 +484,11 @@ def _containing_work_folder(rel_path: Path, folder_roots: list[Path]) -> Path | 
 def _work_folder_id(
     root: Path,
     folder: Path,
-    destination_repo: str,
+    source_repo: str,
     prefix: str,
     ledger: object | None,
-) -> str:
+) -> tuple[str, str, bytes]:
+    identity = _source_identity(source_repo, "work_folder", folder.as_posix())
     brief = root / folder / "_brief.md"
     if brief.is_file() and not brief.is_symlink():
         try:
@@ -478,20 +498,9 @@ def _work_folder_id(
         if fm is not None:
             existing_id = str(fm.get("id", ""))
             if WF_ID_RE.match(existing_id):
-                return existing_id
+                return existing_id, "existing", identity
 
-    identity = f"{destination_repo}\0{folder.as_posix()}".encode("utf-8")
-    return deterministic_id(identity, prefix, ledger=ledger)
-
-
-def _path_resource_id(
-    destination_repo: str,
-    destination_path: str,
-    prefix: str,
-    ledger: object | None,
-) -> str:
-    identity = f"{destination_repo}\0{destination_path}".encode("utf-8")
-    return deterministic_id(identity, prefix, ledger=ledger)
+    return deterministic_id(identity, prefix, ledger=ledger), "derived", identity
 
 
 def _scan_source_set(
@@ -502,9 +511,6 @@ def _scan_source_set(
     root = Path(ss["root"])
     records: list[dict] = []
     seen_basenames: set[str] = set()
-    seen_ids: dict[str, tuple[str, str]] = {}
-    flat_casefold_map: dict[str, str] = {}
-    path_casefold_map: dict[str, str] = {}
     redirect_map: dict[str, str] = {}
 
     matched_paths: dict[str, Path] = {}
@@ -533,7 +539,7 @@ def _scan_source_set(
     )
     destination_repo = ss.get("destination_repo", ss["source_repo"])
     folder_ids = {
-        folder: _work_folder_id(root, folder, destination_repo, ss["prefix"], ledger)
+        folder: _work_folder_id(root, folder, ss["source_repo"], ss["prefix"], ledger)
         for folder in folder_roots
     }
 
@@ -569,63 +575,19 @@ def _scan_source_set(
             work_folder = _containing_work_folder(Path(rel_path), folder_roots)
             record["work_folder_path"] = work_folder.as_posix() if work_folder is not None else None
             if work_folder is not None:
-                resource_id = folder_ids[work_folder]
-            else:
-                resource_id = _path_resource_id(
-                    destination_repo, record["destination_path"], ss["prefix"], ledger
-                )
-            record["domain_resource_id"] = resource_id
-            record["vfs_node_id"] = resource_id
+                resource_id, id_kind, id_identity = folder_ids[work_folder]
+                record["domain_resource_id"] = resource_id
+                record["vfs_node_id"] = resource_id
+                record["_id_kind"] = id_kind
+                record["_id_identity"] = id_identity.decode("utf-8")
             if work_folder is not None and record["action"] == ACTION_PRESERVE:
                 record["disposition"] = "preserve-active"
-        elif object_class == "wiki_raw":
-            resource_id = _path_resource_id(
-                destination_repo, record["destination_path"], ss["prefix"], ledger
-            )
-            record["domain_resource_id"] = resource_id
-            record["vfs_node_id"] = resource_id
 
         basename = Path(record["source_path"]).name
         if not _is_path_preserving(object_class):
             if basename in seen_basenames:
                 _set_exception(record, EXC_DUPLICATE_BASENAME, f"Duplicate basename: {basename}")
             seen_basenames.add(basename)
-
-            casefold_name = unicodedata.normalize("NFC", basename).casefold()
-            if casefold_name in flat_casefold_map and flat_casefold_map[casefold_name] != basename:
-                _set_exception(
-                    record,
-                    EXC_CASEFOLD_COLLISION,
-                    f"Casefold collision with {flat_casefold_map[casefold_name]}: {basename}",
-                )
-            else:
-                flat_casefold_map[casefold_name] = basename
-        else:
-            destination_path = record["destination_path"]
-            casefold_path = unicodedata.normalize("NFC", destination_path).casefold()
-            if (
-                casefold_path in path_casefold_map
-                and path_casefold_map[casefold_path] != destination_path
-            ):
-                _set_exception(
-                    record,
-                    EXC_CASEFOLD_COLLISION,
-                    f"Casefold collision with {path_casefold_map[casefold_path]}: {destination_path}",
-                )
-            else:
-                path_casefold_map[casefold_path] = destination_path
-
-        identity_path = (
-            record.get("work_folder_path")
-            if record.get("work_folder_path") is not None
-            else record["destination_path"]
-        )
-        identity = (object_class, identity_path)
-        resource_id = record["domain_resource_id"]
-        if resource_id and resource_id in seen_ids and seen_ids[resource_id] != identity:
-            _set_exception(record, EXC_DUPLICATE_ID, f"Duplicate ID: {resource_id}")
-        elif resource_id:
-            seen_ids[resource_id] = identity
 
         if record["action"] == ACTION_ID_BACKFILL and record["domain_resource_id"]:
             redirect_map[record["source_path"]] = record["domain_resource_id"]
@@ -656,16 +618,58 @@ def _scan_source_set(
 
 # ── Manifest assembly ─────────────────────────────────────────────────────────
 
-def _mark_global_conflicts(records: list[dict]) -> None:
+def _casefold_value(record: dict, *, source: bool = False) -> str:
+    path = record["source_path"] if source else record["destination_path"]
+    if _is_path_preserving(record["object_class"]):
+        return path
+    return Path(path).name
+
+
+def _casefold_key(record: dict, *, source: bool = False) -> str:
+    return unicodedata.normalize("NFC", _casefold_value(record, source=source)).casefold()
+
+
+def _casefold_signature(
+    destination_repo: str,
+    collision_key: str,
+    paths: list[str],
+) -> tuple[str, str, tuple[str, ...]]:
+    return destination_repo, collision_key, tuple(sorted(paths))
+
+
+def _allocate_derived_ids(records: list[dict], ledger: object | None) -> None:
+    reserved = {
+        record["domain_resource_id"]
+        for record in records
+        if record.get("domain_resource_id") and record.get("_id_kind") == "existing"
+    }
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for record in records:
+        if not record.get("domain_resource_id") or record.get("_id_kind") != "derived":
+            continue
+        key = (record["_id_prefix"], record["_id_identity"])
+        groups.setdefault(key, []).append(record)
+
+    for (prefix, identity), identity_records in sorted(groups.items()):
+        resource_id = deterministic_id(
+            identity.encode("utf-8"), prefix, ledger=ledger, reserved=reserved
+        )
+        reserved.add(resource_id)
+        for record in identity_records:
+            record["domain_resource_id"] = resource_id
+            record["vfs_node_id"] = resource_id
+
+
+def _mark_global_conflicts(records: list[dict]) -> list[dict]:
     destination_groups: dict[tuple[str, str], list[dict]] = {}
     casefold_groups: dict[tuple[str, str], list[dict]] = {}
+    acknowledged_casefold: list[dict] = []
 
     for record in records:
         destination_repo = record["destination_repo"]
         destination_path = record["destination_path"]
         destination_groups.setdefault((destination_repo, destination_path), []).append(record)
-        casefold_path = unicodedata.normalize("NFC", destination_path).casefold()
-        casefold_groups.setdefault((destination_repo, casefold_path), []).append(record)
+        casefold_groups.setdefault((destination_repo, _casefold_key(record)), []).append(record)
 
     for (_, destination_path), conflicting in destination_groups.items():
         if len(conflicting) < 2:
@@ -677,40 +681,64 @@ def _mark_global_conflicts(records: list[dict]) -> None:
                 f"Multiple sources map to destination path: {destination_path}",
             )
 
-    for conflicting in casefold_groups.values():
-        paths = {record["destination_path"] for record in conflicting}
+    for (destination_repo, collision_key), conflicting in casefold_groups.items():
+        paths = {_casefold_value(record) for record in conflicting}
         if len(paths) < 2:
             continue
+        source_origins = {
+            (record["source_repo"], record["source_commit"], record.get("_source_root"))
+            for record in conflicting
+        }
+        source_keys = {_casefold_key(record, source=True) for record in conflicting}
+        pre_existing = len(source_origins) == 1 and len(source_keys) == 1
         rendered_paths = ", ".join(sorted(paths))
+        if pre_existing:
+            for record in conflicting:
+                record["casefold_collision_status"] = "acknowledged_pre_existing"
+            source_repo, source_commit, _ = next(iter(source_origins))
+            acknowledged_casefold.append({
+                "destination_repo": destination_repo,
+                "collision_key": collision_key,
+                "destination_paths": sorted(paths),
+                "source_repo": source_repo,
+                "source_commit": source_commit,
+                "source_paths": sorted({record["source_path"] for record in conflicting}),
+            })
+            continue
         for record in conflicting:
+            record["casefold_collision_status"] = "migration_introduced"
             _set_exception(
                 record,
                 EXC_CASEFOLD_COLLISION,
                 f"Destination path casefold collision: {rendered_paths}",
             )
 
-    path_id_groups: dict[tuple[str, str], dict[tuple[str, str, str], list[dict]]] = {}
+    id_groups: dict[str, dict[tuple[str, str, str], list[dict]]] = {}
     for record in records:
-        if not _is_path_preserving(record["object_class"]):
-            continue
         resource_id = record.get("domain_resource_id")
         if not resource_id:
             continue
         identity_path = record.get("work_folder_path") or record["source_path"]
         source_identity = (
+            record["object_class"],
             record["source_repo"],
-            record["source_commit"],
             identity_path,
         )
-        key = (record["destination_repo"], resource_id)
-        path_id_groups.setdefault(key, {}).setdefault(source_identity, []).append(record)
+        id_groups.setdefault(resource_id, {}).setdefault(source_identity, []).append(record)
 
-    for (_, resource_id), identities in path_id_groups.items():
+    for resource_id, identities in id_groups.items():
         if len(identities) < 2:
             continue
         for identity_records in identities.values():
             for record in identity_records:
                 _set_exception(record, EXC_DUPLICATE_ID, f"Duplicate ID: {resource_id}")
+
+    return sorted(
+        acknowledged_casefold,
+        key=lambda item: (
+            item["destination_repo"], item["collision_key"], item["destination_paths"]
+        ),
+    )
 
 def compute_summary(records: list[dict]) -> dict:
     tracked = len(records)
@@ -748,14 +776,21 @@ def build_manifest(
             pass
 
     all_records: list[dict] = []
-    all_redirects: dict[str, str] = {}
     for ss in source_sets:
-        records, redirects = _scan_source_set(ss, migration_run_id, ledger=ledger)
+        records, _ = _scan_source_set(ss, migration_run_id, ledger=ledger)
         all_records.extend(records)
-        all_redirects.update(redirects)
 
     all_records.sort(key=lambda r: (r["source_repo"], r["source_path"]))
-    _mark_global_conflicts(all_records)
+    _allocate_derived_ids(all_records, ledger)
+    acknowledged_casefold = _mark_global_conflicts(all_records)
+    all_redirects = {
+        record["source_path"]: record["domain_resource_id"]
+        for record in all_records
+        if record["action"] == ACTION_ID_BACKFILL and record.get("domain_resource_id")
+    }
+    for record in all_records:
+        for internal_key in ("_id_identity", "_id_kind", "_id_prefix", "_source_root"):
+            record.pop(internal_key, None)
 
     summary = compute_summary(all_records)
 
@@ -775,6 +810,9 @@ def build_manifest(
         ],
         "objects": all_records,
         "redirect_map": all_redirects,
+        "acknowledged_baseline": {
+            "casefold_collisions": acknowledged_casefold,
+        },
         "summary": summary,
     }
 
