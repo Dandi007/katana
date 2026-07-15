@@ -1,10 +1,17 @@
 ---
+创建日期: <YYYY-MM-DD>
+tags: [deep-research, topics]
+类型: 索引
+sources: ["<至少一个本研究 source anchor>"]
+摘要: "<研究主题聚类摘要，最多 40 字>"
 research: <topic-slug>
 date: <YYYY-MM-DD>
 topics_count: <N>
 ---
 
 # Topics: <研究标题>
+
+研究入口：[[WIKI]]
 
 ## Topic 1: <主题名>
 

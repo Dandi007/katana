@@ -41,7 +41,7 @@ fi
 # 自带 Playwright MCP（隔离 profile）
 MCP_CONFIG="$(printf '{"mcpServers":{"playwright":{"command":"npx","args":["-y","@playwright/mcp@latest","--user-data-dir","%s"]}}}' "$PROF")"
 
-PROMPT="${HOWTO}：搜索小红书关键词「盒马 快手菜」，取赞数最高的 1 篇笔记抓取详情与评论，按 skill 的落盘格式下载到 ${WORK_DIR}（本次 xiaohongshu_raw_dir 视为 ${WORK_DIR}）。完成后输出落盘文件清单。"
+PROMPT="${HOWTO}：搜索小红书关键词「盒马 快手菜」，取赞数最高的 1 篇笔记抓取详情与评论，按 skill 的落盘格式通过 wiki MCP 下载到逻辑路径 转换文档/web/e2e。完成后输出 MCP 返回的逻辑文件清单；不得写 client workspace。"
 
 # prompt 走 stdin：--add-dir 是变长参数，紧跟其后的位置参数会被吞成目录
 ( cd "$WORK_DIR" && printf '%s\n' "$PROMPT" | claude -p \

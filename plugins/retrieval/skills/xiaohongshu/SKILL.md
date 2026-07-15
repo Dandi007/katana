@@ -1,6 +1,6 @@
 ---
 name: xiaohongshu
-description: 小红书检索源。中文 UGC 消费决策/生活方式调研（餐厅、商品、本地服务的真实口碑）。Playwright 登录态隔离 profile；支持搜索、笔记详情+评论提取、批量下载落盘。
+description: 小红书检索源。中文 UGC 消费决策/生活方式调研（餐厅、商品、本地服务的真实口碑）。Playwright 登录态隔离 profile；批量下载通过 wiki MCP 写入 raw 逻辑路径。
 ---
 
 # /retrieval:xiaohongshu
@@ -12,16 +12,13 @@ description: 小红书检索源。中文 UGC 消费决策/生活方式调研（�
 | 键 | 含义 | 示例 |
 |----|------|------|
 | `xiaohongshu_chrome_profile` | 登录态 profile 目录 | `~/.playwright-agent-profile` |
-| `xiaohongshu_raw_dir` | 下载落盘根目录（相对路径时基于 KB 根，经 `katana_resolve_path` 解析；与 `kb_dir` 同语义） | `转换文档/web` |
+| `xiaohongshu_raw_dir` | wiki raw 逻辑路径（不得解析成 client filesystem path） | `转换文档/web` |
 
 铁律：`.katana` 只放路径；账号与登录态留在 profile 目录内，绝不进 repo。
 
-落盘前先把配置值解析成绝对路径（基准 `katana_kb_root`，非 cwd）：
-
-```bash
-RAW_DIR="$(katana_resolve_path "$(katana_config_get xiaohongshu_raw_dir "转换文档/web" "")")"
-# 之后所有 <xiaohongshu_raw_dir> 占位均用解析后的绝对 $RAW_DIR
-```
+下载前读取 client-local `.katana` 中的配置值，但保持为 wiki 逻辑路径
+`RAW_PATH`。所有 raw 产物只用 katana-wiki-mcp 的 `fs_create` / `fs_write` /
+`fs_read`，不解析或暴露 server 物理根。
 
 ## 前置：登录态
 
@@ -78,7 +75,7 @@ navigate 带 token 的 href，然后一次提取：
 
 1. **选篇**：高赞优先 + 作者多样性 + 标题视角互补（测评/红黑榜/对比贴混搭），默认 5-10 篇
 2. 逐篇走工作流 ②
-3. **落盘** `$RAW_DIR/小红书-<主题>-<YYYY-MM-DD>/`（`$RAW_DIR` = 上面解析出的绝对 `xiaohongshu_raw_dir`）：
+3. **落盘**到 wiki 逻辑路径 `RAW_PATH/小红书-<主题>-<YYYY-MM-DD>/`：
    - 一篇一 md：`<序号两位>-<标题slug>.md`，frontmatter：
 
      ```yaml
@@ -94,6 +91,9 @@ navigate 带 token 的 href，然后一次提取：
 
      正文之后接 `## 评论`（作者/内容/赞，一行一条）
    - `index.md`：汇总表（标题/作者/赞/评论数/文件名）
+   - 新文件调用 wiki MCP `fs_create`（父级由 server 建立）；重试覆盖先
+     `fs_read`，再以保留 server id 的内容调用 `fs_write`。不得用原生文件
+     工具或 client-side git 操作访问 `转换文档/`。
 
 ## 可信度判别
 

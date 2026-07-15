@@ -53,18 +53,38 @@ case "$out_mcp" in
     *) bad "mcp mode: output is hookSpecificOutput JSON" "output: $out_mcp" ;;
 esac
 
+if printf '%s' "$out_mcp" | python3 -m json.tool >/dev/null 2>&1; then
+    ok "mcp mode: output parses as JSON"
+else
+    bad "mcp mode: output parses as JSON" "output: $out_mcp"
+fi
+
+case "$out_mcp" in
+    *fs_read*fs_glob*) ok "mcp mode: deep reads use wiki MCP fs tools" ;;
+    *) bad "mcp mode: deep reads use wiki MCP fs tools" "output: $out_mcp" ;;
+esac
+
+case "$out_mcp" in
+    *"read/grep"*|*"Read/Grep"*|*"自行 read"*|*"自行 grep"*) bad "mcp mode: no native read/grep guidance" "output: $out_mcp" ;;
+    *) ok "mcp mode: no native read/grep guidance" ;;
+esac
+
+case "$out_mcp" in
+    *"$KB"*) bad "mcp mode: no physical wiki root exposure" "leaked [$KB]" ;;
+    *) ok "mcp mode: no physical wiki root exposure" ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Case A2: wiki_interface=mcp via .katana config file
 # ---------------------------------------------------------------------------
 KATANA_FILE="$TMP/dot-katana-mcp"
-printf 'wiki_interface=mcp\n' > "$KATANA_FILE"
+printf 'wiki_interface=mcp\nwiki_root=/server-only/wiki\n' > "$KATANA_FILE"
 
 out_mcp2="$(
     set -uo pipefail
     export HOME="$TMP/home"; mkdir -p "$HOME"
     unset KATANA_CONFIG_FILE CLAUDE_PROJECT_DIR KATANA_WIKI_INTERFACE 2>/dev/null || true
     export KATANA_KB_ROOT="$KB"
-    export KATANA_WIKI_ROOT="."
     export KATANA_CONFIG_FILE="$KATANA_FILE"
     bash "$HOOK" 2>/dev/null
 )"
@@ -72,6 +92,11 @@ out_mcp2="$(
 case "$out_mcp2" in
     *wiki_query*) ok "mcp mode via .katana: output contains wiki_query" ;;
     *) bad "mcp mode via .katana: output contains wiki_query" "output: $out_mcp2" ;;
+esac
+
+case "$out_mcp2" in
+    *"/server-only/wiki"*) bad "mcp mode via .katana: no server root exposure" "output: $out_mcp2" ;;
+    *) ok "mcp mode via .katana: no server root exposure" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -96,12 +121,16 @@ case "$out_skill" in
     *) bad "skill default: output is hookSpecificOutput JSON" "output: $out_skill" ;;
 esac
 
-# Default must NOT be the short MCP trigger — should contain full SKILL.md content
-# (the short trigger does not contain {{WIKI_ROOT}} expansion or SKILL.md title).
-# We verify by checking the WIKI_ROOT absolute path appears (placeholder replaced).
+# Default still injects the full convention skill, but zero-mount guidance must
+# not expose the mounted physical root.
 case "$out_skill" in
-    *"$KB"*) ok "skill default: WIKI_ROOT placeholder expanded (full SKILL.md)" ;;
-    *) bad "skill default: WIKI_ROOT placeholder expanded (full SKILL.md)" "kb path [$KB] not found in output" ;;
+    *"$KB"*) bad "skill default: physical wiki root hidden" "kb path [$KB] leaked in output" ;;
+    *) ok "skill default: physical wiki root hidden" ;;
+esac
+
+case "$out_skill" in
+    *wiki_search*fs_read*wiki_ingest_plan*wiki_ingest_apply*) ok "skill default: full convention uses MCP tools" ;;
+    *) bad "skill default: full convention uses MCP tools" "output: $out_skill" ;;
 esac
 
 echo "-------------------------------------------"

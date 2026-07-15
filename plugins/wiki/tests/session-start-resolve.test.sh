@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Resolve test for the wiki SessionStart hook.
-#
-# A relative wiki_root must resolve against kb-root (not cwd). We create a
-# temp KB with WIKI.md so the hook activates, set KATANA_WIKI_ROOT to a
-# relative value, run from a non-KB cwd, and assert {{WIKI_ROOT}} is replaced
-# with "<kb>/<rel>" (absolute), never the cwd.
+# Zero-mount test for the wiki SessionStart hook. A relative wiki_root still
+# activates the legacy convention when WIKI.md is mounted, but its resolved
+# physical path must not enter client guidance.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -30,15 +27,19 @@ out="$(
     bash "$HOOK"
 )"
 
-# "." resolves to "<kb>/." -> the injected WIKI_ROOT contains the kb prefix.
 case "$out" in
-    *"$KB"*) ok "wiki_root resolved against kb-root" ;;
-    *) bad "wiki_root resolved against kb-root" "missing kb prefix [$KB] in output: $out" ;;
+    *"$KB"*) bad "wiki root is not exposed" "kb path [$KB] leaked into output: $out" ;;
+    *) ok "wiki root is not exposed" ;;
 esac
 
 case "$out" in
     *"$OTHER"*) bad "no cwd leak" "cwd [$OTHER] leaked into output" ;;
     *) ok "no cwd leak" ;;
+esac
+
+case "$out" in
+    *wiki_query*wiki_search*fs_read*fs_glob*wiki_ingest_plan*wiki_ingest_apply*) ok "legacy convention routes wiki through MCP" ;;
+    *) bad "legacy convention routes wiki through MCP" "output: $out" ;;
 esac
 
 echo "-------------------------------------------"

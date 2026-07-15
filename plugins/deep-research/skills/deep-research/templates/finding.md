@@ -1,9 +1,14 @@
 ---
+创建日期: <YYYY-MM-DD>
+tags: [deep-research, finding]
+类型: 卡片
+sources: ["<本 finding 的主 anchor>"]
+摘要: "<本源对线索的核心贡献，最多 40 字>"
 clue_id: <c0>
 round: <1>
 source: <源名，如 web / feishu / gitlab / local_text / platform:xxx>
 anchor: <URL/路径/file:line — 该源的主锚点>
-credibility: high | medium | low | conflicted
+evidence_credibility: high | medium | low | conflicted
 digest: "<一句话摘要，本源对线索的核心贡献>"
 entities: []                   # 关键实体列表（可选）
 clue: "<线索描述>"
@@ -16,6 +21,8 @@ timestamp: <ISO8601>
 ---
 
 # Finding: <线索描述>
+
+研究入口：[[WIKI]]
 
 ## L1 · Findings（摘要层，结构化）
 

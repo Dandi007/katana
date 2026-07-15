@@ -37,6 +37,15 @@ DEFAULT_HTTP_DIMENSIONS = 512
 DEFAULT_ZHIPU_DIMENSIONS = 1024
 WORD_RE = re.compile(r"[\w\u4e00-\u9fff]+", re.UNICODE)
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DEFAULT_MARKDOWN_SCOPES = ("智元工作", "Ideas", "Templates", "Incubator", "docs", ".runtime")
+MIGRATED_MARKDOWN_SCOPES = (
+    "智元工作/工作记录",
+    "Zettelkasten",
+    "DeepThought",
+    "转换文档",
+    "inbox",
+    "WIKI.md",
+)
 SECRET_REPLACEMENTS = [
     (re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[^\s'\"]+"), r"\1<redacted>"),
     (re.compile(r"\b[0-9a-fA-F]{32}\.[A-Za-z0-9_-]{10,}\b"), "<redacted-api-key>"),
@@ -46,6 +55,25 @@ SECRET_REPLACEMENTS = [
 
 def terms_for(query: str) -> list[str]:
     return [term.lower() for term in WORD_RE.findall(query) if term.strip()]
+
+
+def path_has_prefix(relative_path: str, prefix: str) -> bool:
+    path = relative_path.strip("/")
+    normalized = prefix.strip("/")
+    return path == normalized or path.startswith(normalized + "/")
+
+
+def path_in_scope(relative_path: str, scopes: list[str], excluded_scopes: list[str]) -> bool:
+    return (
+        any(path_has_prefix(relative_path, scope) for scope in scopes)
+        and not any(path_has_prefix(relative_path, scope) for scope in excluded_scopes)
+    )
+
+
+def local_scope_is_allowed(scope: str) -> bool:
+    if scope.startswith(("/", "\\")) or "\\" in scope or ".." in scope.split("/"):
+        return False
+    return any(path_has_prefix(scope, allowed) for allowed in DEFAULT_MARKDOWN_SCOPES)
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -232,6 +260,7 @@ def semantic_query(
     query: str,
     top_k: int,
     scope: list[str] | None,
+    excluded_scope: list[str],
     embedding_model: str,
     embedding_backend: str,
     dimensions: int,
@@ -263,7 +292,7 @@ def semantic_query(
     seen_paths: set[str] = set()
     for row in rows:
         relative_path = str(row.get("relative_path", ""))
-        if scope and not any(relative_path.startswith(item.rstrip("/") + "/") or relative_path == item.rstrip("/") for item in scope):
+        if scope and not path_in_scope(relative_path, scope, excluded_scope):
             continue
         path_key = relative_path
         if path_key in seen_paths:
@@ -412,27 +441,50 @@ def opencode_sql_keyword_query(
     return results
 
 
-def scan_markdown_records(root: Path) -> list[dict[str, Any]]:
+def scan_markdown_records(root: Path, scopes: list[str], excluded_scopes: list[str]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for path in root.rglob("*.md"):
-        if ".git" in path.parts or ".obsidian" in path.parts:
+    seen: set[Path] = set()
+    for scope in scopes:
+        scope_root = root / scope.strip("/")
+        if not scope_root.exists():
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        rel = path.relative_to(root).as_posix()
-        stat = path.stat()
-        records.append({"doc_id": rel, "absolute_path": str(path), "relative_path": rel, "title": path.stem, "chunk_text": text[:4000], "heading_path": "", "mtime": dt.datetime.fromtimestamp(stat.st_mtime, dt.UTC).isoformat().replace("+00:00", "Z"), "frontmatter": {}, "wikilinks": [], "tags": [], "source_type": "markdown_live_fallback"})
+        if scope_root.is_file():
+            candidates = [scope_root] if scope_root.suffix.lower() == ".md" else []
+        else:
+            candidates = []
+            for current, dirs, files in os.walk(scope_root):
+                current_path = Path(current)
+                dirs[:] = [
+                    name for name in dirs
+                    if name not in {".git", ".obsidian"}
+                    and not any(
+                        path_has_prefix((current_path / name).relative_to(root).as_posix(), excluded)
+                        for excluded in excluded_scopes
+                    )
+                ]
+                candidates.extend(current_path / name for name in files if name.lower().endswith(".md"))
+        for path in candidates:
+            if path in seen:
+                continue
+            seen.add(path)
+            rel = path.relative_to(root).as_posix()
+            if not path_in_scope(rel, scopes, excluded_scopes):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            stat = path.stat()
+            records.append({"doc_id": rel, "absolute_path": str(path), "relative_path": rel, "title": path.stem, "chunk_text": text[:4000], "heading_path": "", "mtime": dt.datetime.fromtimestamp(stat.st_mtime, dt.UTC).isoformat().replace("+00:00", "Z"), "frontmatter": {}, "wikilinks": [], "tags": [], "source_type": "markdown_live_fallback"})
     return records
 
 
-def query_records(records: list[dict[str, Any]], query: str, top_k: int, scope: list[str] | None) -> list[dict[str, Any]]:
+def query_records(records: list[dict[str, Any]], query: str, top_k: int, scope: list[str] | None, excluded_scope: list[str] | None = None) -> list[dict[str, Any]]:
     terms = terms_for(query)
     scored: list[tuple[float, dict[str, Any], list[str]]] = []
     for record in records:
         relative_path = str(record.get("relative_path", ""))
-        if scope and not any(relative_path.startswith(item.rstrip("/") + "/") or relative_path == item.rstrip("/") for item in scope):
+        if scope and not path_in_scope(relative_path, scope, excluded_scope or []):
             continue
         score, match_types = score_record(record, query, terms)
         if score <= 0:
@@ -473,7 +525,8 @@ def main() -> int:
     parser.add_argument("query", nargs="?", help="Natural language or keyword query.")
     parser.add_argument("--root", default=os.getcwd(), help="Repository root for live keyword fallback. Default: current directory.")
     parser.add_argument("--top-k", type=int, default=10, help="Maximum number of deduplicated results.")
-    parser.add_argument("--scope", action="append", help="Limit results to relative scope prefix. Repeatable.")
+    parser.add_argument("--scope", action="append", help="Limit Markdown results to an unmigrated relative scope prefix. Repeatable; defaults to the safe local scopes.")
+    parser.add_argument("--exclude-scope", action="append", default=[], help="Exclude a relative scope prefix. Migrated wiki/work-folder scopes are always excluded.")
     parser.add_argument("--manifest", default=None, help="Manifest path. Default: <cache-dir>/index-manifest.json")
     parser.add_argument("--cache-dir", default=str(CACHE_BASE), help="Cache base. Default: ~/.cache/agent-knowledge/Zettelkasten")
     parser.add_argument("--mode", choices=["semantic", "keyword", "auto"], default="auto", help="Search mode. Default: auto.")
@@ -491,6 +544,11 @@ def main() -> int:
 
     if not args.query:
         parser.error("query is required unless --help is used")
+    markdown_scopes = list(args.scope or DEFAULT_MARKDOWN_SCOPES)
+    invalid_scopes = [scope for scope in markdown_scopes if not local_scope_is_allowed(scope)]
+    if invalid_scopes:
+        parser.error(f"scope is not an allowed unmigrated subtree: {', '.join(invalid_scopes)}")
+    excluded_scopes = list(dict.fromkeys([*MIGRATED_MARKDOWN_SCOPES, *args.exclude_scope]))
     cache_base = Path(args.cache_dir).expanduser().resolve()
     manifest_path = Path(args.manifest).expanduser().resolve() if args.manifest else cache_base / "index-manifest.json"
     lancedb_path = cache_base / "lancedb"
@@ -517,10 +575,10 @@ def main() -> int:
     results: list[dict[str, Any]] = []
     if args.source != "opencode":
         if not records:
-            records = scan_markdown_records(Path(args.root).expanduser().resolve())
+            records = scan_markdown_records(Path(args.root).expanduser().resolve(), markdown_scopes, excluded_scopes)
             backend = "live_keyword_fallback"
             fallback_reason = "JSONL cache missing or empty; scanned Markdown files directly. Run build_lancedb_index.py to refresh cache."
-            results = query_records(records, args.query, args.top_k, args.scope)
+            results = query_records(records, args.query, args.top_k, markdown_scopes, excluded_scopes)
         elif args.mode in {"semantic", "auto"} and lancedb_module and (embedding_backend in {"zhipu", "http"} or sentence_transformers_cls):
             try:
                 results = semantic_query(
@@ -529,7 +587,8 @@ def main() -> int:
                     lancedb_path=lancedb_path,
                     query=args.query,
                     top_k=args.top_k,
-                    scope=args.scope,
+                    scope=markdown_scopes,
+                    excluded_scope=excluded_scopes,
                     embedding_model=args.embedding_model,
                     embedding_backend=embedding_backend,
                     dimensions=args.dimensions,
@@ -548,12 +607,12 @@ def main() -> int:
                 if args.mode == "semantic":
                     results = []
             if not results and args.mode == "auto":
-                results = query_records(records, args.query, args.top_k, args.scope)
+                results = query_records(records, args.query, args.top_k, markdown_scopes, excluded_scopes)
                 mode = "keyword_fallback"
         else:
             if args.mode == "semantic" and import_error:
                 fallback_reason = f"{import_error}; semantic vector search unavailable."
-            results = query_records(records, args.query, args.top_k, args.scope)
+            results = query_records(records, args.query, args.top_k, markdown_scopes, excluded_scopes)
 
     opencode_results: list[dict[str, Any]] = []
     opencode_mode = ""

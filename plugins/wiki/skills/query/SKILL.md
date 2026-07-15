@@ -11,30 +11,29 @@ The protocol was restored and made an iron rule. This ladder is **deterministic 
 hard thresholds** so that any model, including a weak one, walks the same path —
 not by judgment, by rule.
 
-`wiki_root` is injected by the using-wiki hook. Run `date "+%Y-%m-%d %H:%M"`
-before any timestamped step (the gap log) — use that real time.
+Wiki data is available only through katana-wiki-mcp; do not resolve a physical
+root. `wiki_query` owns orientation, cold-gap journaling and synthesis.
 
 Walk the five rungs in order. Do not skip a rung.
 
 ## 1. Orient
 
-- Read `<wiki_root>/WIKI.md` **§6** (citation format, back-fill rule) — it is the contract.
-- Read the index / relevant MOC. If no index/MOC exists (common in adopted libraries),
-  proceed directly to grep.
-- Grep key terms, expanding each to 2–4 synonyms or language variants derived from
-  the question and any schema glossary (a term miss is a coverage miss).
-- Produce a **candidate page list** — one line each: `<page path>` + one clause on
-  why it's relevant. An empty list is a valid outcome → go to rung 4.
+- Call `wiki_query` with the full question. It reads the schema, expands synonyms,
+  searches index/MOC and pages, and returns candidates plus a grounded synthesis.
+- If narrower exploration is needed, call `wiki_search`, then use wiki MCP
+  `fs_read` on returned logical paths. Never use native filesystem search.
+- Preserve the returned **candidate page list** and relevance reasons. An empty
+  list is a valid cold result → go to rung 4.
 
 ## 2. Read
 
 The hard threshold is **5**.
 
-- Candidates **≤5** → read all of them inline. No skipping ("close enough").
+- Candidates **≤5** → ensure `wiki_query` covered all; fetch an omitted page only with `fs_read`.
 - Candidates **>5** → dispatch an **Explore subagent**: give it the question and the
-  full candidate list, require it to return the relevant passages with their page
-  paths. Read the converged set inline after it reports. If no subagent tool is
-  available, read up to 10 inline (most relevant first) and state the coverage
+  full candidate list, require it to use wiki MCP `fs_read` and return the relevant
+  passages with their page paths. Use `fs_read` for the converged set after it reports. If no subagent tool is
+  available, use `fs_read` for up to 10 (most relevant first) and state the coverage
   limitation in the answer.
 
 Never inline-read a >5 set (context waste) and never read only the first few of a
@@ -58,10 +57,9 @@ Candidate set empty, or everything read turned out irrelevant:
   parametric knowledge and dress it up as a wiki answer.
 - **Interactive:** ask the user whether to web-search or to answer from general
   knowledge — and if you do, label it clearly as **non-wiki**.
-- **Always** record the gap: run `date "+%Y-%m-%d %H:%M"` first, then append to
-  `<wiki_root>/log.md`:
-  `## [YYYY-MM-DD HH:MM] query | gap: <question>` (the only write this skill performs).
-  Then propose adding the topic to the ingest backlog.
+- **Always** preserve the gap record returned by `wiki_query`; the server appends
+  `## [YYYY-MM-DD HH:MM] query | gap: <question>` atomically. Do not append a
+  second client-side record. Then propose adding the topic to the ingest backlog.
 
 ## 5. Backfill judgment
 

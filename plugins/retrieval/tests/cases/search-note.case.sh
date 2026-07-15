@@ -1,9 +1,9 @@
-# search-note: 本地 KB grep 已知笔记关键词（只读）；KB 不可达则 skip
-# kb_dir 经 katana_resolve_path 解析（基准 katana_kb_root，非 cwd），与 skill 一致。
-KB="$(katana_resolve_path "$(katana_config_get kb_dir "." "")")"
-if [ -d "$KB/Zettelkasten" ]; then
-  HITS="$(grep -rl "Agent SDK credit" "$KB/Zettelkasten" 2>/dev/null | wc -l | tr -d ' ')"
-  [ "$HITS" -ge 1 ] && pass "search-note" || fail "search-note" "0 hits for known note"
+# search-note: migrated domains route to MCP; local fallback stays scope-locked.
+SKILL="${CLAUDE_PLUGIN_ROOT}/skills/search-note/SKILL.md"
+if grep -q 'wiki_search' "$SKILL" \
+  && grep -q 'wf_search' "$SKILL" \
+  && grep -q -- '--exclude-scope "智元工作/工作记录"' "$SKILL"; then
+  pass "search-note"
 else
-  skip "search-note" "kb unavailable"
+  fail "search-note" "MCP routing or migrated-domain exclusion missing"
 fi
