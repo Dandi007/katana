@@ -214,6 +214,27 @@ class FSTools:
                 return (path, resource_id, content)
         return (None, None, None)
 
+    def _resolve_folder_id_path(self, folder_id: str | None, path: str) -> tuple[str, dict | None]:
+        """folder_id 给定时，把 path 解释为 folder 内相对逻辑路径，返回 (repo 相对完整 path, error)。
+
+        双重嵌套 bug 的治本点：agent 用 folder_id + folder 内相对 path（如 "design.md"），
+        由 MCP 解析 id→canonical folder path 并拼接，agent 无需推导/感知 _wf_root 物理布局，
+        结构上不可能再产生 智元工作/工作记录/智元工作/工作记录/ 这类错位嵌套。
+        folder_id=None 时原样返回 path（兼容旧 path-based 用法）。
+        """
+        if folder_id is None:
+            return path, None
+        brief_path, _fid, _content = self._resolve_by_id(folder_id)
+        if brief_path is None:
+            return path, _make_error(
+                "RESOURCE_NOT_FOUND", f"folder_id not found: {folder_id}",
+                resource_id=folder_id, virtual_path=path,
+                current_commit=self._commit(), retryable=False,
+            )
+        folder_dir = brief_path.rsplit("/", 1)[0] if "/" in brief_path else ""
+        resolved = f"{folder_dir}/{path}" if folder_dir else path
+        return resolved, None
+
     def _resolve_by_path(self, virtual_path: str) -> tuple[str | None, str | None, str | None]:
         try:
             if not self._vfs.exists(virtual_path) or not self._vfs.is_file(virtual_path):
@@ -388,7 +409,9 @@ class FSTools:
 
     def _check_path(self, path: str) -> str | None:
         if ".." in path or path.startswith("/"):
-            return "path must not contain '..' or absolute paths"
+            return ("path must not contain '..' or absolute paths; "
+                    "prefer fs_<op>(folder_id='wf-xxxxxx', path='<folder-relative>') "
+                    "to avoid deriving physical layout (root cause of double-nesting)")
         if path.startswith("."):
             return "path must not start with '.'"
         parts = path.replace("\\", "/").split("/")
@@ -1364,9 +1387,13 @@ class FSTools:
     # ── fs_create ────────────────────────────────────────────────────────────
 
     def fs_create(self, path: str, content: str,
+                  folder_id: str | None = None,
                   resource_id: str | None = None,
                   expected_base_commit: str | None = None,
                   idempotency_key: str | None = None) -> dict:
+        path, _fid_err = self._resolve_folder_id_path(folder_id, path)
+        if _fid_err:
+            return _fid_err
         p_err = self._check_path(path)
         if p_err:
             return _make_error(
@@ -1506,10 +1533,14 @@ class FSTools:
     # ── fs_write ─────────────────────────────────────────────────────────────
 
     def fs_write(self, path: str, content: str,
+                 folder_id: str | None = None,
                  resource_id: str | None = None,
                  expected_base_commit: str | None = None,
                  expected_resource_revision: str | None = None,
                  idempotency_key: str | None = None) -> dict:
+        path, _fid_err = self._resolve_folder_id_path(folder_id, path)
+        if _fid_err:
+            return _fid_err
         commit = self._commit()
 
         p_err = self._check_path(path)
@@ -1663,11 +1694,15 @@ class FSTools:
     # ── fs_edit ──────────────────────────────────────────────────────────────
 
     def fs_edit(self, path: str, old_string: str, new_string: str,
+                folder_id: str | None = None,
                 resource_id: str | None = None,
                 replace_all: bool = False,
                 expected_base_commit: str | None = None,
                 expected_resource_revision: str | None = None,
                 idempotency_key: str | None = None) -> dict:
+        path, _fid_err = self._resolve_folder_id_path(folder_id, path)
+        if _fid_err:
+            return _fid_err
         commit = self._commit()
 
         p_err = self._check_path(path)
@@ -1844,9 +1879,16 @@ class FSTools:
     # ── fs_copy ──────────────────────────────────────────────────────────────
 
     def fs_copy(self, source: str, dest: str,
+                folder_id: str | None = None,
                 resource_id: str | None = None,
                 expected_base_commit: str | None = None,
                 idempotency_key: str | None = None) -> dict:
+        source, _fid_err_s = self._resolve_folder_id_path(folder_id, source)
+        if _fid_err_s:
+            return _fid_err_s
+        dest, _fid_err_d = self._resolve_folder_id_path(folder_id, dest)
+        if _fid_err_d:
+            return _fid_err_d
         commit = self._commit()
 
         p_err_src = self._check_path(source)
@@ -2002,9 +2044,16 @@ class FSTools:
     # ── fs_rename ────────────────────────────────────────────────────────────
 
     def fs_rename(self, source: str, dest: str,
+                  folder_id: str | None = None,
                   resource_id: str | None = None,
                   expected_base_commit: str | None = None,
                   idempotency_key: str | None = None) -> dict:
+        source, _fid_err_s = self._resolve_folder_id_path(folder_id, source)
+        if _fid_err_s:
+            return _fid_err_s
+        dest, _fid_err_d = self._resolve_folder_id_path(folder_id, dest)
+        if _fid_err_d:
+            return _fid_err_d
         commit = self._commit()
 
         p_err_src = self._check_path(source)
@@ -2184,9 +2233,13 @@ class FSTools:
     # ── fs_delete ────────────────────────────────────────────────────────────
 
     def fs_delete(self, path: str,
+                  folder_id: str | None = None,
                   resource_id: str | None = None,
                   expected_base_commit: str | None = None,
                   idempotency_key: str | None = None) -> dict:
+        path, _fid_err = self._resolve_folder_id_path(folder_id, path)
+        if _fid_err:
+            return _fid_err
         commit = self._commit()
 
         p_err = self._check_path(path)
