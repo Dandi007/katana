@@ -5,12 +5,12 @@
 # Scenario (mirrors real deployment: .katana lives at ~/.katana, the agent runs
 # from some unrelated directory, KATANA_KB_ROOT points at the KB):
 #   - a temp KB holding the activation conditions for every path-bearing hook
-#     (WIKI.md, memory/<card>.md, .katana-writing/, docs/feishu/)
+#     (WIKI.md, .katana-writing/, docs/feishu/)
 #   - a temp HOME with ~/.katana carrying RELATIVE config values
 #   - KATANA_KB_ROOT exported to the temp KB
 #   - cwd set to a temp dir that has nothing to do with the KB
 #
-# For each of the 5 path-bearing session-start hooks we assert (positive) the
+# For each of the 4 path-bearing session-start hooks we assert (positive) the
 # injected additionalContext carries the "<KB>/..." ABSOLUTE path, and (negative)
 # it never leaks a bare relative config value, the unrelated cwd, or a stray
 # CLAUDE_PROJECT_DIR. (The guide hook carries no path and is out of scope.)
@@ -41,22 +41,14 @@ WIKI_REL="kbtest-wiki-root"
 WRITING_REL="kbtest-writing-dir"
 FEISHU_REL="kbtest/feishu-mirror"
 WF_REL="kbtest-work-records"
-MEM_REL="kbtest-memory"
 
-mkdir -p "$KB/$WIKI_REL" "$KB/$WRITING_REL" "$KB/$FEISHU_REL" "$KB/$MEM_REL"
+mkdir -p "$KB/$WIKI_REL" "$KB/$WRITING_REL" "$KB/$FEISHU_REL"
 touch "$KB/$WIKI_REL/WIKI.md"
-cat > "$KB/$MEM_REL/sample.md" <<'EOF'
----
-name: nonkb-card
-description: card resolved from kb-root with non-KB cwd
----
-EOF
 
 # --- user-level ~/.katana with RELATIVE values --------------------------------
 cat > "$HOME_DIR/.katana" <<EOF
 work_folder_path=$WF_REL
 wiki_root=$WIKI_REL
-memory_project_dir=$MEM_REL
 writing_dir=$WRITING_REL
 feishu_docs_root=$FEISHU_REL
 EOF
@@ -68,6 +60,7 @@ run_hook() {
         set -uo pipefail
         export HOME="$HOME_DIR"
         export KATANA_KB_ROOT="$KB"
+        export KATANA_MEMORY_MCP_URL="http://127.0.0.1:1"
         # Defensive: ensure no project-mode / env override bleeds through.
         unset KATANA_CONFIG_FILE CLAUDE_PROJECT_DIR 2>/dev/null || true
         unset KATANA_WORK_FOLDER KATANA_WIKI_ROOT KATANA_WRITING_DIR 2>/dev/null || true
@@ -130,15 +123,12 @@ out="$(run_hook feishu-docs)"
 assert_abs_no_bare "feishu-docs" "$out" "$FEISHU_REL"
 neg_common "feishu-docs" "$out"
 
-# memory — footer reports project=<KB>/memory and the card name is scanned.
+# memory is server-owned and deliberately has no KB-root path contract. Verify
+# only deterministic MCP-unavailable injection and the shared leak guards.
 out="$(run_hook memory)"
 case "$out" in
-    *"project=$KB/$MEM_REL"*) ok "memory / project dir resolved to kb-root" ;;
-    *) bad "memory / project dir resolved to kb-root" "missing [project=$KB/$MEM_REL]: $out" ;;
-esac
-case "$out" in
-    *"nonkb-card"*) ok "memory / card under kb-root scanned" ;;
-    *) bad "memory / card under kb-root scanned" "card not scanned: $out" ;;
+    *hookSpecificOutput*"memory service unavailable"*) ok "memory / MCP fallback injected" ;;
+    *) bad "memory / MCP fallback injected" "unexpected output: $out" ;;
 esac
 neg_common "memory" "$out"
 

@@ -3,7 +3,7 @@ clue_id: <c0>
 round: <1>
 source: <源名，如 web / feishu / gitlab / local_text / platform:xxx>
 anchor: <URL/路径/file:line — 该源的主锚点>
-credibility: high | medium | low | conflicted
+evidence_credibility: high | medium | low | conflicted
 digest: "<一句话摘要，本源对线索的核心贡献>"
 entities: []                   # 关键实体列表（可选）
 clue: "<线索描述>"
@@ -19,7 +19,7 @@ timestamp: <ISO8601>
 
 ## L1 · Findings（摘要层，结构化）
 
-| # | Title | Anchor | Type | Summary | Credibility |
+| # | Title | Anchor | Type | Summary | Evidence Credibility |
 |---|-------|--------|------|---------|-------------|
 | 1 | <标题> | <URL/路径/file:line> | article/paper/doc/news/blog/forum/code/local/platform:<源名> | <一句摘要> | high/medium/low/conflicted |
 

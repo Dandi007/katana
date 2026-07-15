@@ -1,26 +1,25 @@
 #!/usr/bin/env bash
 # deep-research-kb.verify.sh — deep-research 产物机械校验
 #
-# SKILL.md 规定报告落盘于 $KB/DeepThought/<主题名>/report.md，主题名由模型生成（含空格）。
+# 报告位于 wiki MCP 逻辑路径 DeepThought/katana-e2e-coffee/report.md。
 # verify.sh 负责：
-#   1. 找到 DeepThought/*/report.md
+#   1. 通过 wiki MCP fs_read 取回 report.md
 #   2. 校验引用结构与 92/96 内容
 #   3. 校验最小体积（≥2000B）
-#   4. normalize：cp 到 $CWD/research-report.md，供 verdict.inputs 引用（固定路径）
+#   4. normalize 到 $CWD/research-report.md，供 verdict.inputs 引用（固定路径）
 set -euo pipefail
 
-# ── 1. 找报告文件 ────────────────────────────────────────────────────────────
-REPORT_FILE=""
-while IFS= read -r -d '' f; do
-  REPORT_FILE="$f"
-  break
-done < <(find "$CWD/DeepThought" -maxdepth 2 -name "report.md" -print0 2>/dev/null)
+# ── 1. 经 wiki MCP 读取报告 ──────────────────────────────────────────────────
+command -v claude >/dev/null || { echo "FAIL: claude CLI 不可用，无法调用 wiki MCP"; exit 1; }
+REPORT_FILE="$CWD/research-report.md"
+printf '%s' '只调用 wiki MCP fs_read 读取逻辑路径 DeepThought/katana-e2e-coffee/report.md，原样输出文件内容，不要代码围栏或解释。' \
+  | claude -p --allowedTools mcp__katana-wiki-mcp__fs_read > "$REPORT_FILE"
 
-if [ -z "$REPORT_FILE" ]; then
-  echo "FAIL: $CWD/DeepThought/*/report.md 不存在（Workflow 未完成或路径错误）"
+if [ ! -s "$REPORT_FILE" ]; then
+  echo "FAIL: wiki MCP 未返回 DeepThought/katana-e2e-coffee/report.md"
   exit 1
 fi
-echo "found: $REPORT_FILE"
+echo "retrieved via wiki MCP: DeepThought/katana-e2e-coffee/report.md"
 
 # ── 2. 最小体积 2000B ────────────────────────────────────────────────────────
 SIZE=$(wc -c < "$REPORT_FILE")
@@ -47,9 +46,5 @@ if ! grep -qE '\[\[.*\]\]|References|来源' "$REPORT_FILE"; then
   exit 1
 fi
 echo "citation structure present ✓"
-
-# ── 5. normalize → 固定路径供 verdict.inputs 使用 ────────────────────────────
-cp "$REPORT_FILE" "$CWD/research-report.md"
-echo "normalized → research-report.md ✓"
 
 echo "ALL CHECKS PASS"

@@ -12,7 +12,7 @@
 | gitlab_token_env | 持有 gitlab token 的 env 变量名 | GITLAB_TOKEN_RW | 否（仅变量名） |
 | linear_token_env | 持有 linear key 的 env 变量名 | LINEAR_API_KEY | 否 |
 | search_note_embedding_url | 本地 embedding 端点 | http://<133>:18081/v1/embeddings | 否 |
-| kb_dir | 本地知识库根（只读检索输入；相对值基于 KB 根，经 katana_resolve_path 解析） | . | 否 |
+| kb_dir | 未迁本地子树的只读检索锚点（脚本强制排除 wiki/work-folder 已迁范围） | . | 否 |
 | code_root_env | code root env 变量名 | AGENT_CODE_ROOT | 否 |
 | code_root_fallback_env | code root 回退 env 变量名 | AGENT_CODE_ROOT_FALLBACK | 否 |
 | code_clone_category_default | 自动 clone 默认落的类别子目录 | third_party | 否 |

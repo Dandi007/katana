@@ -53,11 +53,28 @@ case "$out_mcp" in
     *) bad "mcp mode: output is hookSpecificOutput JSON" "output: $out_mcp" ;;
 esac
 
+if printf '%s' "$out_mcp" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+    ok "mcp mode: output parses as JSON"
+else
+    bad "mcp mode: output parses as JSON" "output: $out_mcp"
+fi
+
+case "$out_mcp" in
+    *read/grep*|*Read/Grep*|*"$KB"*) bad "mcp mode: no native-fs guidance or physical root" "output: $out_mcp" ;;
+    *) ok "mcp mode: no native-fs guidance or physical root" ;;
+esac
+
+case "$out_mcp" in
+    *fs_read*fs_glob*) ok "mcp mode: output names wiki MCP deep-read tools" ;;
+    *) bad "mcp mode: output names wiki MCP deep-read tools" "output: $out_mcp" ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Case A2: wiki_interface=mcp via .katana config file
 # ---------------------------------------------------------------------------
 KATANA_FILE="$TMP/dot-katana-mcp"
 printf 'wiki_interface=mcp\n' > "$KATANA_FILE"
+rm -f "$KB/WIKI.md"
 
 out_mcp2="$(
     set -uo pipefail
@@ -74,9 +91,20 @@ case "$out_mcp2" in
     *) bad "mcp mode via .katana: output contains wiki_query" "output: $out_mcp2" ;;
 esac
 
+case "$out_mcp2" in
+    *hookSpecificOutput*) ok "mcp mode via .katana: injects without client WIKI.md mount" ;;
+    *) bad "mcp mode via .katana: injects without client WIKI.md mount" "output: $out_mcp2" ;;
+esac
+
+case "$out_mcp2" in
+    *read/grep*|*Read/Grep*|*"$KB"*) bad "mcp mode via .katana: no native-fs guidance or physical root" "output: $out_mcp2" ;;
+    *) ok "mcp mode via .katana: no native-fs guidance or physical root" ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Case B: default (no wiki_interface) → full skill injection (regression guard)
 # ---------------------------------------------------------------------------
+: > "$KB/WIKI.md"
 out_skill="$(
     set -uo pipefail
     export HOME="$TMP/home"; mkdir -p "$HOME"

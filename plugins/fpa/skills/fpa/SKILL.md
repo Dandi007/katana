@@ -37,7 +37,7 @@ plugin 目录只读。执行中遇到错误/踩坑，append 到**消费 repo** �
 
 1. 运行 `date "+%Y-%m-%d %H:%M"`。
 2. 读取同 plugin 的 `../first-principles-thinking/SKILL.md`（方法定义）与消费 repo 的 `docs/fpa/errors.md`（如存在）。
-3. 确定落盘去向：用户指定路径 > active work folder（与 `findings.md` 同级）> `docs/fpa/`（项目 CLAUDE.md 可声明覆盖默认）。
+3. 确定落盘去向：用户指定路径 > active work folder（用 `wf_search` 确认逻辑路径，与 `findings.md` 同级）> `docs/fpa/`（项目 CLAUDE.md 可声明覆盖默认）。记录分支：active work folder 属于迁出域，后续只用 work-folder MCP `fs_read`/`fs_write`；`docs/fpa/` 未迁，保留原生文件工具。
 
 ### Phase 1 — 目标与需求 + 四步草稿（单 agent，顺序执行）
 
@@ -114,9 +114,9 @@ return await parallel(tasks)
 
 ### Phase 3 — 修订并落盘
 
-按 `templates/fpa-doc.md` 写 `FPA-<topic-slug>.md`（slug 用英文 kebab-case）。
+按 `templates/fpa-doc.md` 生成 `FPA-<topic-slug>.md`（slug 用英文 kebab-case）。落 active work folder 时用 work-folder MCP `fs_write`；落 `docs/fpa/` 时用原生 Write。
 
-同级落盘 `adversarial-verdicts.json`：全部 verdict 原文（含完整 evidence / note）。正文 Validate 裁决表只是压缩摘要；取证细节若只留在临时 task output 会随系统清理丢失，References 复核 skeptic 转述时以此为原料。
+同级落盘 `adversarial-verdicts.json`：active work folder 用 work-folder MCP `fs_write`，`docs/fpa/` 用原生 Write。保存全部 verdict 原文（含完整 evidence / note）。正文 Validate 裁决表只是压缩摘要；取证细节若只留在临时 task output 会随系统清理丢失，References 复核 skeptic 转述时以此为原料。
 
 证据可信度规则（写入文档时强制）：
 
@@ -130,7 +130,14 @@ return await parallel(tasks)
 python3 <本 skill base dir>/scripts/validate_fpa.py <FPA 文件路径>
 ```
 
-plugin 自带 PostToolUse hook（`hooks/hooks.json`），安装即生效，按文件名分两档自动校验（被 block 时按 stderr 指出的缺失项修复后重写）：
+若目标在 active work folder，先用 work-folder MCP `fs_read` 取回文档内容，
+再把内容经 stdin 交给本地只读校验器（不要把 server 逻辑路径当 client 路径）：
+
+```bash
+python3 <本 skill base dir>/scripts/validate_fpa.py --stdin FPA-<topic-slug>.md
+```
+
+plugin 自带 PostToolUse hook 对未迁本地写入按文件名自动校验；MCP 写入必须执行上述 stdin 校验（失败时按输出修复后用对应写入工具重写）：
 
 - Write/Edit `FPA-*.md` → 结构校验（frontmatter、目标与需求 + 四步 + Key Insight 六节、表格不变量）；
 - Write/Edit `RUN-REPORT-*.md`（Phase 5 落盘时触发）→ **三件套 suite 校验**：同级同 slug 的 `FPA-*.md` 结构通过 + `adversarial-verdicts.json` 存在且 verdict 原文条数 ≥ 正文 Validate 裁决表行数。过程合规由此转化为「过程产物链可机械验证」，不依赖执行自觉；挂在 run report（最后一个产物）上是为了不误伤 Phase 3→5 之间的中间状态。
@@ -140,7 +147,7 @@ plugin 自带 PostToolUse hook（`hooks/hooks.json`），安装即生效，按�
 按 `templates/fpa-run-report.md` 渲染本次运行汇总：
 
 - **对话内必须输出全文**——分析跑完没有向用户呈报等于没跑完；
-- 同时落盘 `RUN-REPORT-<topic-slug>.md`（与 FPA 文档同级，**slug 必须与 FPA 文档一致**——suite 校验按 slug 配对）；
+- 同时落盘 `RUN-REPORT-<topic-slug>.md`（与 FPA 文档同级，**slug 必须与 FPA 文档一致**）：active work folder 用 work-folder MCP `fs_write`，`docs/fpa/` 用原生 Write；
 - 结构固定：目标与需求 → 对齐映射 → 四步精简（第 4 步带 upheld/revised/refuted 计数 + 草稿→终稿关键变化）→ Key Insight → 下一步；
 - 术语规约：列名用读者无需上下文即可理解的明白话（「现有方案中由什么满足」「FPA 文档据此改了什么」），禁止内部行话漏出。
 

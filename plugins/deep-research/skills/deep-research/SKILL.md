@@ -1,6 +1,6 @@
 ---
 name: deep-research
-description: 大规模多源探索并生成研究综述。本地知识库（环境变量 DEEP_RESEARCH_KB_DIR 指定根目录，默认当前目录）、web 与 config 声明的命名源多源探索；不用于单概念快速解释。
+description: 大规模多源探索并生成研究综述。通过 wiki/work-folder MCP、web 与 config 声明的命名源多源探索；不用于单概念快速解释。
 ---
 
 # 深度研究助手
@@ -9,15 +9,8 @@ description: 大规模多源探索并生成研究综述。本地知识库（环�
 
 ## 配置
 
-知识库根目录可通过以下方式覆盖（优先级从高到低）：
-
-| 优先级 | 配置方式 | 示例 |
-|--------|---------|------|
-| 1 | 环境变量 `DEEP_RESEARCH_KB_DIR` | `export DEEP_RESEARCH_KB_DIR=/path/to/kb` |
-| 2 | `.katana` 文件 | `deep_research_kb_dir=.` |
-| 3 | 默认值 | katana KB-root 锚点（`.katana` 所在目录 > `CLAUDE_PROJECT_DIR` > pwd） |
-
-所有取值（含默认与相对值）解析成绝对路径，基准是 KB-root 锚点而非 cwd（解析逻辑见 Stage A 第 3 步的内联 bash）。若 `.katana` 文件或环境变量指定了路径，以那个为准，忽略默认值。
+研究产物属于已迁移 wiki 域，只使用 `DeepThought/<主题>/` 逻辑路径和
+wiki MCP `fs_*`，不解析或暴露 client 上的知识库物理根。
 
 ### 命名源（平台源，可选）
 
@@ -48,7 +41,7 @@ deep_research_models=worker:sonnet,triage:opus,synth:opus,harvest:haiku
 |------|------|------|------------|
 | `worker` | `sonnet` | per-source 检索 + 写 L2 原文，量大、并行、成本敏感 | 检索为主，sonnet 够用且便宜；可按 topic 意图上下调（见 Stage A） |
 | `triage` | `opus` | 判断收敛 + 选下一轮 frontier | 判断质量直接决定停不停、追什么，给最强档 |
-| `harvest` | `haiku` | 扫 findings/*.md frontmatter → 汇编 index.md 索引 | 纯 IO + awk/grep，haiku 够用且省 token |
+| `harvest` | `haiku` | `fs_glob` + `fs_read` 汇编 findings index | 纯 MCP IO，haiku 够用且省 token |
 | `synth` | `opus` | 索引驱动选择性读 L2 + 写终稿 report | 综合叙事质量最重，给最强档 |
 
 - 优先级：env `DEEP_RESEARCH_MODELS` → `.katana` → 默认。缺省或非法值由 workflow 逐档回退到上表默认。
@@ -64,36 +57,19 @@ deep_research_models=worker:sonnet,triage:opus,synth:opus,harvest:haiku
 ### A. 对话预备阶段（主 agent，轻）
 1. `date "+%Y-%m-%d %H:%M"` 确认时间。
 2. 解析输入 → 生成可读自然语言主题名（空格分隔，如「PPO vs SAC 对比」）。
-3. 确定知识库根（**结果必须是绝对路径**，G12.2 不靠下游展开 env）。deep-research 插件不自带 katana-config 帮手，故在此就地解析（语义对齐 katana KB-root 锚点：env > `.katana` 配置值 > `.katana` 所在目录 > `CLAUDE_PROJECT_DIR` > pwd），基准是 KB-root 而非 cwd：
-
-   ```bash
-   # a) 找被采用的 .katana：KATANA_CONFIG_FILE > $CLAUDE_PROJECT_DIR/.katana > ~/.katana
-   KATANA=""
-   if [ -n "${KATANA_CONFIG_FILE:-}" ]; then KATANA="$KATANA_CONFIG_FILE"
-   elif [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -f "$CLAUDE_PROJECT_DIR/.katana" ]; then KATANA="$CLAUDE_PROJECT_DIR/.katana"
-   elif [ -f "$HOME/.katana" ]; then KATANA="$HOME/.katana"; fi
-   # b) 读 deep_research_kb_dir（env 优先；否则从 .katana 取值）
-   KBVAL="${DEEP_RESEARCH_KB_DIR:-}"
-   if [ -z "$KBVAL" ] && [ -n "$KATANA" ]; then
-     KBVAL="$(awk -F= '$1=="deep_research_kb_dir"{v=substr($0,length($1)+2);sub(/#.*/,"",v);gsub(/^[[:space:]]+|[[:space:]]+$/,"",v);print v;exit}' "$KATANA")"
-   fi
-   # c) KB-root 兜底：.katana 所在目录 > CLAUDE_PROJECT_DIR > pwd
-   if [ -n "$KATANA" ]; then KBROOT="$(cd "$(dirname "$KATANA")" && pwd)"; else KBROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"; fi
-   # d) 把 KBVAL 解析成绝对：空/`.` → KBROOT；~ → $HOME；/* → 原样；否则 join KBROOT
-   case "$KBVAL" in
-     ""|".") KB="$KBROOT";;
-     "~") KB="$HOME";; "~/"*) KB="$HOME/${KBVAL#\~/}";;
-     /*) KB="$KBVAL";; *) KB="$KBROOT/$KBVAL";;
-   esac
-   echo "$KB"   # 绝对 KB 根，作为下面 Workflow args.kbDir
-   ```
-
-   先读 `$KB/CLAUDE.md` 或 `$KB/AGENTS.md`（如存在）了解库结构与检索约定；建目录 `$KB/DeepThought/<主题名>/` 与 `$KB/DeepThought/<主题名>/findings/`。
-   同时按同优先级读取 `deep_research_sources` / `deep_research_max_width` / `deep_research_models`（env → `.katana` → 默认），解析出命名源映射 `{name: entry}`、宽度值与三档模型 `{worker, triage, synth}`。
-   **worker 档按 topic 意图定**（这是「按意图选模型」的唯一时机，启动后不可变）：在解析出的默认基础上判断——纯事实扫库 / 信息聚合类（多数线索是 Grep/Read/简单网页抓取）→ 下调 `worker:haiku` 省成本；技术深挖 / 需要读代码、推理因果、辨析冲突证据的硬研究 → 上调 `worker:opus` 保质量；拿不准就用默认 `sonnet`。triage/synth 一般保持 `opus`，除非用户另有指定。
+3. 生成 wiki 逻辑路径 `DeepThought/<主题名>`（或使用用户显式指定的该域内
+   `topicPath`）。用 wiki MCP `fs_create` 建主题目录与 `findings/`；需了解 wiki
+   结构时用 `fs_read("WIKI.md")`，不得读取 client 物理路径。
+   同时按优先级读取 `deep_research_sources` / `deep_research_max_width` /
+   `deep_research_models`（env → `.katana` → 默认），解析命名源、宽度和模型。
+   **worker 档按 topic 意图定**（启动后不可变）：纯事实聚合类下调
+   `worker:haiku`；技术深挖、读代码或辨析冲突证据上调 `worker:opus`；拿不准用
+   `sonnet`。triage/synth 一般保持 `opus`，除非用户另有指定。
 4. 把输入拆成 3-6 条初始线索，每条形如
    `{ id:"c0", text:"...", local:<bool>, suggested_sources:[...], depth:0 }`。
-   suggested_sources 三类可选：①KB 内子目录（此时 local=true）②`web` ③已声明的命名源名（如 `feishu`/`gitlab`/`reddit`/`code`，按线索性质判断——「XX 的群里讨论」→feishu、「XX 的 MR/issue」→gitlab/linear）；②③均 local=false。worker 解析时，每个命名源名（包括 `web`）映射到 `deep_research_sources` 中的对应 entry，即调用 `/retrieval:<name>`——retrieval plugin 自带 fallback 梯度与可信度，worker 无需自行处理降级。
+    suggested_sources 可选：①`wiki`（`wiki_search`）②`work-folder`（`wf_search`）
+    ③`web` ④已声明命名源名。命名源 entry 是 `/retrieval:<name>` 入口，绝不是
+    文件路径；fallback 与可信度由 retrieval plugin 承载。
    **不强制澄清提问**（Workflow 中途问不了，低摩擦直接跑；仅当输入完全无法解析时才追问）。
 
 ### B. 调用 Workflow（后台跑 BFS + harvest + 综合）
@@ -101,12 +77,12 @@ deep_research_models=worker:sonnet,triage:opus,synth:opus,harvest:haiku
 ```
 Workflow({
   scriptPath: "<本 skill 的 base directory>/workflow.js",  // Skill 加载时给出 base directory，填绝对路径
-  args: { topic: "<原问题>", topicDir: "<KB根绝对路径>/DeepThought/<主题名>", kbDir: "<KB根绝对路径>",
+  args: { topic: "<原问题>", topicPath: "DeepThought/<主题名>",
           skillDir: "<本 skill 的 base directory 绝对路径>",
           sources: { ...阶段A解析的命名源映射，无则传 {} }, maxWidth: <阶段A解析的宽度，未配置则省略>,
           models: { worker: "<档>", triage: "<档>", synth: "<档>" },  // 阶段A定好的三档，缺省档省略由 workflow 回退默认
           initialClues: [ ...上面拆的线索 ] }
-  // ⚠️ topicDir / kbDir 必须是绝对路径；workflow subagent 的 CWD 不保证等于项目根
+  // topicPath 必须是 DeepThought/ 下的 wiki MCP 逻辑路径
 })
 ```
 （本 skill 指令即 Workflow 的合法 opt-in。）Workflow 会一轮轮 fan-out worker、triage 判断收敛、最后 synthesis 写产物。期间可 `/workflows` 看进度、随时 kill。
@@ -117,31 +93,32 @@ Workflow({
 Workflow 返回后：展示 Executive Summary + Key Takeaways；提议
 ①扩充某条线索（重新发起一次 Workflow）②把 topics.md 中的种子提炼为知识库笔记（遵循 KB 自身的笔记约定，如有）。
 
-## 产物（$KB/DeepThought/<主题>/）
+## 产物（wiki MCP 逻辑路径 `DeepThought/<主题>/`）
 
 `clue_board.md`（triage 写的快照）· `findings/r{n}-c{id}__<source>.md`（worker 按源写的 per-source L1+L2）· `findings/index.md`（harvester 汇编的索引表）· `sources.md`/`topics.md`/`report.md`（synthesis 写）。
 
 ### per-source 文件与 reports[] 契约
 
-- **per-source 文件名**：`findings/r{round}-c{clue.id}__<源名>.md`（双下划线 `__` 分隔源名），每个源一个文件，frontmatter 含 `source / anchor / credibility / digest`。
-- **worker 回传 reports[]**：替代原来的扁平 `findings[] + l2_file`；每个 report 元素含 `source / anchor / credibility / digest / l2_file`，一条线索可产出多个 per-source reports。
-- **harvester 节点**：Explore 后、Synthesize 前，跑 awk/grep 扫全部 `findings/*.md` frontmatter，汇编写 `findings/index.md`（含 clue_id/round/source/credibility/digest/path 索引表）。
-- **synth 索引驱动**：先 Read `index.md`，按 credibility/relevance 选择性读 L2 正文，不再全量盲读。
+- **per-source 文件名**：`findings/r{round}-c{clue.id}__<源名>.md`，每个源一个文件，frontmatter 含 `source / anchor / evidence_credibility / digest`。
+- **worker 回传 reports[]**：每项含 `source / anchor / evidence_credibility / digest / l2_file`。
+- **harvester 节点**：用 wiki MCP `fs_glob` + `fs_read` 扫 findings frontmatter，以 `fs_write` 写 `findings/index.md`。
+- **synth 索引驱动**：先 `fs_read` index，按 evidence_credibility/relevance 选择性读 L2。
 
 ## 停止语义
 停 = triage `converged=true`（主问题已可充分回答）或 frontier 枯竭。**绝不因轮数/预算/成本停**；`SAFETY_CAP` 仅防脚本失控。
 
 ## 恢复未完成研究
-读 `DeepThought/<主题>/`：有 `clue_board.md` 快照→从 Frontier 重建 initialClues 再发起 Workflow；有 topics 无 report→只发起 synthesis。有 `findings/index.md` → harvester 已完成，可跳 Harvest 直接 Synthesize。
+用 wiki MCP `fs_glob` / `fs_read` 检查 `DeepThought/<主题>/`：有 clue_board
+则从 Frontier 重建线索；有 topics 无 report 则只综合；有 findings/index.md 可跳过 Harvest。
 
 ## 通用规则
-- 探索路径只读，禁 mutation；本地检索优先遵循 KB 自带的检索约定（CLAUDE.md/AGENTS.md 声明的路由/skill），无约定时用通用文件检索。
-- 外部源（web/平台）优先经 `/retrieval:<source>`（retrieval plugin 已装时），无则 fallback WebSearch/WebFetch / 平台 CLI；本地优先 `/retrieval:search-note|code`。
+- 探索源只读；wiki 域只用 `wiki_search`/`fs_read`，工作记录只用 `wf_search`/work-folder `fs_read`，未迁子树才可用 `/retrieval:search-note|code`。
+- 外部源优先经 `/retrieval:<source>`，无则 fallback WebSearch/WebFetch / 平台只读 CLI。
 - 来源标注 `[本地]/[互联网]/[平台:<源名>]/[AI]`；可信度 high/medium/low/conflicted。
 
 ## 模板
 | 模板 | 用途 | 写入者 |
 |------|------|--------|
-| templates/finding.md | per-source L1+L2 原始素材（单源卡片头：source/credibility/digest） | worker |
+| templates/finding.md | per-source L1+L2 原始素材（单源卡片头：source/evidence_credibility/digest） | worker |
 | templates/clue_board.md | 线索快照 | triage agent |
 | templates/sources.md / topics.md / report.md | 最终产物 | synthesis agent |
