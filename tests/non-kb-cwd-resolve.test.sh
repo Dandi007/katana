@@ -10,10 +10,9 @@
 #   - KATANA_KB_ROOT exported to the temp KB
 #   - cwd set to a temp dir that has nothing to do with the KB
 #
-# For each of the 5 path-bearing session-start hooks we assert (positive) the
-# injected additionalContext carries the "<KB>/..." ABSOLUTE path, and (negative)
-# it never leaks a bare relative config value, the unrelated cwd, or a stray
-# CLAUDE_PROJECT_DIR. (The guide hook carries no path and is out of scope.)
+# Legacy local domains (writing, feishu-docs) still inject resolved paths.
+# Migrated domains (work-folder, wiki, memory) must not expose either absolute
+# or relative storage paths. All hooks must avoid cwd / project-dir leakage.
 #
 # bash 3.2 compatible; C-locale safe (no multibyte allowlist; uses ASCII-only
 # config values so assertions hold under any locale).
@@ -109,15 +108,23 @@ assert_abs_no_bare() {
     esac
 }
 
+assert_no_storage_path() {
+    local label="$1" out="$2" rel="$3"
+    case "$out" in
+        *"$KB/$rel"*|*"$rel"*) bad "$label / no storage path" "configured path leaked in: $out" ;;
+        *) ok "$label / no storage path" ;;
+    esac
+}
+
 # ----------------------------------------------------------------------------
 # work-folder
 out="$(run_hook work-folder)"
-assert_abs_no_bare "work-folder" "$out" "$WF_REL"
+assert_no_storage_path "work-folder" "$out" "$WF_REL"
 neg_common "work-folder" "$out"
 
 # wiki
 out="$(run_hook wiki)"
-assert_abs_no_bare "wiki" "$out" "$WIKI_REL"
+assert_no_storage_path "wiki" "$out" "$WIKI_REL"
 neg_common "wiki" "$out"
 
 # writing
@@ -130,16 +137,13 @@ out="$(run_hook feishu-docs)"
 assert_abs_no_bare "feishu-docs" "$out" "$FEISHU_REL"
 neg_common "feishu-docs" "$out"
 
-# memory — footer reports project=<KB>/memory and the card name is scanned.
+# memory — already MCP-only; its configured legacy project path must stay hidden.
 out="$(run_hook memory)"
 case "$out" in
-    *"project=$KB/$MEM_REL"*) ok "memory / project dir resolved to kb-root" ;;
-    *) bad "memory / project dir resolved to kb-root" "missing [project=$KB/$MEM_REL]: $out" ;;
+    *"<memory-index>"*) ok "memory / MCP index injected" ;;
+    *) bad "memory / MCP index injected" "missing memory-index: $out" ;;
 esac
-case "$out" in
-    *"nonkb-card"*) ok "memory / card under kb-root scanned" ;;
-    *) bad "memory / card under kb-root scanned" "card not scanned: $out" ;;
-esac
+assert_no_storage_path "memory" "$out" "$MEM_REL"
 neg_common "memory" "$out"
 
 echo "-------------------------------------------"

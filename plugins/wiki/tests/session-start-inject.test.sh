@@ -52,10 +52,10 @@ case "$out" in
     *) bad "hook injects using-wiki convention" "output did not contain wiki convention keyword" ;;
 esac
 
-# WIKI_ROOT placeholder must be replaced with absolute path
+# Zero-mount convention must not expose the physical wiki root.
 case "$out" in
-    *"$KB"*) ok "hook replaces WIKI_ROOT placeholder with absolute path" ;;
-    *) bad "hook replaces WIKI_ROOT placeholder with absolute path" "kb path [$KB] not found in output" ;;
+    *"$KB"*) bad "hook hides physical wiki root" "kb path [$KB] leaked in output" ;;
+    *) ok "hook hides physical wiki root" ;;
 esac
 
 echo "-------------------------------------------"

@@ -3,7 +3,7 @@
 > checkpoint 在 save/resume 时按本文件定义 artifact 的语义与格式。
 > （原先这些定义随 SessionStart hook 全文常驻注入；2026-06-15 下沉到此，
 > 仅在 `work-folder:checkpoint` 调用时载入，session 常驻只留一句话锚点。）
-> work folder 实际路径以 session 注入的启用锚点 / `.katana` 的 `work_folder_path` 为准。
+> work folder 的逻辑路径 / id 由 `wf_create`、`wf_search`、`wf_resume` 返回；物理根由 MCP server 管理。
 
 ## 每类文件记录什么
 
@@ -47,7 +47,7 @@ links: ["[[other-brief]]"]    # 可选
 - `wf_save` / `wf_resume` → 写入/恢复即刷新 `updated`，并把 status 拉回 active（completed 不复活）
 - `wf_reindex` → 扫全库 `_brief.md`，按 `updated` 倒序重生成顶层 `INDEX.md`（`wf_create/save` 只维护单个 folder，INDEX 需显式 reindex；session-harvest 追加 progress 后也会自动 touch + reindex）
 
-手工整理老 folder 时可用 `wf-touch <folder>` / `wf-reindex <root>` CLI，或 `wf-lint` 校验合规。
+整理老 folder 时用 `wf_resume` 绑定记录、work-folder MCP 的 `fs_read` / `fs_edit` 修订，再用 `wf_save` 和 `wf_reindex` 刷新状态与索引。
 
 ### golden-order.md
 
@@ -149,7 +149,7 @@ links: ["[[other-brief]]"]    # 可选
 ## Status
 - **Phase:** <当前阶段>
 - **Status:** <brainstorming / execution / completed>
-- **Work folder:** <work folder 绝对路径>
+- **Work folder:** <wf_resume 返回的逻辑路径 / id>
 
 ## Key Context
 <从 context.md 提取关键路径和环境信息摘要>
@@ -179,10 +179,6 @@ links: ["[[other-brief]]"]    # 可选
 当前用户消息 > golden-order.md > goal.md / spec.md > plan.md > progress.md > agent 历史
 ```
 
-## 默认路径
+## 路径治理
 
-```
-docs/work-records/YYYY/MM/DD/<topic-slug>/
-```
-
-项目可在自己的 CLAUDE.md / AGENTS.md 中声明覆盖默认路径；用户给定路径始终优先。
+新记录的路径由 `wf_create` 按 server 策略分配。用户给定逻辑路径 / id 始终优先交给 `wf_resume`；client 不推导或访问物理根。

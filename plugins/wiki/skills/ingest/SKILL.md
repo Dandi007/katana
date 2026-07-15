@@ -1,17 +1,17 @@
 ---
 name: ingest
-description: The wiki's single write pipeline. Use whenever content should be saved into the wiki — importing a source (file/URL), capturing a durable insight from this conversation, or processing the inbox. Triggers on any "put X into the wiki / 把 X 入库 / 收录这个" intent, in any language. This is the only governed path that writes pages; direct Write is an anti-pattern.
+description: The wiki's single write pipeline. Use whenever content should be saved into the wiki — importing a source (file/URL), capturing a durable insight from this conversation, or processing the inbox. Triggers on any "put X into the wiki / 把 X 入库 / 收录这个" intent, in any language. All wiki changes go through katana-wiki-mcp governance.
 ---
 
 # Ingest
 
 The single write pipeline. Every page, link, index entry, and log line the wiki
-gains is created here — never by a bare `Write`. This pipeline is where the four
+gains is created here through katana-wiki-mcp. This pipeline is where the four
 failure modes of AI-maintained knowledge (mediocrity collapse, model collapse,
 cognitive offloading, container-boundary erosion) are held back: provenance,
 mandatory linking, zone write policy, and the resist-table all live in these steps.
 
-`wiki_root` is injected by the using-wiki hook. Run `date "+%Y-%m-%d %H:%M"`
+The wiki's physical root is server-owned and must not be resolved by the client. Run `date "+%Y-%m-%d %H:%M"`
 before any timestamped step (raw archival, log, commit) — use that real time.
 
 ## Input — four shapes
@@ -28,7 +28,7 @@ Then run the eight steps in order.
 
 ## 1. Read schema
 
-Read `<wiki_root>/WIKI.md` — it is the contract, not optional.
+Read `WIKI.md` with wiki MCP `fs_read` — it is the contract, not optional.
 - Determine the target **zone** from **§2** (path, purpose, naming).
 - Pull that zone's **write policy**, **page template**, and **naming rule** (§2).
   If the schema **dispatches templates by a frontmatter field** (e.g. a `type`/`类型`
@@ -47,9 +47,12 @@ Do not assume defaults; the schema overrides this skill where they differ.
 
 ## 2. Read source
 
-- **Local file / inbox:** read it directly.
+- **Inbox:** read it with wiki MCP `fs_read`.
+- **Explicit local file outside the wiki:** use the appropriate source adapter;
+  this exception does not permit native access to any wiki path.
 - **URL:** fetch and save a copy into the raw layer first (the path declared in
-  schema §5; if none, `<wiki_root>/raw/`), then read the **saved copy**. This keeps
+  schema §5; if none, `raw/`), then read the **saved copy** with `fs_read`. Save
+  it through `wiki_ingest_plan` → `wiki_ingest_apply`. This keeps
   raw immutable and provenance linkable — never ingest straight from a live URL.
   - **Prefer retrieval adapters when available:** if a retrieval plugin exposes `/retrieval:*` sources, fetch external sources through the matching one (tweets→`/retrieval:twitter`, reddit→`/retrieval:reddit`, web→`/retrieval:web`, repos→`/retrieval:code`/`/retrieval:github`) to inherit their fallback ladders and credibility — then save that result to the raw layer. Fall back to direct fetch if no retrieval plugin is installed.
 - **Conversation capture:** the relevant turns are the source; note them for §8 provenance.
@@ -60,8 +63,8 @@ report — never propose from partial or imagined content.
 ## 3. Orient
 
 Find the candidate set of existing pages this content touches:
-- Read the index / relevant MOC.
-- `grep` the wiki for the content's key terms **and their synonyms**.
+- Call `wiki_search` for the content's key terms **and their synonyms**.
+- Use `fs_read` for the returned index/MOC and candidate pages.
 List each candidate with its relation to the new content: **will update** /
 **will link** / **unrelated**. This is the comparison pass that prevents duplicate pages.
 
@@ -113,30 +116,33 @@ Plus one final item: `[INDEX] <index/MOC diff>`. In non-interactive mode (§7),
 you catch yourself leaning on any excuse in that table, revise the package before
 proceeding. This step is mandatory, not advisory.
 
-## 7. Apply per zone write policy
+## 7. Plan and apply per zone write policy
 
-- **autonomous** zone → write directly (proceed to §8).
+Submit the complete package to `wiki_ingest_plan`. Treat the returned plan,
+validation errors and approval requirements as authoritative.
+
+- **autonomous** zone → apply the validated plan with `wiki_ingest_apply` (proceed to §8).
 - **propose** zone → present the full proposal package and confirm each item via
   AskUserQuestion before writing.
 - **Non-interactive (`claude -p`):** AskUserQuestion is unavailable. In a propose
-  zone, write **only** if the prompt explicitly pre-authorizes it (e.g. "本次提案视为已批准"
+  zone, call `wiki_ingest_apply` **only** if the prompt explicitly pre-authorizes it (e.g. "本次提案视为已批准"
   / "proposals pre-approved"). Otherwise do not write any page — output the full
-  proposal text and you MUST still append the log line
+  proposal text and use wiki MCP `fs_edit` to append the log line
   `## [YYYY-MM-DD HH:MM] ingest | proposed (not applied): <source>` to `log.md`
   — skipping this journaling is a pipeline violation, then stop.
 
 ## 8. Write + record
 
-- Write all approved files (new pages, updated pages, index/MOC).
+- `wiki_ingest_apply` writes all approved pages, reciprocal links, index/MOC changes and journal records.
 - **Inbox archival:** after a successful write, move the processed inbox file into
-  the raw layer (`git mv inbox/<file> <raw path>/`) so inbox holds only pending
+  the raw layer with wiki MCP `fs_rename` so inbox holds only pending
   sources and provenance points at the immutable raw copy. In propose zones without
   authorization, leave inbox untouched.
-- Append to `<wiki_root>/log.md`:
+- Confirm that `wiki_ingest_apply` appended to `log.md`:
   `## [YYYY-MM-DD HH:MM] ingest | <source>` followed by body lines listing every
   **created** and **updated** page.
-- `git commit` with message `wiki: ingest <source>` — unless the schema declares
-  commits off.
+- Commit governance belongs to the MCP server; never run client-side git commands
+  against wiki storage.
 
 ## Boundary
 

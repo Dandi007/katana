@@ -12,70 +12,39 @@ that. Its core is the schema's **antagonist rule** (§7): *contradictions must b
 named as disagreements and cross-annotated on both pages — never smoothed into
 consensus.* Lint surfaces tension; it does not resolve it away.
 
-`wiki_root` is injected by the using-wiki hook. Run `date "+%Y-%m-%d %H:%M"`
+Wiki content is available only through katana-wiki-mcp. Run `date "+%Y-%m-%d %H:%M"`
 before any timestamped step (report path, log) — use that real time.
 
 ## 0. Scope
 
-Read `<wiki_root>/WIKI.md` **§7** (stale threshold, exemptions) and §2 (zones,
-write policy) — the contract. Then pick scope:
+Use wiki MCP `fs_read` to read `WIKI.md` **§7** (stale threshold, exemptions)
+and §2 (zones, write policy) — the contract. Then pick scope:
 
 - **Full** — every page.
 - **Zone** — one zone's pages.
-- **Incremental** — only pages changed since the last lint. Find the baseline:
-  `grep "^## \[" <wiki_root>/log.md | grep "| lint |"` → last lint timestamp.
-  Enumerate pages modified after it. **Default** (the wiki may not be a git
-  repo): `find "<wiki_root>" -type d \( -name .wiki -o -name .obsidian -o -name
-  .git -o -name .trash \) -prune -o -type f -name '*.md' -newermt "<baseline>"
-  -print`. In a git repo you *may* optimize with `git log --since="<baseline>"
-  --name-only`. First run ever (no lint line), or baseline unparseable by
-  `-newermt` → fall back to **full**.
+- **Incremental** — only pages changed since the last lint. The server reads the
+  last lint journal entry and computes the changed set. First run or an invalid
+  baseline falls back to **full**.
 
 Ask the user (AskUserQuestion) when scope is unstated. **Non-interactive** →
 default **incremental** (full on first run).
 
 ## 1. Mechanical checks
 
-Deterministic — run grep/awk ad hoc, do not author a script. Examples use the
-placeholder `<wiki_root>`.
+Call `wiki_lint_mechanical` with the selected full / zone / incremental scope.
+The server owns recursive enumeration, journal baselines, interference-dir
+exclusion and deterministic path handling. Use `fs_glob` only when a returned
+finding requires an explicit page list, and `fs_read` to inspect those pages.
+Never recreate the checks with client filesystem commands.
 
-**Enumerate pages with `find`, never `ls`/`**/*.md`** (recursive, space/CJK
-safe, works on bash 3.2 without globstar). Every page-listing and recursive grep
-**must prune interference dirs** so the lint report and Obsidian/git internals
-never self-pollute (a sample `[[wikilink]]` inside a past report would otherwise
-register as a phantom target). The shared enumerator — reuse it verbatim below:
-
-```
-find "<wiki_root>" -type d \( -name .wiki -o -name .obsidian -o -name .git -o -name .trash \) -prune -o -type f -name '*.md' -print
-```
-
-For recursive `grep`, pass `--exclude-dir=.wiki --exclude-dir=.obsidian
---exclude-dir=.git --exclude-dir=.trash` (or pipe the `find` list into
-`grep -f`). **Orphan/broken-link keying assumes unique basenames across zones**
-(the Obsidian convention); if the schema permits duplicate basenames, key on the
-relative path instead.
-
-- **Orphan pages** — a page no wikilink points to. List all page basenames,
-  extract every `[[target]]` (strip `|alias` and `#anchor`), take the difference.
-  Both sides sorted with `LC_ALL=C sort` for a deterministic `comm`:
-  `comm -23 <(find "<wiki_root>" -type d \( -name .wiki -o -name .obsidian -o -name .git -o -name .trash \) -prune -o -type f -name '*.md' -print | sed 's#.*/##;s#\.md$##' | LC_ALL=C sort -u) <(find "<wiki_root>" -type d \( -name .wiki -o -name .obsidian -o -name .git -o -name .trash \) -prune -o -type f -name '*.md' -exec grep -ho '\[\[[^]]*\]\]' {} + | sed 's/\[\[//;s/\]\]//;s/|.*//;s/#.*//' | LC_ALL=C sort -u)`
-- **Broken links** — a `[[target]]` whose page file does not exist: invert the
-  diff above (swap to `comm -13`, same two `LC_ALL=C`-sorted streams).
-- **Missing required frontmatter** — per schema §3 (e.g. `created`, `sources`,
-  `tags`), iterate the `find` enumerator and `grep -L '^created:'` each page
-  (repeat per field).
+- **Orphan pages** — consume the orphan set returned by `wiki_lint_mechanical`.
+- **Broken links** — consume its unresolved-target set.
+- **Missing required frontmatter** — consume its per-field schema violations.
   当 §3 声明了 per-page **summary 字段**（一行自描述摘要，如本库的 `摘要`）时，
   缺它的页同样计入本检查 —— 它是 backfill-class finding（修复见 §4），不是单纯报告项。
-- **Index/MOC consistency** — pages listed in `index.md` with no file, and
-  existing pages absent from any index/MOC (diff index links against the page list).
-- **Naming violations** — pages breaking the zone naming rule in schema §2.
-  **Iterate every zone row in §2** (not just `notes/`); for each, check **files
-  only, one level deep**: `find "<wiki_root>/<zone-path>" -maxdepth 1 -type f
-  -name '*.md'`. **Derive the reject pattern from that zone's Naming column** — do
-  *not* hardcode `[a-z0-9-]`. Example for an ASCII kebab-case zone:
-  `… | sed 's#.*/##' | grep -vE '^[a-z0-9-]+\.md$'`. If §2 declares no naming
-  rule for a zone, or the rule is CJK/free-form (no machine-checkable pattern),
-  **skip this check for that zone and note it in the report's Skipped section**.
+- **Index/MOC consistency** — consume its missing-page and unindexed-page sets.
+- **Naming violations** — consume its per-zone naming results. If §2 declares no
+  machine-checkable rule, preserve the server's skipped reason in the report.
 
 Drop any hit covered by the §7 exemption list before reporting it.
 
@@ -101,10 +70,10 @@ Drop any hit covered by the §7 exemption list before reporting it.
 
 ## 3. Report
 
-Write the report to `<wiki_root>/.wiki/lint/YYYYMMDD-HHMM.md` using
-`templates/lint-report.md` (create the dir if missing). Every report section has
-an empty state — write `— none —` when a section has no findings. Then append to
-`<wiki_root>/log.md`:
+Write `.wiki/lint/YYYYMMDD-HHMM.md` with wiki MCP `fs_write`, using the
+skill-local `templates/lint-report.md` template. Every report section has an
+empty state — write `— none —` when a section has no findings. Then use `fs_edit`
+to append to `log.md`:
 `## [YYYY-MM-DD HH:MM] lint | <scope>: <N issues>`. A clean run is still logged —
 N=0 → `## [YYYY-MM-DD HH:MM] lint | full: 0 issues — clean`.
 
@@ -112,8 +81,8 @@ N=0 → `## [YYYY-MM-DD HH:MM] lint | full: 0 issues — clean`.
 
 Per finding, propose a fix and route it through the zone's write policy (schema §2):
 
-- **autonomous** zone → apply the fix directly.
-- **propose** zone → present each fix via AskUserQuestion and confirm before writing.
+- **autonomous** zone → apply approved annotations/backfills with wiki MCP `fs_edit`.
+- **propose** zone → present each fix via AskUserQuestion and confirm before `fs_edit`.
 
 **Lint may apply only:** conflict/stale annotations, broken-link fixes, index
 entry back-fills, **and summary-field backfill** (filling a missing
@@ -139,7 +108,7 @@ So lint MAY generate and write it, governed as follows instead of per-fix propos
    propose-zone per-fix AskUserQuestion rule above, for this backfill type only**):
    when backfilling many pages (e.g. a first full-library run), generate a **random sample of N=10**
    first and show them for human QC of quality. On approval, **write all remaining
-   pages autonomously — do NOT AskUserQuestion per page** (that does not scale to
+   pages autonomously with `fs_edit` — do NOT AskUserQuestion per page** (that does not scale to
    hundreds). A wrong summary is cheap to regenerate (rerun lint). In
    non-interactive mode, only run the batch if the prompt pre-authorizes it.
 4. **Scale via Workflow when large:** for a big backfill, fan out summarizers

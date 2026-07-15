@@ -1,4 +1,8 @@
 ---
+创建日期: <YYYY-MM-DD>
+类型: 卡片
+sources: ["<至少一个本研究 source anchor>"]
+摘要: "<研究核心结论，最多 40 字>"
 name: <topic-slug>
 date: <YYYY-MM-DD>
 query: "<用户的原始研究问题，原文保留>"
@@ -8,6 +12,8 @@ tags: [tag1, tag2, tag3]
 ---
 
 # <研究标题>
+
+研究入口：[[WIKI]]
 
 ## Executive Summary
 

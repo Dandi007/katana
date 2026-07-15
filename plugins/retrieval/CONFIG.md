@@ -7,12 +7,12 @@
 | reddit_archive_api | reddit 降级存档 API | https://arctic-shift.photon-reddit.com | 否 |
 | twitter_chrome_profile | twitter 登录态 profile 目录 | ~/.playwright-agent-profile | 否（登录态在目录内） |
 | xiaohongshu_chrome_profile | 小红书登录态 profile 目录 | ~/.playwright-agent-profile | 否（登录态在目录内） |
-| xiaohongshu_raw_dir | 小红书批量下载落盘根目录（相对值基于 KB 根，经 katana_resolve_path 解析） | 转换文档/web | 否 |
+| xiaohongshu_raw_dir | 小红书批量下载的 wiki 逻辑路径（只交给 wiki MCP） | 转换文档/web | 否 |
 | gitlab_host | gitlab 主机 | code.agibot.com | 否 |
 | gitlab_token_env | 持有 gitlab token 的 env 变量名 | GITLAB_TOKEN_RW | 否（仅变量名） |
 | linear_token_env | 持有 linear key 的 env 变量名 | LINEAR_API_KEY | 否 |
 | search_note_embedding_url | 本地 embedding 端点 | http://<133>:18081/v1/embeddings | 否 |
-| kb_dir | 本地知识库根（只读检索输入；相对值基于 KB 根，经 katana_resolve_path 解析） | . | 否 |
+| kb_dir | 未迁目录的本地只读检索根（search-note 强制 scope；wiki/work-folder 不使用） | . | 否 |
 | code_root_env | code root env 变量名 | AGENT_CODE_ROOT | 否 |
 | code_root_fallback_env | code root 回退 env 变量名 | AGENT_CODE_ROOT_FALLBACK | 否 |
 | code_clone_category_default | 自动 clone 默认落的类别子目录 | third_party | 否 |

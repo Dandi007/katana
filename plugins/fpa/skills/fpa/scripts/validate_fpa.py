@@ -3,6 +3,8 @@
 
 两种模式：
   CLI:  python3 validate_fpa.py <FPA-*.md | RUN-REPORT-*.md>   # 失败 exit 1
+  MCP:  python3 validate_fpa.py --stdin-fpa FPA-<slug>.md       # stdin 读正文
+        python3 validate_fpa.py --stdin-suite <slug>            # stdin 读 JSON bundle
   Hook: python3 validate_fpa.py --hook              # stdin 读 PostToolUse JSON，
                                                     # 文件名匹配才校验，失败 exit 2
 
@@ -63,14 +65,8 @@ def section_by_token(sections: dict[str, str], token: str) -> str | None:
     return None
 
 
-def validate(path: str) -> list[str]:
+def validate_text(text: str) -> list[str]:
     issues: list[str] = []
-    try:
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
-    except OSError as e:
-        return [f"无法读取文件: {e}"]
-
     # frontmatter
     fm = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
     if not fm:
@@ -127,6 +123,31 @@ def validate(path: str) -> list[str]:
     elif not re.search(r"^- \S", ref.group(1), re.MULTILINE):
         issues.append("References 没有条目（至少一条 `- <出处>`）")
 
+    return issues
+
+
+def validate(path: str) -> list[str]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return validate_text(f.read())
+    except OSError as e:
+        return [f"无法读取文件: {e}"]
+
+
+def validate_suite_content(fpa_text: str, verdicts_data: object, slug: str) -> list[str]:
+    """Validate an MCP-backed suite without requiring its server filesystem."""
+    issues = [f"FPA-{slug}.md: {issue}" for issue in validate_text(fpa_text)]
+    sections = parse_sections(fpa_text)
+    validation_body = section_by_token(sections, "Validate") or ""
+    review_rows = len(table_data_rows(validation_body))
+    verdicts = verdicts_data.get("verdicts") if isinstance(verdicts_data, dict) else verdicts_data
+    if not isinstance(verdicts, list) or not verdicts:
+        issues.append("adversarial-verdicts.json 缺少非空 verdicts 数组")
+    elif len(verdicts) < review_rows:
+        issues.append(
+            f"verdict 原文条数({len(verdicts)}) < FPA 文档 Validate 裁决表行数({review_rows})"
+            "——正文裁决多于原始记录，疑似编造"
+        )
     return issues
 
 
@@ -197,8 +218,42 @@ def main() -> None:
             sys.exit(2)
         sys.exit(0)
 
+    if "--stdin-fpa" in sys.argv:
+        index = sys.argv.index("--stdin-fpa")
+        if len(sys.argv) <= index + 1 or not FPA_NAME.match(os.path.basename(sys.argv[index + 1])):
+            print("usage: validate_fpa.py --stdin-fpa FPA-<slug>.md", file=sys.stderr)
+            sys.exit(1)
+        issues = validate_text(sys.stdin.read())
+        if issues:
+            print("FAIL:\n- " + "\n- ".join(issues))
+            sys.exit(1)
+        print("PASS: FPA 机械验收通过")
+        sys.exit(0)
+
+    if "--stdin-suite" in sys.argv:
+        index = sys.argv.index("--stdin-suite")
+        if len(sys.argv) <= index + 1 or not sys.argv[index + 1].strip():
+            print("usage: validate_fpa.py --stdin-suite <slug>", file=sys.stderr)
+            sys.exit(1)
+        try:
+            payload = json.load(sys.stdin)
+        except (json.JSONDecodeError, ValueError) as error:
+            print(f"FAIL: stdin suite 不是合法 JSON: {error}")
+            sys.exit(1)
+        fpa_text = payload.get("fpa") if isinstance(payload, dict) else None
+        verdicts = payload.get("verdicts") if isinstance(payload, dict) else None
+        if not isinstance(fpa_text, str):
+            print("FAIL: stdin suite 缺少字符串字段 fpa")
+            sys.exit(1)
+        issues = validate_suite_content(fpa_text, verdicts, sys.argv[index + 1].strip())
+        if issues:
+            print("FAIL:\n- " + "\n- ".join(issues))
+            sys.exit(1)
+        print("PASS: FPA 三件套机械验收通过")
+        sys.exit(0)
+
     if len(sys.argv) < 2:
-        print("usage: validate_fpa.py <FPA-*.md | RUN-REPORT-*.md> | --hook", file=sys.stderr)
+        print("usage: validate_fpa.py <FPA-*.md | RUN-REPORT-*.md> | --hook | --stdin-fpa <name> | --stdin-suite <slug>", file=sys.stderr)
         sys.exit(1)
     issues = dispatch(sys.argv[1])
     if issues is None:

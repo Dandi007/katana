@@ -53,6 +53,10 @@ def main():
         return subprocess.run([sys.executable, VALIDATE, path],
                               capture_output=True, text=True).returncode
 
+    def run_stdin(*args, content):
+        return subprocess.run([sys.executable, VALIDATE, *args], input=content,
+                              capture_output=True, text=True).returncode
+
     def write(d, name, content):
         p = os.path.join(d, name)
         with open(p, "w", encoding="utf-8") as f:
@@ -68,6 +72,18 @@ def main():
 
     with tempfile.TemporaryDirectory() as d:
         check("valid new-skeleton doc PASS", run(write(d, "FPA-valid.md", VALID_DOC)) == 0)
+        check("valid MCP stdin doc PASS",
+              run_stdin("--stdin-fpa", "FPA-valid.md", content=VALID_DOC) == 0)
+        check("invalid MCP stdin doc FAIL",
+              run_stdin("--stdin-fpa", "FPA-invalid.md", content="invalid") == 1)
+        check("valid MCP stdin suite PASS",
+              run_stdin(
+                  "--stdin-suite", "valid",
+                  content=json.dumps({
+                      "fpa": VALID_DOC,
+                      "verdicts": {"verdicts": [{"target": "reconstruction", "verdict": "upheld"}]},
+                  }),
+              ) == 0)
 
         check("missing 目标与需求 FAIL",
               run(write(d, "FPA-no-goal.md",

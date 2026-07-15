@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# Resolve test for the work-folder SessionStart hook.
-#
-# With KATANA_KB_ROOT set to a temp KB and a *relative* work_folder_path
-# (via KATANA_WORK_FOLDER), running the hook from a cwd that is NOT the KB
-# must inject the ABSOLUTE "<kb>/<rel>" path into additionalContext — never
-# the bare relative value, and never a cwd-derived path.
+# Zero-mount test for the work-folder SessionStart hook. A configured physical
+# path must not enter the injected client guidance.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -29,21 +25,19 @@ out="$(
 )"
 
 case "$out" in
-    *"$KB/智元工作/工作记录"*) ok "injects absolute work_folder_path under kb-root" ;;
-    *) bad "injects absolute work_folder_path under kb-root" "missing [$KB/智元工作/工作记录] in output" ;;
-esac
-
-# Must NOT leak the bare relative value as a standalone path token.
-case "$out" in
-    *"\`智元工作/工作记录/YYYY"*)
-        bad "no bare relative value leaks" "found bare relative path in template output" ;;
-    *) ok "no bare relative value leaks" ;;
+    *"$KB"*|*"智元工作/工作记录"*) bad "no work-folder path leaks" "configured path leaked into output" ;;
+    *) ok "no work-folder path leaks" ;;
 esac
 
 # Must NOT leak the cwd (OTHER).
 case "$out" in
     *"$OTHER"*) bad "no cwd leak" "cwd [$OTHER] leaked into output" ;;
     *) ok "no cwd leak" ;;
+esac
+
+case "$out" in
+    *wf_create*wf_resume*wf_search*fs_read*fs_write*fs_edit*wf_save*) ok "skill guidance routes storage through MCP" ;;
+    *) bad "skill guidance routes storage through MCP" "output: $out" ;;
 esac
 
 echo "-------------------------------------------"
