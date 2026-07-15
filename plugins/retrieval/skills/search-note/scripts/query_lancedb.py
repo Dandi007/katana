@@ -42,6 +42,34 @@ SECRET_REPLACEMENTS = [
     (re.compile(r"\b[0-9a-fA-F]{32}\.[A-Za-z0-9_-]{10,}\b"), "<redacted-api-key>"),
     (re.compile(r"(?i)([A-Za-z_][A-Za-z0-9_]*(?:API_KEY|TOKEN|SECRET)[A-Za-z0-9_]*\s*=\s*)[^\s'\"]+"), r"\1<redacted>"),
 ]
+MIGRATED_MARKDOWN_SCOPES = (
+    "Zettelkasten",
+    "DeepThought",
+    "转换文档",
+    "inbox",
+    "智元工作/工作记录",
+    ".wiki",
+    "WIKI.md",
+)
+
+
+def is_migrated_markdown_path(relative_path: str) -> bool:
+    normalized = relative_path.strip("/")
+    return any(
+        normalized == scope or normalized.startswith(scope.rstrip("/") + "/")
+        for scope in MIGRATED_MARKDOWN_SCOPES
+    )
+
+
+def in_requested_scope(relative_path: str, scope: list[str] | None) -> bool:
+    if is_migrated_markdown_path(relative_path):
+        return False
+    if not scope:
+        return True
+    return any(
+        relative_path.startswith(item.rstrip("/") + "/") or relative_path == item.rstrip("/")
+        for item in scope
+    )
 
 
 def terms_for(query: str) -> list[str]:
@@ -263,7 +291,7 @@ def semantic_query(
     seen_paths: set[str] = set()
     for row in rows:
         relative_path = str(row.get("relative_path", ""))
-        if scope and not any(relative_path.startswith(item.rstrip("/") + "/") or relative_path == item.rstrip("/") for item in scope):
+        if not in_requested_scope(relative_path, scope):
             continue
         path_key = relative_path
         if path_key in seen_paths:
@@ -417,11 +445,13 @@ def scan_markdown_records(root: Path) -> list[dict[str, Any]]:
     for path in root.rglob("*.md"):
         if ".git" in path.parts or ".obsidian" in path.parts:
             continue
+        rel = path.relative_to(root).as_posix()
+        if is_migrated_markdown_path(rel):
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             text = path.read_text(encoding="utf-8", errors="replace")
-        rel = path.relative_to(root).as_posix()
         stat = path.stat()
         records.append({"doc_id": rel, "absolute_path": str(path), "relative_path": rel, "title": path.stem, "chunk_text": text[:4000], "heading_path": "", "mtime": dt.datetime.fromtimestamp(stat.st_mtime, dt.UTC).isoformat().replace("+00:00", "Z"), "frontmatter": {}, "wikilinks": [], "tags": [], "source_type": "markdown_live_fallback"})
     return records
@@ -432,7 +462,7 @@ def query_records(records: list[dict[str, Any]], query: str, top_k: int, scope: 
     scored: list[tuple[float, dict[str, Any], list[str]]] = []
     for record in records:
         relative_path = str(record.get("relative_path", ""))
-        if scope and not any(relative_path.startswith(item.rstrip("/") + "/") or relative_path == item.rstrip("/") for item in scope):
+        if not in_requested_scope(relative_path, scope):
             continue
         score, match_types = score_record(record, query, terms)
         if score <= 0:
@@ -616,6 +646,7 @@ def main() -> int:
             "manifest_found": bool(manifest),
             "freshness_verified": bool(manifest),
             "fallback": {"enabled": mode != "semantic_vector", "reason": fallback_reason},
+            "excluded_markdown_scopes": list(MIGRATED_MARKDOWN_SCOPES),
             "opencode": {
                 "enabled": bool(opencode_results),
                 "mode": opencode_mode,

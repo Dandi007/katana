@@ -11,8 +11,9 @@ failure modes of AI-maintained knowledge (mediocrity collapse, model collapse,
 cognitive offloading, container-boundary erosion) are held back: provenance,
 mandatory linking, zone write policy, and the resist-table all live in these steps.
 
-`wiki_root` is injected by the using-wiki hook. Run `date "+%Y-%m-%d %H:%M"`
-before any timestamped step (raw archival, log, commit) — use that real time.
+The wiki is server-owned. Use wiki MCP logical paths only; never resolve its
+physical root from the client. Run `date "+%Y-%m-%d %H:%M"` before timestamped
+steps — use that real time.
 
 ## Input — four shapes
 
@@ -28,7 +29,7 @@ Then run the eight steps in order.
 
 ## 1. Read schema
 
-Read `<wiki_root>/WIKI.md` — it is the contract, not optional.
+Use wiki MCP `fs_read(path="WIKI.md")` — it is the contract, not optional.
 - Determine the target **zone** from **§2** (path, purpose, naming).
 - Pull that zone's **write policy**, **page template**, and **naming rule** (§2).
   If the schema **dispatches templates by a frontmatter field** (e.g. a `type`/`类型`
@@ -47,9 +48,11 @@ Do not assume defaults; the schema overrides this skill where they differ.
 
 ## 2. Read source
 
-- **Local file / inbox:** read it directly.
-- **URL:** fetch and save a copy into the raw layer first (the path declared in
-  schema §5; if none, `<wiki_root>/raw/`), then read the **saved copy**. This keeps
+- **Inbox:** use wiki MCP `fs_read`; an explicit external client file may use the
+  client reader because it is an ingest input, not server-owned wiki storage.
+- **URL:** fetch and save a copy into the raw layer first (the logical path
+  declared in schema §5; if none, `raw/`) through `wiki_ingest_plan` →
+  `wiki_ingest_apply`, then use `fs_read` for the **saved copy**. This keeps
   raw immutable and provenance linkable — never ingest straight from a live URL.
   - **Prefer retrieval adapters when available:** if a retrieval plugin exposes `/retrieval:*` sources, fetch external sources through the matching one (tweets→`/retrieval:twitter`, reddit→`/retrieval:reddit`, web→`/retrieval:web`, repos→`/retrieval:code`/`/retrieval:github`) to inherit their fallback ladders and credibility — then save that result to the raw layer. Fall back to direct fetch if no retrieval plugin is installed.
 - **Conversation capture:** the relevant turns are the source; note them for §8 provenance.
@@ -60,8 +63,8 @@ report — never propose from partial or imagined content.
 ## 3. Orient
 
 Find the candidate set of existing pages this content touches:
-- Read the index / relevant MOC.
-- `grep` the wiki for the content's key terms **and their synonyms**.
+- Use `wiki_search` with the content's key terms **and their synonyms**.
+- Use `fs_read` for the returned index/MOC and candidate logical paths.
 List each candidate with its relation to the new content: **will update** /
 **will link** / **unrelated**. This is the comparison pass that prevents duplicate pages.
 
@@ -77,7 +80,7 @@ merge candidates and skips). Do not eyeball it.
 
 ## 5. Build the proposal package
 
-Assemble the full package before touching disk:
+Assemble the full package, then submit it to `wiki_ingest_plan` before applying:
 - **New-page drafts** — each following the zone's page template (or, when the
   schema dispatches templates by a frontmatter field, the template that field
   selects) + required frontmatter (§3), `sources:` populated per `references/provenance.md`.
@@ -115,7 +118,7 @@ proceeding. This step is mandatory, not advisory.
 
 ## 7. Apply per zone write policy
 
-- **autonomous** zone → write directly (proceed to §8).
+- **autonomous** zone → apply the accepted plan with `wiki_ingest_apply`.
 - **propose** zone → present the full proposal package and confirm each item via
   AskUserQuestion before writing.
 - **Non-interactive (`claude -p`):** AskUserQuestion is unavailable. In a propose
@@ -123,20 +126,18 @@ proceeding. This step is mandatory, not advisory.
   / "proposals pre-approved"). Otherwise do not write any page — output the full
   proposal text and you MUST still append the log line
   `## [YYYY-MM-DD HH:MM] ingest | proposed (not applied): <source>` to `log.md`
-  — skipping this journaling is a pipeline violation, then stop.
+  using wiki MCP `fs_edit` — skipping this journaling is a pipeline violation, then stop.
 
-## 8. Write + record
+## 8. Apply + record
 
-- Write all approved files (new pages, updated pages, index/MOC).
-- **Inbox archival:** after a successful write, move the processed inbox file into
-  the raw layer (`git mv inbox/<file> <raw path>/`) so inbox holds only pending
-  sources and provenance points at the immutable raw copy. In propose zones without
-  authorization, leave inbox untouched.
-- Append to `<wiki_root>/log.md`:
+- Apply all approved files (new pages, updated pages, index/MOC) through
+  `wiki_ingest_apply`; the server enforces provenance/outlink/frontmatter invariants.
+- **Inbox archival:** include `fs_rename` from `inbox/<file>` to the raw logical
+  path in the approved plan. In propose zones without authorization, leave inbox untouched.
+- Ensure the plan records in `log.md`:
   `## [YYYY-MM-DD HH:MM] ingest | <source>` followed by body lines listing every
   **created** and **updated** page.
-- `git commit` with message `wiki: ingest <source>` — unless the schema declares
-  commits off.
+- Commit policy is server-governed; never run client git operations on wiki storage.
 
 ## Boundary
 

@@ -25,18 +25,15 @@ case "$WIKI_ROOT" in
         ;;
 esac
 
-# 解析为绝对路径：~ 展开 / 绝对原样 / 相对则 join kb_root（基准从 cwd 变 kb_root）
-WIKI_ROOT="$(katana_resolve_path "$WIKI_ROOT")"
-
-# 未初始化（无 WIKI.md）→ 静默退出，init 会创建
-[ -f "${WIKI_ROOT}/WIKI.md" ] || exit 0
-
 # per-suite 开关：mcp 模式不灌 full using-wiki，只注一行触发器（二选一）
 WIKI_INTERFACE="$(katana_config_get "wiki_interface" "skill" "KATANA_WIKI_INTERFACE")"
 
 if [ "$WIKI_INTERFACE" = "mcp" ]; then
-    content="本项目 wiki 走 MCP（非 skill 模式）：知识问题先调 wiki_query 再答（勿凭记忆裸答）；检索用 wiki_search（返回带路径候选，可据路径自行 read/grep 深挖）；入库走 wiki_ingest_plan → wiki_ingest_apply（apply 强制 provenance/outlink/frontmatter 不变量）。协议细节由各 tool 返回值下发。"
+    content="本项目 wiki 走 MCP（非 skill 模式）：知识问题先调 wiki_query 再答（勿凭记忆裸答）；检索用 wiki_search，据返回的逻辑路径深挖须用 wiki MCP 的 fs_read/fs_glob，勿用原生文件工具；入库走 wiki_ingest_plan → wiki_ingest_apply（apply 强制 provenance/outlink/frontmatter 不变量）。协议细节由各 tool 返回值下发。"
 else
+    # Legacy skill mode still uses the client-visible root and activation marker.
+    WIKI_ROOT="$(katana_resolve_path "$WIKI_ROOT")"
+    [ -f "${WIKI_ROOT}/WIKI.md" ] || exit 0
     content=$(cat "${PLUGIN_ROOT}/skills/using-wiki/SKILL.md" 2>/dev/null || true)
     [ -z "$content" ] && exit 0
 

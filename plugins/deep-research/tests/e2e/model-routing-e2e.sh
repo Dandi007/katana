@@ -11,9 +11,15 @@
 #   driver 用 workflow({scriptPath}) 把精确 args 注入真身 workflow.js（不让模型手抄 JSON）。
 #   断言：worker 跑 haiku、triage 跑 sonnet、synth 跑 opus（trace 里 "model" 字段为准）。
 #
-# 前置：默认鉴权 claude 能路由 haiku/sonnet/opus（非 ccs-pinned 环境）。
+# 前置：默认鉴权 claude 能路由 haiku/sonnet/opus，且 wiki MCP test harness
+# 已配置。没有 MCP harness 时显式 SKIP，避免为已迁移域建立 client-fs fixture。
 # 用法：bash plugins/deep-research/tests/e2e/model-routing-e2e.sh
 set -uo pipefail
+
+if [ "${KATANA_WIKI_MCP_E2E:-0}" != "1" ]; then
+  echo "SKIP: model-routing e2e requires KATANA_WIKI_MCP_E2E=1 and a seeded wiki MCP harness"
+  exit 0
+fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$HERE/../../skills/deep-research" && pwd)"
@@ -24,31 +30,21 @@ command -v claude >/dev/null || { echo "ABORT: claude CLI 未安装"; exit 2; }
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 NONCE="E2EMR$(date +%s)$$"
 WORK="$(mktemp -d -t dr-modelroute.XXXXXX)"
-KB="$WORK/kb"
-TOPIC_DIR="$KB/DeepThought/$NONCE"
-mkdir -p "$TOPIC_DIR/findings"
-
-# ── 最小 KB：一条本地笔记，worker 只需 Read 它即可完成 ──────────────────────────
-cat > "$KB/note.md" <<'NOTE'
-# 手冲咖啡萃取要点
-- 水温 90-96°C 影响萃取率
-- 研磨度越细萃取越快
-- 粉水比常用 1:15
-NOTE
+TOPIC_PATH="DeepThought/$NONCE"
 
 # ── driver workflow：硬编码 childArgs，调用真身 workflow.js（嵌套仅一层，合法）────
 DRIVER="$WORK/driver.mjs"
 cat > "$DRIVER" <<JS
 export const meta = { name: 'dr-modelroute-e2e-driver', description: '注入精确 args 跑真身 deep-research workflow.js 验三档路由', phases: [{ title: 'Run' }] }
 const childArgs = {
-  topic: "[$NONCE] 总结这条本地笔记里影响手冲咖啡萃取的要点",
-  topicDir: "$TOPIC_DIR",
+  topic: "[$NONCE] 总结 wiki 笔记里影响手冲咖啡萃取的要点",
+  topicPath: "$TOPIC_PATH",
   skillDir: "$SKILL_DIR",
   sources: {},
   maxWidth: 1,
   models: { worker: "haiku", triage: "sonnet", synth: "opus" },
   initialClues: [
-    { id: "c0", text: "[$NONCE] Read 文件 $KB/note.md，列出其中影响萃取的 3 个因素", local: true, suggested_sources: ["$KB"], depth: 0 }
+    { id: "c0", text: "[$NONCE] 用 wiki_search 检索 harness 预置的咖啡萃取笔记，列出 3 个因素", local: true, suggested_sources: ["wiki"], depth: 0 }
   ],
 }
 return await workflow({ scriptPath: "$WORKFLOW_JS" }, childArgs)
@@ -63,7 +59,7 @@ echo "running headless claude -p (default auth)…"
 # ── 默认鉴权跑 driver（prompt 走 stdin，规避 --allowedTools 吞位置参数的坑）────────
 printf '%s' "用 Workflow 工具跑这个脚本文件，只调用一次，scriptPath=${DRIVER} 。不要传 args，不要做别的，跑完把返回简述即可。" \
   | claude -p --permission-mode acceptEdits \
-      --allowedTools Workflow,Agent,Read,Write,Grep,Glob,Bash \
+      --allowedTools Workflow,Agent,mcp__katana-wiki-mcp__wiki_search,mcp__katana-wiki-mcp__fs_create,mcp__katana-wiki-mcp__fs_read,mcp__katana-wiki-mcp__fs_write,mcp__katana-wiki-mcp__fs_glob \
       > "$WORK/claude.log" 2>&1
 CL_EXIT=$?
 echo "claude -p exit: $CL_EXIT"

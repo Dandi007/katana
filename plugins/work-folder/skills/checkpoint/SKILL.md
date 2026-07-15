@@ -11,7 +11,7 @@ description: 在 context 满或需要切换 session 前，把当前工作状态�
 
 ## 配置
 
-Work folder 路径可通过以下方式覆盖（优先级从高到低）：
+Work folder 的逻辑路径由 work-folder MCP 解析；不要把服务端物理根暴露给 client。配置优先级：
 
 | 优先级 | 配置方式 | 示例 |
 |--------|---------|------|
@@ -19,7 +19,7 @@ Work folder 路径可通过以下方式覆盖（优先级从高到低）：
 | 2 | 项目根目录 `.katana` 文件 | `work_folder_path=智元工作/工作记录` |
 | 3 | 默认值 | `docs/work-records` |
 
-如果项目 `.katana` 文件或环境变量指定了路径，以那个为准，忽略默认值。
+如果项目 `.katana` 文件或环境变量指定了路径，以那个为准，忽略默认值。确定、创建、检索和恢复目录分别使用 `wf_search` / `wf_create` / `wf_resume`，不要在 client 文件系统探测该路径。
 
 ## 核心原则
 
@@ -36,13 +36,13 @@ Work folder 路径可通过以下方式覆盖（优先级从高到低）：
 ### Step 1: 确定 Work Folder
 
 1. 回顾当前 session 上下文，识别正在做的工作主题
-2. 检查本次 session 中是否已经有在操作的 work folder（看你读写过哪些 artifact 所在的目录）
-3. 如果找到了 → 用那个目录
-4. 如果没找到 → 问用户：提供已有路径，或根据当前工作自动创建（路径按 work-folder 约定的默认路径规则）
+2. 已知 active work folder 的逻辑路径时直接使用；不确定时调用 `wf_search` 查找候选
+3. 如果找到了 → 使用返回的逻辑路径
+4. 如果没找到 → 问用户：提供已有逻辑路径，或根据当前工作调用 `wf_create` 自动创建
 
 ### Step 2: 按 work-folder 约定 dump 各 artifact
 
-按 work-folder 约定中定义的 artifact 语义和格式，逐个处理：
+按 work-folder 约定中定义的 artifact 语义和格式，逐个处理。读取用 work-folder MCP `fs_read`，创建/覆盖用 `fs_write`，局部追加或修改用 `fs_edit`；完成整次 checkpoint 后调用 `wf_save` 让 server 统一维护 changelog、context 快照和 Resume Guide：
 
 | Artifact | checkpoint 操作 |
 |----------|----------------|
@@ -54,7 +54,7 @@ Work folder 路径可通过以下方式覆盖（优先级从高到低）：
 | context.md | **必须更新**——覆盖写入环境快照（快照，不是日志）|
 | CLAUDE.md / AGENTS.md | **必须生成**——Resume Guide，供新 session 快速恢复上下文 |
 
-每个 artifact 的具体格式和字段定义见 `references/artifact-formats.md`（与本 skill 同目录，调用时载入）。checkpoint 不重复定义这些格式。文件不存在时主动创建，不要因为"当前还没有"就跳过。
+每个 artifact 的具体格式和字段定义见 `references/artifact-formats.md`（与本 skill 同目录，调用时载入）。checkpoint 不重复定义这些格式。文件不存在时用 `fs_write` 主动创建，不要因为"当前还没有"就跳过。不要用原生文件工具访问 work folder。
 
 ### Step 3: 输出 Checkpoint 摘要
 
@@ -78,14 +78,14 @@ Work folder: <路径>
 
 ### Step R1: 确定 Work Folder
 
-1. 用户给了路径 → 用那个
-2. 用户没给 → 在 work-folder 约定的默认路径下按日期倒序找最近、status 非 completed 的 work folder，列出候选（最多 3 个）让用户选择
+1. 用户给了逻辑路径 → 用那个调用 `wf_resume`
+2. 用户没给 → 用 `wf_search` 查最近且 status 非 completed 的候选，最多列 3 个让用户选择，再调用 `wf_resume`
 
-验证路径存在且至少包含 progress.md 或 CLAUDE.md，否则报错退出。
+由 `wf_resume` 验证 folder 与运行环境；返回 BROKEN 时立即报错退出。
 
 ### Step R2: 加载 Artifact
 
-按优先级顺序读取 work folder 中的所有标准 artifact：
+优先使用 `wf_resume` 返回的恢复上下文；需补读时按优先级用 work-folder MCP `fs_read` 读取标准 artifact：
 
 | 顺序 | 文件 | 目的 |
 |------|------|------|
@@ -97,13 +97,13 @@ Work folder: <路径>
 | 6 | `spec.md` | 了解设计目标和验收标准（如果存在） |
 | 7 | `plan.md` | 了解执行计划和阶段（如果存在） |
 
-文件不存在的直接跳过，不报错。
+`fs_read` 返回文件不存在时直接跳过，不报错。
 
 ### Step R3: 验证环境
 
 **这是 resume 的核心步骤——不验证就不能继续。**
 
-基于 context.md 中记录的关键路径和环境信息，逐项检查：
+以 `wf_resume` 的 server-side 环境验证结果为准，并结合 context.md 逐项确认：
 
 - **文件/目录存在性**：context.md 中每个关键路径是否存在；git repo 的分支、未提交变更
 - **Git 状态**：是否 clean、最近 commit、分支一致性
@@ -154,7 +154,7 @@ Work folder: <路径>
 | HH:MM | resume | 从 checkpoint 恢复；环境验证: N✅ N⚠️ N❌ |
 ```
 
-如果有 DRIFT 或 BROKEN，同时更新 Blocked section。
+如果有 DRIFT 或 BROKEN，同时用 `fs_edit` 更新 Blocked section；恢复记录由 `wf_resume` 维护。
 
 ### Step R6: 进入工作状态
 
@@ -170,7 +170,7 @@ Resume 完成后，LLM 应该：
 
 # 共享约束
 
-- **自给自足**：所有步骤 LLM 直接用 Read/Write/Edit/Bash 完成
+- **MCP 边界**：work folder 生命周期只用 `wf_create`/`wf_search`/`wf_resume`/`wf_save`；control 文件只用 work-folder MCP `fs_read`/`fs_write`/`fs_edit`/`fs_glob`
 - **幂等**：Save 多次调用覆盖 CLAUDE.md / AGENTS.md / context.md，追加 progress.md changelog 和 findings.md section
 - **不做 git commit**：用户自己决定何时 commit
 - **不做 /clear**：checkpoint 只存档，不执行 session 切换

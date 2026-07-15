@@ -3,6 +3,7 @@
 
 两种模式：
   CLI:  python3 validate_fpa.py <FPA-*.md | RUN-REPORT-*.md>   # 失败 exit 1
+        python3 validate_fpa.py --stdin FPA-<slug>.md           # 文档从 stdin 读取
   Hook: python3 validate_fpa.py --hook              # stdin 读 PostToolUse JSON，
                                                     # 文件名匹配才校验，失败 exit 2
 
@@ -63,14 +64,8 @@ def section_by_token(sections: dict[str, str], token: str) -> str | None:
     return None
 
 
-def validate(path: str) -> list[str]:
+def validate_text(text: str) -> list[str]:
     issues: list[str] = []
-    try:
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
-    except OSError as e:
-        return [f"无法读取文件: {e}"]
-
     # frontmatter
     fm = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
     if not fm:
@@ -128,6 +123,14 @@ def validate(path: str) -> list[str]:
         issues.append("References 没有条目（至少一条 `- <出处>`）")
 
     return issues
+
+
+def validate(path: str) -> list[str]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return validate_text(f.read())
+    except OSError as e:
+        return [f"无法读取文件: {e}"]
 
 
 def validate_suite(report_path: str) -> list[str]:
@@ -197,8 +200,20 @@ def main() -> None:
             sys.exit(2)
         sys.exit(0)
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "--stdin":
+        name = sys.argv[2] if len(sys.argv) >= 3 else ""
+        if not FPA_NAME.match(os.path.basename(name)):
+            print("FAIL: --stdin 需要逻辑文件名 FPA-<slug>.md")
+            sys.exit(1)
+        issues = validate_text(sys.stdin.read())
+        if issues:
+            print("FAIL:\n- " + "\n- ".join(issues))
+            sys.exit(1)
+        print("PASS: FPA 机械验收通过")
+        sys.exit(0)
+
     if len(sys.argv) < 2:
-        print("usage: validate_fpa.py <FPA-*.md | RUN-REPORT-*.md> | --hook", file=sys.stderr)
+        print("usage: validate_fpa.py <FPA-*.md | RUN-REPORT-*.md> | --stdin FPA-<slug>.md | --hook", file=sys.stderr)
         sys.exit(1)
     issues = dispatch(sys.argv[1])
     if issues is None:

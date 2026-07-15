@@ -14,7 +14,8 @@
 #
 # 用法：
 #   静态检查（默认）：bash plugins/deep-research/tests/e2e/per-source-a2a-e2e.sh
-#   完整动态（需 claude）：E2E_DYNAMIC=1 bash plugins/deep-research/tests/e2e/per-source-a2a-e2e.sh
+#   完整动态（需 wiki MCP harness）：
+#     E2E_DYNAMIC=1 KATANA_WIKI_MCP_E2E=1 bash plugins/deep-research/tests/e2e/per-source-a2a-e2e.sh
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -39,7 +40,7 @@ echo "workflow: $WORKFLOW_JS"
 echo ""
 
 # ── P1: per-source 文件名含双下划线 __ ──────────────────────────────────────────
-grep -qE 'findings/r\$\{round\}-c\$\{clue\.id\}__' "$WORKFLOW_JS" 2>/dev/null
+grep -qE 'findingsPath.*r\$\{round\}-c\$\{clue\.id\}__' "$WORKFLOW_JS" 2>/dev/null
 result "P1: per-source 文件名含 __ 分隔符" "$?"
 
 # ── P2: FINDING_SCHEMA 含 reports[] 字段 ────────────────────────────────────────
@@ -60,29 +61,19 @@ if [ "${E2E_DYNAMIC:-0}" != "1" ]; then
   echo ""
   echo "跳过 P5+R1（动态真机，需 E2E_DYNAMIC=1 + claude CLI 可用）"
 else
+  if [ "${KATANA_WIKI_MCP_E2E:-0}" != "1" ]; then
+    echo "跳过 P5+R1：已迁移 DeepThought 域需要 KATANA_WIKI_MCP_E2E=1 的 MCP test harness"
+    echo ""
+    echo "=== 结果: PASS=$PASS FAIL=$FAIL ==="
+    [ "$FAIL" -eq 0 ]
+    exit $?
+  fi
   command -v claude >/dev/null || { echo "ABORT: claude CLI 未安装"; exit 2; }
 
   CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
   NONCE="E2EPS$(date +%s)$$"
   WORK="$(mktemp -d -t dr-persource.XXXXXX)"
-  KB="$WORK/kb"
-  TOPIC_DIR="$KB/DeepThought/$NONCE"
-  mkdir -p "$TOPIC_DIR/findings"
-
-  # 最小离线 KB：两条本地笔记（确定性双源，不依赖 web，离线即可证多源拆分）
-  mkdir -p "$KB"
-  cat > "$KB/note_a.md" <<'NOTE'
-# 手冲咖啡萃取要点 A
-- 水温 90-96°C 影响萃取率
-- 研磨度越细萃取越快
-- 粉水比常用 1:15
-NOTE
-  cat > "$KB/note_b.md" <<'NOTE'
-# 手冲咖啡萃取要点 B
-- 闷蒸时间 30-40 秒，释放 CO2
-- 总冲泡时间约 2.5-3 分钟
-- 新鲜豆风味更佳
-NOTE
+  TOPIC_PATH="DeepThought/$NONCE"
 
   # driver workflow：注入精确 args，两个本地源 → 期望产出 ≥2 个 per-source 文件（离线确定性）
   # 使用 return await workflow(...) 与已验证的 model-routing-e2e.sh 同款 idiom
@@ -90,20 +81,17 @@ NOTE
   cat > "$DRIVER" <<DRIVER_JS
 export const meta = { name: 'dr-persource-e2e-driver', description: 'per-source a2a e2e driver', phases: [{ title: 'Run' }] }
 const childArgs = {
-  topic: "[$NONCE] 总结这两条本地笔记关于手冲咖啡萃取的要点",
-  topicDir: "$TOPIC_DIR",
+  topic: "[$NONCE] 总结两条 wiki 笔记关于手冲咖啡萃取的要点",
+  topicPath: "$TOPIC_PATH",
   skillDir: "$SKILL_DIR",
-  sources: {
-    note_a: "$KB/note_a.md",
-    note_b: "$KB/note_b.md",
-  },
+  sources: {},
   maxWidth: 1,
   // worker/harvest 轻量任务用 haiku；synth 要走完 5 步(读 index→选择性读 L2→sources→topics→report)
   // 写出终稿 report.md，haiku 易在 report 前停笔，给 sonnet 保证端到端跑完
   models: { worker: "haiku", triage: "sonnet", synth: "sonnet", harvest: "haiku" },
   initialClues: [
-    { id: "c0", text: "[$NONCE] Read $KB/note_a.md 和 $KB/note_b.md，列出影响萃取的关键因素", local: true,
-      suggested_sources: ["note_a", "note_b"], depth: 0 }
+    { id: "c0", text: "[$NONCE] 用 wiki_search 分别检索 MCP harness 预置的两条咖啡萃取笔记并提取关键因素", local: true,
+      suggested_sources: ["wiki-primary", "wiki-secondary"], depth: 0 }
   ],
 }
 return await workflow({ scriptPath: "$WORKFLOW_JS" }, childArgs)
@@ -115,29 +103,40 @@ DRIVER_JS
 
   printf '%s' "用 Workflow 工具跑这个脚本文件，只调用一次，scriptPath=${DRIVER}。不要传 args，不要做别的，跑完把返回简述即可。" \
     | claude -p --permission-mode acceptEdits \
-        --allowedTools Workflow,Agent,Read,Write,Grep,Glob,Bash \
+        --allowedTools Workflow,Agent,mcp__katana-wiki-mcp__wiki_search,mcp__katana-wiki-mcp__fs_create,mcp__katana-wiki-mcp__fs_read,mcp__katana-wiki-mcp__fs_write,mcp__katana-wiki-mcp__fs_glob \
         > "$WORK/claude.log" 2>&1
   CL_EXIT=$?
 
   [ "$CL_EXIT" -eq 0 ]
   result "P5-a: claude -p 正常退出(exit=$CL_EXIT)" "$?"
 
-  # P5-b: per-source 文件存在（含 __ 分隔符，≥2 个确认多源拆分）
-  PS_COUNT="$(find "$TOPIC_DIR/findings" -name 'r*-c*__*.md' 2>/dev/null | wc -l | tr -d ' ')"
-  [ "$PS_COUNT" -ge 2 ]
-  result "P5-b: per-source 文件存在(含 __, ≥2 源拆分，实际: $PS_COUNT)" "$?"
+  # 经 wiki MCP 拉取逻辑目录快照；client 不挂载 DeepThought 存储。
+  printf '%s' "只调用 wiki MCP：fs_glob 列出 ${TOPIC_PATH}/findings/*.md，并 fs_read ${TOPIC_PATH}/findings/index.md。逐行输出逻辑路径，随后原样输出 index 内容，不要加解释。" \
+    | claude -p --allowedTools mcp__katana-wiki-mcp__fs_glob,mcp__katana-wiki-mcp__fs_read \
+        > "$WORK/wiki-snapshot.log" 2>&1
+  SNAP_EXIT=$?
+  [ "$SNAP_EXIT" -eq 0 ]
+  result "P5-b0: wiki MCP 快照正常退出(exit=$SNAP_EXIT)" "$?"
 
-  # P5-c: index.md 存在
-  test -f "$TOPIC_DIR/findings/index.md"
-  result "P5-c: findings/index.md 存在" "$?"
+  # P5-b: MCP 返回的 per-source 逻辑路径含 __ 分隔符，≥2 个确认多源拆分
+  PS_COUNT="$(grep -oE 'r[^ /]*-c[^ /]*__[^ /]*\.md' "$WORK/wiki-snapshot.log" 2>/dev/null | sort -u | wc -l | tr -d ' ')"
+  [ "$PS_COUNT" -ge 2 ]
+  result "P5-b: MCP 返回 per-source 逻辑路径(含 __, ≥2 源拆分，实际: $PS_COUNT)" "$?"
+
+  # P5-c: index.md 可经 MCP 读取
+  grep -q 'findings/index.md' "$WORK/wiki-snapshot.log" 2>/dev/null
+  result "P5-c: findings/index.md 可经 wiki MCP 读取" "$?"
 
   # P5-d: index.md 含 reports 格式内容
-  grep -qi "reports\|source\|credibility" "$TOPIC_DIR/findings/index.md" 2>/dev/null
-  result "P5-d: index.md 含索引内容(reports/source/credibility)" "$?"
+  grep -qi "reports\|source\|evidence_credibility" "$WORK/wiki-snapshot.log" 2>/dev/null
+  result "P5-d: index.md 含索引内容(reports/source/evidence_credibility)" "$?"
 
-  # P5-e: synth 走完全流程产出终稿 report.md（端到端最终交付物，证 synth 顶层 return 链路通）
-  test -f "$TOPIC_DIR/report.md" && [ "$(wc -c < "$TOPIC_DIR/report.md")" -ge 500 ]
-  result "P5-e: report.md 产出且非空(≥500B)" "$?"
+  # P5-e: 经 MCP 读取 synth 终稿，证顶层 return 链路完成
+  printf '%s' "只调用 wiki MCP fs_read 读取 ${TOPIC_PATH}/report.md，原样输出文件内容，不要加解释。" \
+    | claude -p --allowedTools mcp__katana-wiki-mcp__fs_read > "$WORK/report-snapshot.md" 2>&1
+  REPORT_EXIT=$?
+  [ "$REPORT_EXIT" -eq 0 ] && [ "$(wc -c < "$WORK/report-snapshot.md")" -ge 500 ]
+  result "P5-e: report.md 经 wiki MCP 取回且非空(≥500B)" "$?"
 
   # R1: agent-*.jsonl trace 中 nonce 命中 worker + synth
   python3 - "$CFG" "$NONCE" <<'PY'

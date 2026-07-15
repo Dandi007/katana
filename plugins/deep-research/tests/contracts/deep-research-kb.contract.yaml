@@ -3,18 +3,28 @@ setup:
   fixture: kb
   requires:
     - env:KATANA_E2E_NETWORK
+    - env:KATANA_WIKI_MCP_E2E
 trigger:
   prompt: |
     用 /deep-research:deep-research 研究：本知识库中影响咖啡萃取质量的全部因素及其相互关系，
-    重点综合现有笔记，输出带引用的研究报告到 ./research-report.md。
+    重点通过 wiki MCP 综合 harness 预置笔记。topicPath 固定为
+    DeepThought/katana-e2e-coffee，报告写到该逻辑路径的 report.md。
     控制在最小规模（宽度≤4，单轮）。
-  tools: [Workflow, Agent, Read, Write, Grep, Glob, Bash, WebSearch, WebFetch]
+  tools:
+    - Workflow
+    - Agent
+    - WebSearch
+    - WebFetch
+    - mcp__katana-wiki-mcp__wiki_search
+    - mcp__katana-wiki-mcp__fs_create
+    - mcp__katana-wiki-mcp__fs_read
+    - mcp__katana-wiki-mcp__fs_write
+    - mcp__katana-wiki-mcp__fs_glob
   timeout: 3600
 expect:
   process:
     - skill_loaded: deep-research:deep-research
   filesystem:
-    - created: "DeepThought/*/report.md"
     - script: deep-research-kb.verify.sh
     - unchanged_outside: true
   semantic:
