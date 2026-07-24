@@ -35,7 +35,7 @@ and chains fallbacks so you always get an answer.
 
 ```ini
 # 启用的源（逗号分隔）
-retrieval_sources=web,reddit,twitter,official-docs,github,gitlab,linear,feishu,search-note,code,agent-session-search,xiaohongshu
+retrieval_sources=web,reddit,twitter,official-docs,github,gitlab,linear,feishu,search-note,code,xiaohongshu
 
 # 本地知识库根（search-note 适配器用，只读检索输入）
 kb_dir=.

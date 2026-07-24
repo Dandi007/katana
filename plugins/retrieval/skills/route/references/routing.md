@@ -24,7 +24,7 @@
 | feishu | `/retrieval:feishu` |
 | github | `/retrieval:github` |
 | gitlab | `/retrieval:gitlab` |
-| agent_session | `/retrieval:agent-session-search` |
+| agent_session | `session-engine` MCP（`list_sessions`/`list_events`/`get_event_content`，skill 已退役） |
 | reddit | `/retrieval:reddit` |
 | twitter | `/retrieval:twitter` |
 | official-docs | `/retrieval:official-docs` |

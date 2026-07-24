@@ -1,7 +1,9 @@
 {
   "name": "retrieval",
-  "description": "Multi-source information retrieval for Claude Code — intent→source routing, credibility ladder, fallback chains, with web/reddit/twitter/xiaohongshu/code/github/gitlab/linear/feishu/search-note adapters; generic logic in-plugin, personal auth/config externalized",
-  "version": "0.3.2",
-  "author": { "name": "Dandi007" },
+  "description": "Multi-source information retrieval for Claude Code — intent→source routing, credibility ladder, fallback chains, with web/reddit/twitter/xiaohongshu/code/github/gitlab/linear/feishu/search-note adapters（agent session 检索已退役，走 session-engine MCP）; generic logic in-plugin, personal auth/config externalized",
+  "version": "0.4.0",
+  "author": {
+    "name": "Dandi007"
+  },
   "license": "MIT"
 }
