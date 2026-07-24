@@ -8,7 +8,7 @@ Claude Code plugin：operational memory system。
 - **服务**：`katana-memory-mcp` 运行在 `:5605`（FastMCP），统一暴露 5 个 MCP tool（`memory_index` / `memory_get` / `memory_create` / `memory_update` / `memory_delete`）
 - **SessionStart hook** 是一个带降级的 curl——向服务 `GET /t/<tenant>/index` 拉取 `<memory-index>` hook JSON，服务不可达时注入降级提示，退出码始终为 0
 - **多 runtime 注入**：服务另提供 `GET /t/<tenant>/index.md`（纯文本 `<memory-index>`），供非 Claude runtime 消费；kimi-code 与 OpenCode 的注入客户端在 `runtimes/`（见 `runtimes/README.md`），安装走 `runtimes/install.sh`
-- **所有读写走 MCP tools（id 寻址）**：skills 不直接操作文件系统；数据访问 100% 收敛到服务端
+- **所有读写走 MCP tools（id 寻址）**：client 不直接操作文件系统；数据访问 100% 收敛到服务端
 - **L2 正文**不注入到 session context，需要时用 `memory_get(id)` 读取具体 card
 
 ## 环境变量
@@ -36,14 +36,15 @@ metadata:
 ```
 
 - `id`：由服务端生成，skills 通过 id 寻址（`memory_get` / `memory_update` / `memory_delete`）
-- 正文必含 `## How to Verify` 段（可执行命令或可核对的 SSoT 路径），供 `memory:validate` 核验事实是否仍成立
+- 正文必含 `## How to Verify` 段（可执行命令或可核对的 SSoT 路径），供核验事实是否仍成立
 - hook 只注入 `status: active`（或缺省）的 card；`stale` / `deprecated` 不注入
-- canonical 模板见 `skills/remember/SKILL.md`
 
-## Skills
+## 使用方式（无 skill，MCP 直用）
 
-- `memory:remember` — 通过 `memory_create` / `memory_update` 创建/更新 card（How to Verify 为必填段）
-- `memory:validate` — 通过 `memory_index` + `memory_get` 核验 card 健康与事实正确性：L1 结构 + L2 命令核验（默认），L3 SSoT 深度重核（用户要求深度时）；发现矛盾报告 + 给修正建议，不自动改写
+> 2026-07-24 起 `memory:remember` / `memory:validate` skill 退役——写卡与核验契约由 MCP server instructions 直接承载，agent 直用 `memory_*` tools：
+>
+> - **写卡**：先 `memory_index` 查重；新建 `memory_create` / 整字段更新 `memory_update` / 局部改 `memory_edit`（先 `memory_read` 拿精确文本）；正文必含 `## How to Verify`（服务端强校验）
+> - **核验**：`memory_index` 看 L1 → `memory_get(id)` 取卡 → 执行卡内 How to Verify 命令核对；发现矛盾更新卡或降 status
 
 ## MCP Tools（服务暴露）
 

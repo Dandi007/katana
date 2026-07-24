@@ -8,7 +8,6 @@
 | wiki | `wiki_search` | wiki MCP `fs_glob` + `fs_read` | 明确报告 MCP 不可用，不回落 client fs |
 | work-folder | `wf_search` | work-folder MCP `fs_glob` + `fs_read` | 明确报告 MCP 不可用，不回落 client fs |
 | web | agent 原生 web search | Context7 MCP（仅库文档） | 告知用户无网络搜索能力 |
-| agent-session-search | LanceDB 语义搜索 | SQL keyword 匹配 | 文件系统 grep |
 | feishu | lark-cli API | feishu legacy 脚本 | — |
 
 ## 通用规则

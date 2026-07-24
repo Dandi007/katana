@@ -2,7 +2,7 @@
 
 | 键 | 含义 | 示例 | 密钥? |
 |----|------|------|-------|
-| retrieval_sources | 启用的源（逗号分隔） | web,reddit,twitter,official-docs,github,gitlab,linear,feishu,search-note,code,agent-session-search,xiaohongshu | 否 |
+| retrieval_sources | 启用的源（逗号分隔） | web,reddit,twitter,official-docs,github,gitlab,linear,feishu,search-note,code,xiaohongshu | 否 |
 | web_proxy | web 抓取代理 | http://127.0.0.1:7897 | 否 |
 | reddit_archive_api | reddit 降级存档 API | https://arctic-shift.photon-reddit.com | 否 |
 | twitter_chrome_profile | twitter 登录态 profile 目录 | ~/.playwright-agent-profile | 否（登录态在目录内） |
