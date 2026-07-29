@@ -580,6 +580,43 @@ class TestMigration:
 class TestConcurrency:
     """A8: concurrent mutations don't produce cross-contamination."""
 
+    def test_concurrent_edit_rename_no_cross_contamination(self):
+        d = _make_data_root()
+        store = _make_store(d)
+        store.wiki_create("并发页", _sample_body("并发页"), _sample_frontmatter(
+            title="并发页", 摘要="并发测试"))
+
+        errors = []
+        results = []
+
+        def edit_page():
+            try:
+                result = store.wiki_edit("并发页", "并发页", "并发页编辑后")
+                results.append(("edit", result))
+            except Exception as e:
+                errors.append(str(e))
+
+        def rename_page():
+            try:
+                result = store.wiki_rename("并发页", "并发页新")
+                results.append(("rename", result))
+            except Exception as e:
+                errors.append(str(e))
+
+        t1 = threading.Thread(target=edit_page)
+        t2 = threading.Thread(target=rename_page)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert len(errors) == 0, f"concurrent errors: {errors}"
+
+        get_by_id = store.wiki_get("并发页新")
+        if get_by_id.get("code") != "NOT_FOUND":
+            assert "并发页编辑后" in get_by_id["body"], \
+                "rename must not silently overwrite the edit"
+
     def test_concurrent_writes_serialized(self):
         d = _make_data_root()
         store = _make_store(d)

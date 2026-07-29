@@ -428,13 +428,20 @@ class WikiStore:
         if title_err:
             return {"code": "VALIDATION_FAILED", "message": title_err}
 
-        old_title = page["title"]
         store = self
 
         def _write(changed_paths):
+            current_page = _pages.find_page_by_ref(store._data_root, ref)
+            access_err = store._check_page_accessible(current_page, ref)
+            if access_err is not None:
+                raise StoreError(access_err)
+
+            old_title = current_page["title"]
+
             conflict = store._check_title_exists_locked(new_title)
             if conflict is not None:
                 raise StoreError(conflict)
+
             old_path = _pages.title_to_path(old_title)
             new_path = _pages.title_to_path(new_title)
 
@@ -444,13 +451,13 @@ class WikiStore:
             changed_paths.append(old_path)
             changed_paths.append(new_path)
 
-            new_page_body = _pages.rewrite_wikilinks(page["body"], old_title, new_title)
-            if new_page_body != page["body"]:
-                _pages.write_page(str(new_full), page["frontmatter"], new_page_body)
+            new_page_body = _pages.rewrite_wikilinks(current_page["body"], old_title, new_title)
+            if new_page_body != current_page["body"]:
+                _pages.write_page(str(new_full), current_page["frontmatter"], new_page_body)
 
             all_pages = _pages.scan_pages(store._data_root)
             for other_page in all_pages:
-                if other_page["id"] == page["id"]:
+                if other_page["id"] == current_page["id"]:
                     continue
                 new_body = _pages.rewrite_wikilinks(other_page["body"], old_title, new_title)
                 if new_body != other_page["body"]:
@@ -461,13 +468,13 @@ class WikiStore:
                     store._search.remove_page(other_page["id"])
                     store._search.index_page(other_page["id"], other_page["title"], new_body)
 
-            store._search.remove_page(page["id"])
-            store._search.index_page(page["id"], new_title, new_page_body)
+            store._search.remove_page(current_page["id"])
+            store._search.index_page(current_page["id"], new_title, new_page_body)
 
-            return {"id": page["id"], "old_title": old_title, "new_title": new_title}
+            return {"id": current_page["id"], "old_title": old_title, "new_title": new_title}
 
         try:
-            return self._mutate("wiki_rename", _write, f"wiki: rename {old_title} → {new_title}")
+            return self._mutate("wiki_rename", _write, f"wiki: rename {page['title']} → {new_title}")
         except StoreError as e:
             return e.response
 
