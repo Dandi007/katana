@@ -17,6 +17,7 @@ from katana_kernel import (
     MutationBrokenError,
     ResourceIdLedger,
     TransactionManifest,
+    head_sha,
 )
 from katana_wiki_mcp import enumerate as _enumerate
 from katana_wiki_mcp import ingest as _ingest
@@ -135,16 +136,21 @@ async def wiki_query(question: str, top_k: int = 10) -> dict:
 
 @mcp.tool()
 async def wiki_ingest_plan(source_text: str) -> dict:
-    """入库第一步：server orient 判重 + 返回判断指令(create-vs-update/resist-table/拆单元)与 proposal schema。
-    据此造 proposal 交给 wiki_ingest_apply。Args: source_text 待入库内容(或其摘录)。"""
-    return _ingest.plan(source_text, _scope, search_fn=vault_search.search)
+    """入库第一步：server orient 判重，并返回 proposal schema 与唯一 canonical base_sha。
+    updates apply 必须传 expected_base_sha=plan.base_sha。Args: source_text 待入库内容(或其摘录)。"""
+    return _ingest.plan(
+        source_text,
+        _scope,
+        search_fn=vault_search.search,
+        base_sha=head_sha(_wiki_root or "."),
+    )
 
 
 @mcp.tool()
 async def wiki_ingest_apply(proposal: dict,
                             expected_base_sha: str | None = None) -> dict:
-    """入库第二步：server 校验不变量(缺 provenance/outlink/frontmatter 必拒,零落盘)→ 通过则经 kernel 治理链写页+自动反链+log+commit。
-    Args: proposal 见 wiki_ingest_plan 返回的 proposal_schema。expected_base_sha 可选 CAS 校验。返回 applied/rejected/commit。"""
+    """入库第二步：server 校验 create/update 意图及页面不变量；existing page 仅允许 updates 且必须保留 path/id，任何歧义均拒绝并零落盘。通过后经 kernel 治理链写页+自动反链+log+commit。
+    Args: proposal 见 wiki_ingest_plan 返回的 proposal_schema。updates 非空时 expected_base_sha 必须使用 plan 返回值。返回 applied/rejected/commit。"""
     if _store is None:
         raise RuntimeError("wiki store not initialized; call configure() first")
     return _server_mutation(
