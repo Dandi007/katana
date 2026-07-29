@@ -152,12 +152,6 @@ class WikiStore:
 
     def wiki_list(self, prefix: str | None = None, limit: int = 50, cursor: str | None = None) -> dict:
         all_pages = _pages.scan_pages(self._data_root)
-        start_idx = 0
-        if cursor:
-            for i, p in enumerate(all_pages):
-                if p["id"] == cursor:
-                    start_idx = i + 1
-                    break
         items = []
         for p in all_pages:
             if prefix and not p["title"].startswith(prefix):
@@ -167,6 +161,12 @@ class WikiStore:
                 "title": p["title"],
                 "摘要": p["frontmatter"].get("摘要", ""),
             })
+        start_idx = 0
+        if cursor:
+            for i, item in enumerate(items):
+                if item["id"] == cursor:
+                    start_idx = i + 1
+                    break
         page_items = items[start_idx:start_idx + limit]
         next_cursor = page_items[-1]["id"] if len(page_items) == limit and start_idx + limit < len(items) else None
         return {"items": page_items, "cursor": next_cursor, "total": len(items)}
@@ -227,8 +227,9 @@ class WikiStore:
 
     # ── write tools ─────────────────────────────────────────────────────────
 
-    def wiki_create(self, title: str, body: str, frontmatter: dict,
-                    allow_no_outlink: bool = False) -> dict:
+    def _validate_create_page(self, title: str, body: str, frontmatter: dict,
+                              allow_no_outlink: bool = False,
+                              extra_titles: set[str] | None = None) -> dict | None:
         title_err = _pages.validate_title(title)
         if title_err:
             return {"code": "VALIDATION_FAILED", "message": title_err}
@@ -242,22 +243,35 @@ class WikiStore:
                 "existing_摘要": existing["frontmatter"].get("摘要", ""),
             }
 
+        if extra_titles and title in extra_titles:
+            return {
+                "code": "TITLE_EXISTS",
+                "message": f"title already exists in batch: {title}",
+            }
+
         if frontmatter.get("id"):
             return {"code": "VALIDATION_FAILED", "message": "create must not specify id; id is server-assigned"}
 
         full_fm = dict(frontmatter)
         full_fm["id"] = None
-
-        full_body = body
-        errs = _inv.validate_page(full_fm, full_body, require_summary=True, require_sources=True)
-        if not allow_no_outlink:
-            pass
-        else:
+        errs = _inv.validate_page(full_fm, body, require_summary=True, require_sources=True)
+        if allow_no_outlink:
             errs = [e for e in errs if "无 outlink" not in e]
 
         if errs:
             return {"code": "VALIDATION_FAILED", "message": "; ".join(errs)}
 
+        return None
+
+    def wiki_create(self, title: str, body: str, frontmatter: dict,
+                    allow_no_outlink: bool = False) -> dict:
+        err = self._validate_create_page(title, body, frontmatter, allow_no_outlink=allow_no_outlink)
+        if err is not None:
+            return err
+
+        full_fm = dict(frontmatter)
+        full_fm["id"] = None
+        full_body = body
         store = self
 
         def _write(changed_paths):
@@ -358,6 +372,10 @@ class WikiStore:
             changed_paths.append(old_path)
             changed_paths.append(new_path)
 
+            new_page_body = _pages.rewrite_wikilinks(page["body"], old_title, new_title)
+            if new_page_body != page["body"]:
+                _pages.write_page(str(new_full), page["frontmatter"], new_page_body)
+
             all_pages = _pages.scan_pages(store._data_root)
             for other_page in all_pages:
                 if other_page["id"] == page["id"]:
@@ -372,7 +390,7 @@ class WikiStore:
                     store._search.index_page(other_page["id"], other_page["title"], new_body)
 
             store._search.remove_page(page["id"])
-            store._search.index_page(page["id"], new_title, page["body"])
+            store._search.index_page(page["id"], new_title, new_page_body)
 
             return {"id": page["id"], "old_title": old_title, "new_title": new_title}
 
@@ -447,6 +465,16 @@ class WikiStore:
         pages_list = plan.get("pages", [])
         if not pages_list:
             return {"code": "VALIDATION_FAILED", "message": "plan must contain pages list"}
+
+        seen_titles: set[str] = set()
+        for p in pages_list:
+            title = p["title"]
+            body = p["body"]
+            fm = dict(p.get("frontmatter", {}))
+            err = self._validate_create_page(title, body, fm, extra_titles=seen_titles)
+            if err is not None:
+                return err
+            seen_titles.add(title)
 
         store = self
 

@@ -7,9 +7,16 @@ Tools:
   wiki_ingest_plan, wiki_ingest_apply — batch ingest
   fs_read, fs_list, fs_glob, fs_stat — read-only VFS
   wiki_meta_write — meta file write
+
+CLI:
+  katana-wiki-v2-mcp                  — start MCP server
+  katana-wiki-v2-mcp --rebuild-index  — rebuild search index from pages/
 """
+import argparse
 import datetime
+import json
 import os
+import sys
 from fastmcp import FastMCP
 
 from katana_wiki_v2_mcp import pages as _pages
@@ -165,6 +172,11 @@ async def fs_stat(path: str) -> dict:
 # ── main ────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="katana-wiki-v2-mcp server")
+    parser.add_argument("--rebuild-index", action="store_true",
+                        help="Rebuild the search index from pages/ and exit")
+    args = parser.parse_args()
+
     data_root = os.environ.get("KATANA_WIKI_V2_ROOT", ".")
     embedding_base_url = os.environ.get("KATANA_WIKI_V2_EMBEDDING_URL", "http://172.22.62.133:18081")
     embedding_api_key_path = os.environ.get("KATANA_WIKI_V2_EMBEDDING_KEY_PATH", "")
@@ -172,6 +184,12 @@ def main() -> None:
     embedding_dim = int(os.environ.get("KATANA_WIKI_V2_EMBEDDING_DIM", "512"))
 
     configure(data_root, embedding_base_url, embedding_api_key_path, embedding_model, embedding_dim)
+
+    if args.rebuild_index:
+        store = _get_store()
+        result = store.rebuild_index()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        sys.exit(0)
 
     host = os.environ.get("KATANA_WIKI_V2_MCP_HOST", "127.0.0.1")
     port = int(os.environ.get("KATANA_WIKI_V2_MCP_PORT", "5602"))

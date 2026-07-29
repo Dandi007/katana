@@ -26,24 +26,21 @@ class EmbeddingClient:
             return Path(self.api_key_path).read_text().strip()
         return ""
 
-    def embed(self, texts: list[str]) -> list[list[float]] | None:
-        try:
-            key = self._api_key()
-            headers = {"Content-Type": "application/json"}
-            if key:
-                headers["Authorization"] = f"Bearer {key}"
-            resp = httpx.post(
-                f"{self.base_url}/v1/embeddings",
-                json={"input": texts, "model": self.model},
-                headers=headers,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            embeddings = [d["embedding"] for d in data["data"]]
-            return embeddings
-        except Exception:
-            return None
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        key = self._api_key()
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        resp = httpx.post(
+            f"{self.base_url}/v1/embeddings",
+            json={"input": texts, "model": self.model},
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        embeddings = [d["embedding"] for d in data["data"]]
+        return embeddings
 
 
 class FakeEmbeddingClient:
@@ -162,12 +159,11 @@ class WikiSearch:
         if self._mode == "hybrid" and self._embedding_client is not None:
             try:
                 embeddings = self._embedding_client.embed([query])
-                if embeddings is not None:
-                    self._ensure_lancedb()
-                    if self._table is not None and self._table.count_rows() > 0:
-                        results = self._table.search(embeddings[0]).limit(top_k * 2).to_list()
-                        for r in results:
-                            vector_results.append((r["id"], 1.0 - r["_distance"]))
+                self._ensure_lancedb()
+                if self._table is not None and self._table.count_rows() > 0:
+                    results = self._table.search(embeddings[0]).limit(top_k * 2).to_list()
+                    for r in results:
+                        vector_results.append((r["id"], 1.0 - r["_distance"]))
             except Exception as e:
                 self._last_error = str(e)
                 self._mode = "keyword_only"
@@ -204,14 +200,13 @@ class WikiSearch:
             return
         try:
             embeddings = self._embedding_client.embed([text])
-            if embeddings is not None:
-                self._ensure_lancedb()
-                if self._table is not None:
-                    import pyarrow as pa
-                    self._table.add(pa.table({
-                        "id": [page_id],
-                        "vector": [embeddings[0]],
-                    }))
+            self._ensure_lancedb()
+            if self._table is not None:
+                import pyarrow as pa
+                self._table.add(pa.table({
+                    "id": [page_id],
+                    "vector": [embeddings[0]],
+                }))
         except Exception as e:
             self._degraded_pages.add(page_id)
             self._last_error = str(e)

@@ -140,10 +140,15 @@ def migrate(source: str, dest: str, dry_run: bool = False) -> dict:
             "total_pages": len(pages),
             "conflict_count": len(conflicts),
         }
+        conflict_path = Path(dest) / "migration-conflicts.json"
         if dry_run:
-            conflict_path = Path(dest) / "migration-conflicts.json"
-            if not dry_run or True:
-                print(json.dumps(conflict_report, ensure_ascii=False, indent=2))
+            conflict_path.parent.mkdir(parents=True, exist_ok=True)
+            conflict_path.write_text(json.dumps(conflict_report, ensure_ascii=False, indent=2))
+            print(json.dumps(conflict_report, ensure_ascii=False, indent=2))
+        else:
+            conflict_path.parent.mkdir(parents=True, exist_ok=True)
+            conflict_path.write_text(json.dumps(conflict_report, ensure_ascii=False, indent=2))
+            print(json.dumps(conflict_report, ensure_ascii=False, indent=2))
         return {"success": False, "conflict_report": conflict_report, "pages_processed": len(pages)}
 
     link_rewrites = 0

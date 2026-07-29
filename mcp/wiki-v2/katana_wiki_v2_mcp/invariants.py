@@ -51,8 +51,9 @@ def check_frontmatter(fm: dict) -> list[str]:
             if cr_val not in _VALID_CREDIBILITIES:
                 errors.append(f"credibility 非法: {cr_val}（须 ∈ high/medium/low）")
 
-    if page_type in CODE_TYPES and not has_st and not has_cr:
-        errors.append(f"{page_type} 硬要求 source_type+credibility")
+    if not has_st and not has_cr:
+        type_label = page_type if page_type else "页面"
+        errors.append(f"{type_label} 硬要求 source_type+credibility")
 
     return errors
 
@@ -135,13 +136,9 @@ def validate_edit_grade(
     if "id" in new_fm and "id" not in old_fm:
         errors.append("edit-grade 不得新增 id")
 
-    old_missing = set()
     for key in ("创建日期", "tags", "类型", "source_type", "credibility"):
-        if key not in old_fm:
-            old_missing.add(key)
-    for key in old_missing:
-        if key not in new_fm:
-            errors.append(f"edit-grade 不得新增缺失: {key}（操作前已缺失，操作后仍缺失）")
+        if key in old_fm and key not in new_fm:
+            errors.append(f"edit-grade 不得新增缺失: {key}（操作前存在，操作后缺失）")
 
     if "摘要" in new_fm:
         summary = new_fm["摘要"]
