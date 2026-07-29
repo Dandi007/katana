@@ -31,6 +31,10 @@ class MutationLockError(Exception):
     """Raised when the per-repository governed mutation lock is unavailable."""
 
 
+class RuntimeStateConfigurationError(Exception):
+    """Raised when opt-in runtime state is tracked by or visible to Git."""
+
+
 @dataclass(frozen=True)
 class FileImage:
     """Exact regular-file image used for transaction attestation/preservation."""
@@ -240,6 +244,60 @@ def validate_transaction_paths(repo_root: str, paths: list[str]) -> list[str]:
         if path not in normalized:
             normalized.append(path)
     return normalized
+
+
+def validate_runtime_state_paths(repo_root: str, paths: list[str]) -> list[str]:
+    """Validate runtime-only paths and require them to be ignored and untracked.
+
+    Runtime state intentionally lives outside the Git transaction journal.  This
+    validator is separate from transaction-path validation so ordinary ignored
+    content can never be smuggled into a governed data mutation.
+    """
+    normalized = validate_transaction_paths(repo_root, paths)
+    for path in normalized:
+        ignored = _run(
+            repo_root, "check-ignore", "-q", "--no-index", "--", path,
+        )
+        if ignored.returncode == 1:
+            raise RuntimeStateConfigurationError(
+                f"runtime state path must be ignored by Git: {path!r}"
+            )
+        if ignored.returncode != 0:
+            detail = ignored.stderr.strip() or "git check-ignore failed"
+            raise RuntimeStateConfigurationError(
+                f"cannot verify runtime state path {path!r}: {detail}"
+            )
+
+        tracked = _run(repo_root, "ls-files", "--error-unmatch", "--", path)
+        if tracked.returncode == 0:
+            raise RuntimeStateConfigurationError(
+                f"runtime state path must not be tracked by Git: {path!r}"
+            )
+        if tracked.returncode != 1:
+            detail = tracked.stderr.strip() or "git ls-files failed"
+            raise RuntimeStateConfigurationError(
+                f"cannot verify runtime state path {path!r}: {detail}"
+            )
+    return normalized
+
+
+def validate_runtime_state_tree(repo_root: str, directory: str) -> str:
+    """Require an ignored runtime directory to contain no tracked descendants."""
+    probe = os.path.join(directory, ".path-probe")
+    normalized_probe = validate_runtime_state_paths(repo_root, [probe])[0]
+    normalized_directory = Path(normalized_probe).parent.as_posix()
+    tracked = _run(repo_root, "ls-files", "--", f"{normalized_directory}/")
+    if tracked.returncode != 0:
+        detail = tracked.stderr.strip() or "git ls-files failed"
+        raise RuntimeStateConfigurationError(
+            f"cannot verify runtime state tree {normalized_directory!r}: {detail}"
+        )
+    if tracked.stdout:
+        raise RuntimeStateConfigurationError(
+            "runtime state directory contains tracked files: "
+            f"{normalized_directory!r}"
+        )
+    return normalized_directory
 
 
 def _read_file_image(repo_root: str, path: str) -> FileImage:

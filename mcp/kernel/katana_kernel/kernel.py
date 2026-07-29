@@ -22,6 +22,8 @@ from katana_kernel.gitops import (
     head_sha,
     repository_mutation_lock,
     require_clean_working_tree,
+    validate_runtime_state_paths,
+    validate_runtime_state_tree,
     validate_transaction_paths,
 )
 
@@ -34,6 +36,7 @@ class DomainBinding:
     ledger: "ResourceIdLedger"
     manifest: "TransactionManifest"
     repo_root: str
+    mutation_ledger: "SQLiteMutationLedger | None" = None
 
 
 class MutationBrokenError(RuntimeError):
@@ -70,6 +73,8 @@ class GovernedKernel:
         ledger: "ResourceIdLedger",
         manifest: "TransactionManifest",
         repo_root: str,
+        *,
+        mutation_ledger: "SQLiteMutationLedger | None" = None,
     ) -> DomainBinding:
         if domain in self._bindings:
             raise ValueError(f"domain {domain!r} already bound")
@@ -83,6 +88,7 @@ class GovernedKernel:
             ledger=ledger,
             manifest=manifest,
             repo_root=repo_root,
+            mutation_ledger=mutation_ledger,
         )
         self._bindings[domain] = binding
         self._repo_roots.add(resolved)
@@ -145,13 +151,20 @@ class GovernedKernel:
                 f"CAS mismatch: expected {expected_base_sha[:8]}..., "
                 f"got {base_sha[:8]}..."
             )
-        validate_transaction_paths(
-            binding.repo_root,
-            [
-                binding.ledger.path,
-                os.path.join(binding.manifest.manifests_dir, ".path-probe"),
-            ],
-        )
+        validate_transaction_paths(binding.repo_root, [binding.ledger.path])
+        if binding.manifest.git_tracked:
+            manifest_probe = os.path.join(
+                binding.manifest.manifests_dir, ".path-probe",
+            )
+            validate_transaction_paths(binding.repo_root, [manifest_probe])
+        else:
+            validate_runtime_state_tree(
+                binding.repo_root, binding.manifest.manifests_dir,
+            )
+            if binding.mutation_ledger is not None:
+                validate_runtime_state_paths(
+                    binding.repo_root, [binding.mutation_ledger.path],
+                )
         journal = TransactionJournal(binding.repo_root, base_sha)
         binding.vfs.begin_transaction(journal)
         try:
@@ -193,18 +206,23 @@ class GovernedKernel:
                     op,
                     result,
                     changed_paths=changed_paths,
-                    before_write=journal.capture_path,
+                    before_write=(
+                        journal.capture_path
+                        if binding.manifest.git_tracked
+                        else None
+                    ),
                 )
                 staging_path = os.path.join(
                     binding.manifest.staging_dir,
                     f"{manifest_record['manifest_id']}.json",
                 )
-                journal.record_disk_state(staging_path)
                 manifest_path = os.path.join(
                     binding.manifest.manifests_dir,
                     f"{manifest_record['manifest_id']}.json",
                 )
-                journal.record_rename(staging_path, manifest_path)
+                if binding.manifest.git_tracked:
+                    journal.record_disk_state(staging_path)
+                    journal.record_rename(staging_path, manifest_path)
                 committed_manifest_ids = binding.manifest.commit_manifests(
                     [manifest_record["manifest_id"]],
                 )
@@ -218,12 +236,13 @@ class GovernedKernel:
                 )[0]
                 if ledger_path in journal.paths and ledger_path not in all_paths:
                     all_paths.append(ledger_path)
-                for manifest_name in committed_manifest_ids["manifests"]:
-                    committed_manifest_path = os.path.join(
-                        binding.manifest.manifests_dir, manifest_name,
-                    )
-                    if committed_manifest_path not in all_paths:
-                        all_paths.append(committed_manifest_path)
+                if binding.manifest.git_tracked:
+                    for manifest_name in committed_manifest_ids["manifests"]:
+                        committed_manifest_path = os.path.join(
+                            binding.manifest.manifests_dir, manifest_name,
+                        )
+                        if committed_manifest_path not in all_paths:
+                            all_paths.append(committed_manifest_path)
                 all_paths = validate_transaction_paths(
                     binding.repo_root, all_paths,
                 )
@@ -254,6 +273,27 @@ class GovernedKernel:
                     "git": git_result,
                     "manifest": {"manifest_id": manifest_record["manifest_id"]},
                     "rollback": rollback,
+                }
+
+            if not binding.manifest.git_tracked:
+                try:
+                    journal.verify_worktree()
+                    binding.manifest.finalize(
+                        manifest_record["manifest_id"], git_result,
+                    )
+                    journal.verify_worktree()
+                except Exception as exc:
+                    raise MutationBrokenError(
+                        "governed runtime manifest finalization failed; "
+                        "repository scene preserved",
+                        journal.rollback(),
+                    ) from exc
+                return {
+                    **{k: v for k, v in result.items()},
+                    "git": git_result,
+                    "manifest": {
+                        "manifest_id": manifest_record["manifest_id"],
+                    },
                 }
 
             try:

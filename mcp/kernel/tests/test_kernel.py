@@ -13,6 +13,7 @@ from katana_kernel.gitops import (
     CASRejectionError,
     DirtyWorkTreeError,
     RollbackSafetyError,
+    RuntimeStateConfigurationError,
     git_commit as exact_git_commit,
     head_sha,
 )
@@ -628,3 +629,168 @@ def test_kernel_final_gate_external_overwrite_never_enters_commit(
     assert (Path(git_repo) / "card.md").read_text(
         encoding="utf-8",
     ) == "external overwrite"
+
+
+def _runtime_manifest_kernel(
+    git_repo,
+    memory_domain_policy,
+    *,
+    commit_ignore=True,
+):
+    if commit_ignore:
+        ignore = Path(git_repo) / ".gitignore"
+        ignore.write_text("/.katana/manifests/\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore"], cwd=git_repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "ignore runtime manifests"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+        )
+    kernel = GovernedKernel()
+    manifest = TransactionManifest(
+        os.path.join(git_repo, ".katana", "manifests"),
+        git_tracked=False,
+    )
+    kernel.bind(
+        "memory",
+        memory_domain_policy,
+        GovernedVFS(git_repo),
+        ResourceIdLedger(os.path.join(git_repo, ".katana", "tombstones.json")),
+        manifest,
+        git_repo,
+    )
+    return kernel, manifest
+
+
+def test_kernel_runtime_manifest_is_ignored_and_not_amended(
+    git_repo, memory_domain_policy, monkeypatch,
+):
+    kernel, manifest = _runtime_manifest_kernel(
+        git_repo, memory_domain_policy,
+    )
+
+    def _write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    def _unexpected_amend(*args, **kwargs):
+        raise AssertionError("runtime manifest must not amend the Git commit")
+
+    monkeypatch.setattr("katana_kernel.kernel.amend_commit", _unexpected_amend)
+    result = kernel.mutate(
+        "memory", "create", _valid_args(), write_fn=_write,
+    )
+
+    manifest_record = manifest.get_manifest(result["manifest"]["manifest_id"])
+    tracked = subprocess.run(
+        ["git", "-C", git_repo, "ls-tree", "-r", "HEAD", "--name-only"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    status = subprocess.run(
+        ["git", "-C", git_repo, "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert result["git"]["committed"] is True
+    assert manifest_record["git"] == result["git"]
+    assert not any(path.startswith(".katana/manifests/") for path in tracked)
+    assert status == ""
+
+
+def test_kernel_runtime_manifest_requires_ignored_directory(
+    git_repo, memory_domain_policy,
+):
+    kernel, _ = _runtime_manifest_kernel(
+        git_repo, memory_domain_policy, commit_ignore=False,
+    )
+    called = False
+
+    def _write(binding, args):
+        nonlocal called
+        called = True
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    with pytest.raises(RuntimeStateConfigurationError, match="must be ignored"):
+        kernel.mutate(
+            "memory", "create", _valid_args(), write_fn=_write,
+        )
+
+    assert called is False
+
+
+def test_kernel_runtime_manifest_rejects_tracked_files_in_ignored_directory(
+    git_repo, memory_domain_policy,
+):
+    manifest_dir = Path(git_repo) / ".katana" / "manifests"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "old.json").write_text("{}", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".katana/manifests/old.json"],
+        cwd=git_repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "seed tracked manifest"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    kernel, _ = _runtime_manifest_kernel(
+        git_repo, memory_domain_policy,
+    )
+
+    def _write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    with pytest.raises(
+        RuntimeStateConfigurationError,
+        match="contains tracked files",
+    ):
+        kernel.mutate(
+            "memory", "create", _valid_args(), write_fn=_write,
+        )
+
+
+def test_kernel_runtime_manifest_keeps_tombstone_tracked(
+    git_repo, memory_domain_policy,
+):
+    target = Path(git_repo) / "card.md"
+    target.write_text("delete me", encoding="utf-8")
+    subprocess.run(["git", "add", "card.md"], cwd=git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "seed card"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    kernel, manifest = _runtime_manifest_kernel(
+        git_repo, memory_domain_policy,
+    )
+
+    def _delete(binding, args):
+        binding.vfs.delete("card.md")
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    result = kernel.mutate(
+        "memory", "delete", {}, write_fn=_delete,
+    )
+    tracked = subprocess.run(
+        ["git", "-C", git_repo, "ls-tree", "-r", "HEAD", "--name-only"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+
+    assert result["git"]["committed"] is True
+    assert ".katana/tombstones.json" in tracked
+    assert not any(path.startswith(".katana/manifests/") for path in tracked)
+    assert manifest.get_manifest(result["manifest"]["manifest_id"])["git"][
+        "committed"
+    ] is True

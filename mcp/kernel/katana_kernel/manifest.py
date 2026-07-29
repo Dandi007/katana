@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from pathlib import Path
 from collections.abc import Callable
@@ -19,9 +20,10 @@ class ManifestError(Exception):
 
 
 class TransactionManifest:
-    def __init__(self, manifests_dir: str):
+    def __init__(self, manifests_dir: str, *, git_tracked: bool = True):
         self._dir = Path(manifests_dir)
         self._staging_dir = self._dir / ".staging"
+        self._git_tracked = git_tracked
 
     def _ensure_dirs(self):
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -108,6 +110,44 @@ class TransactionManifest:
         except (json.JSONDecodeError, OSError):
             return None
 
+    def finalize(self, manifest_id: str, git_result: dict) -> dict:
+        """Atomically attach the published Git result to a runtime manifest."""
+        self._ensure_dirs()
+        path = self._dir / f"{manifest_id}.json"
+        if not path.is_file():
+            raise ManifestError(f"manifest not found: {manifest_id}")
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise ManifestError(f"cannot read manifest: {manifest_id}") from exc
+        record["git"] = git_result
+        payload = json.dumps(record, indent=2).encode("utf-8")
+        temporary = self._staging_dir / (
+            f"{manifest_id}.{secrets.token_hex(8)}.tmp"
+        )
+        try:
+            with temporary.open("xb") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+            try:
+                directory_fd = os.open(self._dir, os.O_RDONLY)
+            except OSError:
+                directory_fd = None
+            if directory_fd is not None:
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except OSError as exc:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            raise ManifestError(f"cannot finalize manifest: {manifest_id}") from exc
+        return record
+
     @property
     def manifests_dir(self) -> str:
         return str(self._dir)
@@ -115,3 +155,7 @@ class TransactionManifest:
     @property
     def staging_dir(self) -> str:
         return str(self._staging_dir)
+
+    @property
+    def git_tracked(self) -> bool:
+        return self._git_tracked
