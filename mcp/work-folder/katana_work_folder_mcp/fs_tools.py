@@ -485,6 +485,32 @@ class FSTools:
             "content_revision": _content_hash(content),
         }
 
+    def _list_entries(self, folder_id: str, internal_dir: str) -> list[dict]:
+        """列出一层直接子节点，并从受治理的 file glob 推导目录节点。
+
+        GovernedVFS.ls 只返回文件。Full VFS 的 ``fs_list`` 还需要呈现目录，
+        因此扫描目标目录下的文件并把首个相对 segment 折叠为 directory entry。
+        公共结果仍只包含 folder-relative filename，不暴露 repo locator。
+        """
+        prefix = internal_dir.rstrip("/") + "/"
+        descendants = self._vfs.ls(f"{internal_dir}/**/*")
+        entries: dict[str, dict] = {}
+        for internal_name in descendants:
+            if not internal_name.startswith(prefix):
+                continue
+            remainder = internal_name[len(prefix) :]
+            first, separator, _ = remainder.partition("/")
+            child_internal = prefix + first
+            filename = child_internal[len(folder_id) + 1 :]
+            if separator:
+                entries[filename] = {
+                    "filename": filename,
+                    "node_type": "directory",
+                }
+            elif filename not in entries:
+                entries[filename] = self._entry(folder_id, internal_name)
+        return [entries[name] for name in sorted(entries)]
+
     def _file_success(
         self,
         folder_id: str,
@@ -604,10 +630,7 @@ class FSTools:
                     filename=dirname,
                     current_commit=self._commit(),
                 )
-            entries = [
-                self._entry(folder_id, name)
-                for name in self._vfs.ls(internal_dir)
-            ]
+            entries = self._list_entries(folder_id, internal_dir)
         except VFSError:
             return _make_error(
                 "INVALID_PATH",
