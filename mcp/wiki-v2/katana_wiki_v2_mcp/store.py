@@ -399,14 +399,13 @@ class WikiStore:
         if title_err:
             return {"code": "VALIDATION_FAILED", "message": title_err}
 
-        existing = _pages.find_page_by_title(self._data_root, new_title)
-        if existing is not None:
-            return {"code": "TITLE_EXISTS", "message": f"title already exists: {new_title}"}
-
         old_title = page["title"]
         store = self
 
         def _write(changed_paths):
+            conflict = store._check_title_exists_locked(new_title)
+            if conflict is not None:
+                raise StoreError(conflict)
             old_path = _pages.title_to_path(old_title)
             new_path = _pages.title_to_path(new_title)
 
@@ -438,7 +437,10 @@ class WikiStore:
 
             return {"id": page["id"], "old_title": old_title, "new_title": new_title}
 
-        return self._mutate("wiki_rename", _write, f"wiki: rename {old_title} → {new_title}")
+        try:
+            return self._mutate("wiki_rename", _write, f"wiki: rename {old_title} → {new_title}")
+        except StoreError as e:
+            return e.response
 
     def wiki_delete(self, ref: str, force: bool = False, inlink_action: str | None = None) -> dict:
         page = _pages.find_page_by_ref(self._data_root, ref)
@@ -504,7 +506,9 @@ class WikiStore:
             fm = dict(c.get("frontmatter", {}))
             similar = []
             existing = _pages.find_page_by_title(self._data_root, title)
+            action = "create"
             if existing is not None:
+                action = "skip"
                 similar.append({
                     "id": existing.get("id"),
                     "title": title,
@@ -526,7 +530,7 @@ class WikiStore:
                 "title": title,
                 "body": body,
                 "frontmatter": fm,
-                "action": "create",
+                "action": action,
                 "similar": similar,
             })
         return {
@@ -541,6 +545,8 @@ class WikiStore:
 
         seen_titles: set[str] = set()
         for p in pages_list:
+            if p.get("action") == "skip":
+                continue
             title = p["title"]
             body = p["body"]
             fm = dict(p.get("frontmatter", {}))
@@ -554,6 +560,9 @@ class WikiStore:
         def _write(changed_paths):
             results = []
             for p in pages_list:
+                if p.get("action") == "skip":
+                    results.append({"id": p.get("existing_id", p.get("id")), "path": None, "skipped": True})
+                    continue
                 title = p["title"]
                 conflict = store._check_title_exists_locked(title)
                 if conflict is not None:

@@ -124,9 +124,27 @@ def validate_edit_grade(
     if "id" in new_fm and "id" not in old_fm:
         errors.append("edit-grade 不得新增 id")
 
-    for key in ("创建日期", "tags", "类型", "source_type", "credibility"):
+    for key in ("创建日期", "tags", "类型", "source_type", "credibility", "摘要"):
         if key in old_fm and key not in new_fm:
             errors.append(f"edit-grade 不得新增缺失: {key}（操作前存在，操作后缺失）")
+
+    if "类型" in new_fm and new_fm["类型"] not in ALLOWED_TYPES:
+        errors.append(f"类型非法: {new_fm['类型']}（须 ∈ 卡片/索引/源码分析/架构）")
+
+    if "tags" in new_fm:
+        if not isinstance(new_fm["tags"], list):
+            errors.append("tags 须为 YAML list")
+
+    has_st = "source_type" in new_fm
+    has_cr = "credibility" in new_fm
+
+    if has_st and has_cr:
+        if new_fm["source_type"] not in _VALID_SOURCE_TYPES:
+            errors.append(f"source_type 非法: {new_fm['source_type']}（须 ∈ human/mixed/llm）")
+        if new_fm["credibility"] not in _VALID_CREDIBILITIES:
+            errors.append(f"credibility 非法: {new_fm['credibility']}（须 ∈ high/medium/low）")
+    elif has_st != has_cr:
+        errors.append("source_type 与 credibility 必须成对出现")
 
     if "摘要" in new_fm:
         summary = new_fm["摘要"]

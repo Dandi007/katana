@@ -226,8 +226,8 @@ class WikiSearch:
         if self._table is not None:
             try:
                 self._table.delete(f"id = '{page_id}'")
-            except Exception:
-                pass
+            except Exception as e:
+                self._last_error = str(e)
 
     def index_health(self) -> dict:
         return {
@@ -260,4 +260,5 @@ class WikiSearch:
                 self._mode = "keyword_only"
 
         for page in pages:
-            self.index_page(page["id"], page["title"], page["body"])
+            if page["id"] and not page.get("_error"):
+                self.index_page(page["id"], page["title"], page["body"])
