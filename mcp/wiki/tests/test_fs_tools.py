@@ -1510,3 +1510,34 @@ def test_fs_stat_rejected_in_excluded_dir(tools):
     os.makedirs(os.path.join(tools._repo_root, ".git"), exist_ok=True)
     result = tools.fs_stat(".git")
     assert result["code"] == "INVALID_PATH"
+
+
+def test_scan_tolerates_corrupt_frontmatter(tmp_path):
+    """单个坏 frontmatter 不得锁死全库 mutation。
+
+    _scan 是只读扫描，之前用严格 parse_page，任一页 YAML 解析失败就整体抛错，
+    导致 fs_create/fs_write/fs_edit 全部 OPERATION_FAILED（2026-07-16 实际事故）。
+    """
+    import subprocess
+    from katana_kernel import (GovernedKernel, GovernedVFS, ResourceIdLedger,
+                               TransactionManifest)
+    from katana_wiki_mcp.store import _wiki_policy
+    from katana_wiki_mcp.fs_tools import FSTools
+
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    good = ("---\nid: w-aaa111\n创建日期: 2026-06-20 09:00\n"
+            "tags: [x]\n类型: 卡片\n摘要: s\n---\n正文 [[某页]]\n")
+    (tmp_path / "good.md").write_text(good, encoding="utf-8")
+    # 隔离区里的坏页：tags 值含 YAML 注释符、标量内未转义引号
+    q = tmp_path / "_quarantine"
+    q.mkdir()
+    (q / "bad.md").write_text('---\ntags: [#x]\nbad: "un"escaped\n---\nbody\n',
+                              encoding="utf-8")
+
+    kernel = GovernedKernel()
+    kernel.bind("wiki", _wiki_policy(), GovernedVFS(str(tmp_path)),
+                ResourceIdLedger(str(tmp_path / ".katana" / "tombstones.json"), prefix="w-"),
+                TransactionManifest(str(tmp_path / ".katana" / "manifests")),
+                str(tmp_path))
+    pages = FSTools(kernel, str(tmp_path))._scan()
+    assert [p["id"] for p in pages] == ["w-aaa111"]

@@ -91,3 +91,31 @@ def test_lint_mechanical_zone_scoping(tmp_path):
     scoped = lint.lint_mechanical(str(tmp_path), zone="Zettelkasten")
     assert all("智元工作" not in f["path"] for f in scoped["findings"])
     assert all(f["path"].startswith("Zettelkasten/") for f in scoped["findings"])
+
+
+def test_excluded_zone_reports_not_checked(tmp_path):
+    """raw/排除区必须说明「未做检查」，不能静默返回 findings:[] 假装干净。"""
+    (tmp_path / "DeepThought").mkdir()
+    (tmp_path / "DeepThought" / "a.md").write_text("no frontmatter\n", encoding="utf-8")
+    r = lint.lint_mechanical(str(tmp_path), zone="DeepThought")
+    assert r["scanned"] == 0
+    assert r["findings"] == []
+    assert r["skipped"] and "未做任何检查" in r["skipped"][0]
+
+
+def test_findings_pagination_and_summary(tmp_path):
+    """findings 必须可分页，且始终带全量汇总（全库一次全取约 80k tokens，不可用）。"""
+    zone = tmp_path / "Zettelkasten"
+    zone.mkdir()
+    for i in range(5):
+        (zone / f"p{i}.md").write_text("bare body, no frontmatter\n", encoding="utf-8")
+    full = lint.lint_mechanical(str(tmp_path), zone="Zettelkasten", limit=None)
+    assert full["total_findings"] == len(full["findings"]) > 5
+    assert full["truncated"] is False
+    assert sum(full["by_code"].values()) == full["total_findings"]
+
+    page = lint.lint_mechanical(str(tmp_path), zone="Zettelkasten", offset=0, limit=3)
+    assert len(page["findings"]) == 3
+    assert page["total_findings"] == full["total_findings"]  # 汇总不受分页影响
+    assert page["truncated"] is True
+    assert page["by_code"] == full["by_code"]

@@ -291,14 +291,35 @@ def test_search_routes_through_vault_search(wiki_repo, monkeypatch):
     def fake_search(query, **kwargs):
         captured["dir"] = kwargs.get("dir")
         return vs.SearchResponse(
-            results=[vs.SearchResult(path="a.md", score=0.5, title="A", snippet="s")],
+            results=[vs.SearchResult(path="existing.md", score=0.5, title="A", snippet="s")],
             mode="hybrid")
 
     monkeypatch.setattr(server.vault_search, "search", fake_search)
     res = _run(server.wiki_search("查询词", top_k=3))
     assert isinstance(res, list)
-    assert res[0]["path"] == "a.md"
+    assert res[0]["path"] == "existing.md"
     assert captured["dir"] == server._scope  # wiki_root==kb_root → None
+
+
+def test_search_drops_cross_domain_results(wiki_repo, monkeypatch):
+    """vault-search 索引多个 root；wiki_search 只应返回本仓真实存在的页。
+
+    scope 为 None 时（wiki_root==kb_root）没有 dir 过滤，未过滤的结果会混入
+    work-records/vault 的路径，而本 server 的 VFS 根本打不开它们。
+    """
+    def fake_search(query, **kwargs):
+        return vs.SearchResponse(
+            results=[
+                vs.SearchResult(path="智元工作/工作记录/2026/07/13/x/design.md",
+                                score=0.9, title="X", snippet="s"),
+                vs.SearchResult(path="existing.md", score=0.4, title="A", snippet="s"),
+                vs.SearchResult(path="Ideas/nope.md", score=0.3, title="N", snippet="s"),
+            ],
+            mode="hybrid")
+
+    monkeypatch.setattr(server.vault_search, "search", fake_search)
+    res = _run(server.wiki_search("查询词", top_k=10))
+    assert [r["path"] for r in res] == ["existing.md"]
 
 
 # --- 追加：wiki_list_docs / wiki_lint_mechanical ---

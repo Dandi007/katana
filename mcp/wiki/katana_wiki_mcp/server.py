@@ -85,11 +85,49 @@ def configure(wiki_root: str, kb_root: str) -> None:
 
 
 def _do_search(query: str, top_k: int, scope: str | None) -> list[dict]:
-    resp = vault_search.search(query, top_k=top_k, dir=scope)
-    return [
-        {"path": r.path, "score": r.score, "title": r.title, "snippet": r.snippet}
-        for r in resp.results
-    ]
+    # vault-search indexes several roots (wiki + work-records + vault) into one
+    # index, and `dir` only scopes to a single prefix. When wiki_root == kb_root
+    # the computed scope is None, so unfiltered results would include paths from
+    # other domains that this server's VFS cannot even open (RESOURCE_NOT_FOUND).
+    # Over-fetch, then keep only paths that actually exist in the wiki repo.
+    fetch_k = top_k if scope else max(top_k * 4, 20)
+    resp = vault_search.search(query, top_k=fetch_k, dir=scope)
+    out: list[dict] = []
+    for r in resp.results:
+        if not scope and not _is_wiki_path(r.path):
+            continue
+        out.append(
+            {"path": r.path, "score": r.score, "title": r.title, "snippet": r.snippet}
+        )
+        if len(out) >= top_k:
+            break
+    return out
+
+
+def _is_wiki_path(path: str) -> bool:
+    """Whether `path` (kb_root-relative) resolves to a real file in the wiki repo."""
+    if not _wiki_root or not path:
+        return False
+    candidate = os.path.normpath(os.path.join(_wiki_root, path))
+    root = os.path.normpath(_wiki_root)
+    if not (candidate == root or candidate.startswith(root + os.sep)):
+        return False
+    return os.path.isfile(candidate)
+
+
+def _wiki_scoped_search(query: str, *, top_k: int = 10, dir: str | None = None, **kwargs):
+    """vault_search.search, with cross-domain results dropped.
+
+    Injected into query/ingest so their dedup candidates obey the same wiki-only
+    boundary as wiki_search — otherwise `cold` and create-vs-update decisions are
+    made against pages from other domains.
+    """
+    fetch_k = top_k if dir else max(top_k * 4, 20)
+    resp = vault_search.search(query, top_k=fetch_k, dir=dir, **kwargs)
+    if not dir:
+        resp.results = [r for r in resp.results if _is_wiki_path(r.path)]
+    del resp.results[top_k:]
+    return resp
 
 
 @mcp.tool()
@@ -127,7 +165,7 @@ async def wiki_query(question: str, top_k: int = 10) -> dict:
     return _server_mutation(
         lambda: _query._do_query(
             question, _scope, _wiki_root or ".", top_k,
-            search_fn=vault_search.search,
+            search_fn=_wiki_scoped_search,
             log_fn=_governed_append_log,
             now_fn=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         )
@@ -141,7 +179,7 @@ async def wiki_ingest_plan(source_text: str) -> dict:
     return _ingest.plan(
         source_text,
         _scope,
-        search_fn=vault_search.search,
+        search_fn=_wiki_scoped_search,
         base_sha=head_sha(_wiki_root or "."),
     )
 
@@ -174,13 +212,17 @@ async def wiki_list_docs(zone: str | None = None) -> list[dict]:
 
 
 @mcp.tool()
-async def wiki_lint_mechanical(path: str | None = None, zone: str | None = None) -> dict:
+async def wiki_lint_mechanical(path: str | None = None, zone: str | None = None,
+                               offset: int = 0, limit: int | None = 200) -> dict:
     """确定性机械体检：逐页不变量（缺 provenance/outlink/摘要/frontmatter）+ 跨页 orphan/broken_link。
 
-    返回 {findings:[{path,code,detail}], skipped, scanned}。raw zone 自动豁免。
-    Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "Zettelkasten"），跨页基线只在该 zone 内算。
+    返回 {findings, skipped, scanned, total_findings, by_code, affected_pages, offset, truncated}。
+    raw zone 自动豁免；若 zone 落在排除区，skipped 会说明「未做检查」而非静默报干净。
+    Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "Zettelkasten"），跨页基线只在该 zone 内算；
+      offset/limit 对 findings 分页（默认每页 200；全库 findings 可达数千条，勿一次全取）。先看 by_code 汇总再按需翻页。
     """
-    return _lint.lint_mechanical(_wiki_root or ".", path, zone=zone)
+    return _lint.lint_mechanical(_wiki_root or ".", path, zone=zone,
+                                 offset=offset, limit=limit)
 
 
 # ── fs_* Full VFS tools ──────────────────────────────────────────────────

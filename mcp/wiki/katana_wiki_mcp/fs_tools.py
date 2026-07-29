@@ -25,6 +25,7 @@ from katana_kernel.gitops import cas_guard
 from katana_kernel.policy import PolicyViolationError
 from katana_kernel.vfs import VFSError
 from katana_wiki_mcp import invariants as _inv
+from katana_wiki_mcp.enumerate import safe_parse_page
 from katana_wiki_mcp.pages import parse_page, render_page
 
 ID_RE = re.compile(r"w-[0-9a-f]{6}")
@@ -204,9 +205,15 @@ class FSTools:
                 continue
             try:
                 text = self._vfs.read_text(p)
+                # Tolerate unparseable frontmatter: this is a read-only scan feeding
+                # id/duplicate checks, and a strict parse here would raise on any one
+                # corrupt page (e.g. a file parked in _quarantine) and thereby block
+                # every governed mutation repo-wide.
+                fm, _ = safe_parse_page(text)
             except Exception:
                 continue
-            fm, _ = parse_page(text)
+            if not isinstance(fm, dict):
+                continue
             pid = fm.get("id")
             if not pid or not fm.get("tags") or not fm.get("类型"):
                 continue

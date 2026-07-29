@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 
 from katana_wiki_mcp import invariants as _inv
-from katana_wiki_mcp.enumerate import enumerate_docs, safe_parse_page
+from katana_wiki_mcp.enumerate import DEFAULT_EXCLUDE_DIRS, enumerate_docs, safe_parse_page
 from pathlib import Path
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
@@ -51,14 +51,29 @@ def _basename(path: str) -> str:
 
 def lint_mechanical(
     wiki_root: str, path: str | None = None, *,
-    zone: str | None = None, exclude_dirs: set[str] | None = None
+    zone: str | None = None, exclude_dirs: set[str] | None = None,
+    offset: int = 0, limit: int | None = None,
 ) -> dict:
     """机械体检：逐页 invariants + 跨页 orphan/broken_link。raw zone 由枚举层豁免。
-    Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "Zettelkasten"），跨页基线只在该 zone 内算。"""
+    Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "Zettelkasten"），跨页基线只在该 zone 内算；offset/limit 对 findings 分页（默认返回全部）。"""
     docs = enumerate_docs(wiki_root, exclude_dirs=exclude_dirs)
+    all_docs_count = len(docs)
     if zone:
         z = zone.rstrip("/") + "/"
         docs = [d for d in docs if d["path"].startswith(z)]
+        if not docs:
+            # Distinguish "zone is clean" from "zone is not linted at all": the raw
+            # zones (转换文档 / DeepThought) are excluded by the enumerator, so a bare
+            # scanned:0 with no findings would read as a pass on hundreds of files.
+            excluded = sorted(exclude_dirs if exclude_dirs is not None else DEFAULT_EXCLUDE_DIRS)
+            head = z.split("/", 1)[0]
+            reason = (
+                f"zone '{zone}' 是 raw/排除区（excluded={excluded}），枚举层不覆盖，未做任何检查"
+                if head in excluded else
+                f"zone '{zone}' 下无可 lint 文档（全库可 lint 文档 {all_docs_count} 篇）"
+            )
+            return {"findings": [], "skipped": [reason], "scanned": 0,
+                    "total_findings": 0, "truncated": False}
     findings: list[dict] = []
 
     # 跨页基线：所有页 basename 集合 + 所有被链 target 集合
@@ -93,4 +108,21 @@ def lint_mechanical(
                 findings.append({"path": d["path"], "code": "broken_link",
                                  "detail": f"断链 [[{tgt}]]：无对应页面"})
 
-    return {"findings": findings, "skipped": [], "scanned": len(targets)}
+    total = len(findings)
+    by_code: dict[str, int] = {}
+    for f in findings:
+        by_code[f["code"]] = by_code.get(f["code"], 0) + 1
+    # A full-zone lint yields thousands of findings (~80k tokens on Zettelkasten),
+    # which is unusable as a single tool response. Always report the aggregate and
+    # let the caller page through the detail.
+    page = findings[offset:] if limit is None else findings[offset:offset + limit]
+    return {
+        "findings": page,
+        "skipped": [],
+        "scanned": len(targets),
+        "total_findings": total,
+        "by_code": by_code,
+        "affected_pages": len({f["path"] for f in findings}),
+        "offset": offset,
+        "truncated": (offset + len(page)) < total,
+    }
