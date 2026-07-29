@@ -162,3 +162,17 @@ def test_findings_pagination_and_summary(tmp_path):
     assert page["total_findings"] == full["total_findings"]  # 汇总不受分页影响
     assert page["truncated"] is True
     assert page["by_code"] == full["by_code"]
+
+
+def test_escaped_pipe_alias_is_not_broken_link(tmp_path):
+    """表格内 [[页\\|别名]] 的 \\| 是 | 的必要转义，不得被误报为断链。
+
+    实测线上仓有 41 处这种写法（markdown 表格里 | 必须转义），旧实现直接
+    split('|') 会留下 '页\\' 这个不存在的 target。
+    """
+    _page(tmp_path / "Zettelkasten" / "甲.md", _GOOD_FM, "见 [[乙]]\n")
+    _page(tmp_path / "Zettelkasten" / "乙.md", _GOOD_FM,
+          "| 列 | 值 |\n|---|---|\n| **[[甲\\|别名]]** | x |\n")
+    fs = lint.lint_mechanical(str(tmp_path))["findings"]
+    assert not any(f["code"] == "broken_link" for f in fs)
+    assert lint.extract_wikilinks("| [[甲\\|别名]] |") == {"甲"}

@@ -1169,7 +1169,12 @@ class FSTools:
                     current_commit=commit, retryable=False,
                 )
 
-        err = self._validate_page_content(content)
+        # allow_missing_id: 792 of 801 pages predate the id mechanism and
+        # deliberately keep none (ingest_apply enforces the same rule). The
+        # id-immutability and duplicate-id guards above already handle both the
+        # None and the forged case, so requiring an id here would make the
+        # governed write path unusable for 98% of the repo.
+        err = self._validate_page_content(content, allow_missing_id=True)
         if err:
             return _make_error(
                 "INVALID_CONTENT", err,
@@ -1312,8 +1317,22 @@ class FSTools:
                 resource_id=old_rid, virtual_path=path,
                 current_commit=commit, retryable=False,
             )
+        if not old_rid and new_rid:
+            # Legacy pages (created before ids existed) deliberately have none —
+            # ingest_apply enforces the same rule ("legacy page has no id; update
+            # must not add or forge id"). Editing such a page must not mint one.
+            return _make_error(
+                "REF_MISMATCH",
+                "legacy page has no id; edits must not add or forge one",
+                virtual_path=path,
+                current_commit=commit, retryable=False,
+            )
 
-        err = self._validate_page_content(new_text)
+        # allow_missing_id: an edit must not depend on the page having an id.
+        # 792 of 801 pages predate the id mechanism, and the two id-based guards
+        # above already tolerate None, so requiring one here made the governed
+        # path read-only for 98% of the repo.
+        err = self._validate_page_content(new_text, allow_missing_id=True)
         if err:
             return _make_error(
                 "INVALID_CONTENT", err,
@@ -1762,7 +1781,8 @@ class FSTools:
                         raise ValueError(f"batch op {i}: id is immutable")
                     if old_rid and not new_rid:
                         content = tools._inject_id(content, old_rid)
-                    err = tools._validate_page_content(content)
+                    # 与单体 fs_write 一致：存量页无 id 是设计如此，不得因此拒写
+                    err = tools._validate_page_content(content, allow_missing_id=True)
                     if err:
                         raise ValueError(f"batch op {i}: {err}")
                     binding.vfs.write(path, content, op="fs_write", args={"path": path})
@@ -1786,7 +1806,8 @@ class FSTools:
                         else text.replace(old_string, new_string, 1)
                     if len(new_text.encode("utf-8")) > _MAX_FILE_SIZE:
                         raise ValueError(f"batch op {i}: result exceeds max file size")
-                    err = tools._validate_page_content(new_text)
+                    # 与单体 fs_edit 一致：存量页无 id 不阻塞编辑
+                    err = tools._validate_page_content(new_text, allow_missing_id=True)
                     if err:
                         raise ValueError(f"batch op {i}: {err}")
                     new_rid = _page_id_from_content(new_text)

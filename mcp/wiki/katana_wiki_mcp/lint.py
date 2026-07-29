@@ -35,7 +35,9 @@ def extract_wikilinks(body: str) -> set[str]:
     """
     out: set[str] = set()
     for m in _WIKILINK_RE.findall(body):
-        t = m.split("|")[0].split("#")[0].strip().strip("/")
+        # 表格内的 alias 必须把 | 转义成 \|（否则被当列分隔符），因此先解转义，
+        # 再按 | 切 alias；否则 `[[甲\|别名]]` 会留下 `甲\` 被误报为断链。
+        t = m.replace("\\|", "|").split("|")[0].split("#")[0].strip().strip("/")
         if t:
             out.add(t)
     return out
