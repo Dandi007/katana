@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -31,7 +32,7 @@ from typing import Any, Iterable
 import yaml
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PLAN_KIND = "katana-work-folder-flat-migration"
 MAINTENANCE_MODE = "work-folder-offline-flat-migration"
 ID_DOMAIN = b"katana.work-folder.flat-migration.v1\0"
@@ -60,7 +61,19 @@ REPO_ROOT_CONTROL_NAMES = {
     ".katana",
     "MIGRATION_BASE.json",
 }
-LEGACY_ROOT_CONTROL_NAMES = {"INDEX.md", "AGENTS.md", "CLAUDE.md", ".katana"}
+LEGACY_ROOT_CONTROL_NAMES = {
+    "INDEX.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".gitignore",
+    ".gitkeep",
+    ".katana",
+}
+DOUBLE_ROOT_RELATIVE = PurePosixPath("智元工作/工作记录")
+RUNTIME_TOPIC_DIRS = {".review-loop", ".sessions", ".superpowers"}
+RESERVED_TOPIC_SEGMENTS = {".git", ".katana"}
+FLAT_LAYOUT_PAYLOAD = {"layout": "flat-id-v1", "schema_version": 1}
+RUNTIME_GITIGNORE_LINE = "/.katana/runtime/"
 
 REPAIR_STATES = {"missing", "parse_error", "invalid_metadata"}
 REPAIR_REQUIRED_FIELDS = ("title", "status", "created", "updated")
@@ -156,9 +169,79 @@ def _git_tracked_files(repo_root: Path) -> set[str]:
     }
 
 
+def _git_ignored_untracked_files(repo_root: Path) -> set[str]:
+    raw = _git(
+        repo_root,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+        text=False,
+    )
+    assert isinstance(raw, bytes)
+    return {
+        item.decode("utf-8")
+        for item in raw.split(b"\0")
+        if item
+    }
+
+
+def _git_untracked_files(repo_root: Path) -> set[str]:
+    raw = _git(
+        repo_root,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        text=False,
+    )
+    assert isinstance(raw, bytes)
+    return {
+        item.decode("utf-8")
+        for item in raw.split(b"\0")
+        if item
+    }
+
+
+def _nested_git_metadata_paths(repo_root: Path) -> list[str]:
+    """Find Git metadata below the one allowed repository-root ``.git``."""
+
+    found: list[str] = []
+
+    def _walk_error(exc: OSError) -> None:
+        raise MigrationError(
+            "REPOSITORY_SCAN_FAILED",
+            f"cannot inspect repository topology: {exc}",
+        )
+
+    for current_raw, directory_names, file_names in os.walk(
+        repo_root,
+        topdown=True,
+        followlinks=False,
+        onerror=_walk_error,
+    ):
+        current = Path(current_raw)
+        if current == repo_root:
+            directory_names[:] = [
+                name for name in directory_names if name != ".git"
+            ]
+            continue
+        if ".git" in directory_names:
+            found.append((current / ".git").relative_to(repo_root).as_posix())
+            directory_names[:] = [
+                name for name in directory_names if name != ".git"
+            ]
+        if ".git" in file_names:
+            found.append((current / ".git").relative_to(repo_root).as_posix())
+    return sorted(set(found), key=lambda value: value.encode("utf-8"))
+
+
 def _validate_roots(
     repo_root: str | os.PathLike[str],
     legacy_root: str | os.PathLike[str],
+    *,
+    require_legacy: bool = True,
 ) -> tuple[Path, Path, Path]:
     repo = Path(repo_root).expanduser().resolve()
     legacy = Path(legacy_root).expanduser().resolve()
@@ -177,7 +260,7 @@ def _validate_roots(
             "REPO_ROOT_MISMATCH",
             f"explicit repo root {repo} is not Git toplevel {top}",
         )
-    if not legacy.is_dir():
+    if require_legacy and not legacy.is_dir():
         raise MigrationError(
             "LEGACY_ROOT_NOT_FOUND",
             f"not a directory: {legacy}",
@@ -210,7 +293,11 @@ def _sorted_children(directory: Path) -> list[Path]:
     return sorted(directory.iterdir(), key=lambda item: item.name.encode("utf-8"))
 
 
-def _control_hashes(control: Path, repo_root: Path) -> list[dict[str, Any]]:
+def _control_hashes(
+    control: Path,
+    repo_root: Path,
+    tracked: set[str],
+) -> list[dict[str, Any]]:
     if control.name == ".git":
         return []
     if control.is_symlink():
@@ -221,11 +308,13 @@ def _control_hashes(control: Path, repo_root: Path) -> list[dict[str, Any]]:
         }]
     if control.is_file():
         content = control.read_bytes()
+        relative = control.relative_to(repo_root).as_posix()
         return [{
-            "relative_path": control.relative_to(repo_root).as_posix(),
+            "relative_path": relative,
             "kind": "regular_file",
             "sha256": sha256_bytes(content),
             "size": len(content),
+            "git_tracked": relative in tracked,
         }]
     records: list[dict[str, Any]] = []
     for item in sorted(control.rglob("*"), key=lambda value: value.as_posix()):
@@ -243,6 +332,7 @@ def _control_hashes(control: Path, repo_root: Path) -> list[dict[str, Any]]:
                 "kind": "regular_file",
                 "sha256": sha256_bytes(content),
                 "size": len(content),
+                "git_tracked": relative in tracked,
             })
         elif item.is_dir():
             records.append({"relative_path": relative, "kind": "directory"})
@@ -255,11 +345,12 @@ def _control_record(
     control: Path,
     repo_root: Path,
     classification: str,
+    tracked: set[str],
 ) -> dict[str, Any]:
     return {
         "repo_relative_path": control.relative_to(repo_root).as_posix(),
         "classification": classification,
-        "entries": _control_hashes(control, repo_root),
+        "entries": _control_hashes(control, repo_root, tracked),
     }
 
 
@@ -436,26 +527,52 @@ def _record_topic(
                 "topic trees must contain only regular files",
             ))
             continue
-        if item_locator not in tracked:
+        source_relative_path = item.relative_to(topic).as_posix()
+        source_parts = PurePosixPath(source_relative_path).parts
+        if any(part in RESERVED_TOPIC_SEGMENTS for part in source_parts):
+            errors.append(_error(
+                "RESERVED_TOPIC_METADATA",
+                item_locator,
+                "topic payload may not contain .git or .katana segments",
+            ))
+            continue
+        runtime_payload = bool(
+            source_parts and source_parts[0] in RUNTIME_TOPIC_DIRS
+        )
+        if item_locator not in tracked and not runtime_payload:
             errors.append(_error(
                 "UNTRACKED_TOPIC_FILE",
                 item_locator,
-                "every topic file must be tracked before planning",
+                "untracked topic payload is allowed only in controlled runtime archives",
             ))
         content = item.read_bytes()
+        try:
+            content.decode("utf-8")
+        except UnicodeDecodeError:
+            content_kind = "binary"
+            api_tool = "fs_read_bytes"
+        else:
+            content_kind = "utf8_text"
+            api_tool = "fs_read"
+        if runtime_payload:
+            destination_relative_path = PurePosixPath(
+                "archive",
+                "runtime",
+                source_parts[0].lstrip("."),
+                *source_parts[1:],
+            ).as_posix()
+        else:
+            destination_relative_path = source_relative_path
         files.append({
-            "relative_path": item.relative_to(topic).as_posix(),
+            "relative_path": source_relative_path,
+            "destination_relative_path": destination_relative_path,
             "repo_relative_path": item_locator,
             "sha256": sha256_bytes(content),
             "size": len(content),
+            "git_tracked": item_locator in tracked,
+            "content_kind": content_kind,
+            "api_tool": api_tool,
         })
-
-    if not files:
-        errors.append(_error(
-            "EMPTY_TOPIC",
-            locator,
-            "topic contains no regular tracked files",
-        ))
 
     brief = topic / "_brief.md"
     brief_state = "missing"
@@ -497,6 +614,7 @@ def _record_topic(
         "brief_error": brief_error,
         "brief_sha256": brief_sha256,
         "brief_content_b64": brief_content_b64,
+        "is_empty": not files,
         "files": files,
     }
 
@@ -542,53 +660,25 @@ def _validate_container_chain(
         current = expected
 
 
-def build_inventory(
-    repo_root: str | os.PathLike[str],
-    legacy_root: str | os.PathLike[str],
-) -> dict[str, Any]:
-    """Classify a legacy Work Folder tree without changing it."""
+def _scan_date_root(
+    repo: Path,
+    source_root: Path,
+    tracked: set[str],
+    controls: list[dict[str, Any]],
+    topics: list[dict[str, Any]],
+    errors: list[dict[str, str]],
+) -> None:
+    """Scan one physical YYYY/MM/DD/topic root into logical locators."""
 
-    repo, legacy, legacy_relative = _validate_roots(repo_root, legacy_root)
-    errors: list[dict[str, str]] = []
-    controls: list[dict[str, Any]] = []
-    topics: list[dict[str, Any]] = []
-    tracked = _git_tracked_files(repo)
-
-    allowed_root_component = legacy_relative.parts[0]
-    for item in _sorted_children(repo):
-        if item.name == ".git":
-            controls.append(_control_record(item, repo, "git-metadata"))
-            continue
-        if item.name == allowed_root_component:
-            continue
-        if item.name in REPO_ROOT_CONTROL_NAMES:
-            controls.append(_control_record(item, repo, "root-control"))
-            continue
-        if WF_ID_RE.fullmatch(item.name):
-            errors.append(_error(
-                "DESTINATION_OVERLAP",
-                item.relative_to(repo).as_posix(),
-                "flat Work Folder destination already exists",
-            ))
-            continue
-        errors.append(_error(
-            "UNKNOWN_REPO_ROOT_PAYLOAD",
-            item.relative_to(repo).as_posix(),
-            "repo-root payload is not a classified control or legacy root",
-        ))
-
-    _validate_container_chain(
-        repo,
-        legacy,
-        legacy_relative,
-        controls,
-        errors,
-    )
-
-    for year_entry in _sorted_children(legacy):
+    for year_entry in _sorted_children(source_root):
         if year_entry.name in LEGACY_ROOT_CONTROL_NAMES:
             controls.append(
-                _control_record(year_entry, repo, "legacy-root-control")
+                _control_record(
+                    year_entry,
+                    repo,
+                    "legacy-root-control",
+                    tracked,
+                )
             )
             continue
         if not YEAR_RE.fullmatch(year_entry.name):
@@ -669,11 +759,183 @@ def build_inventory(
                         continue
                     topics.append(_record_topic(
                         repo,
-                        legacy,
+                        source_root,
                         topic_entry,
                         tracked,
                         errors,
                     ))
+
+
+def _load_tombstones(
+    repo: Path,
+    candidates: Iterable[Path],
+    errors: list[dict[str, str]],
+) -> list[str]:
+    tombstones: set[str] = set()
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        locator = candidate.relative_to(repo).as_posix()
+        if candidate.is_symlink() or not candidate.is_file():
+            errors.append(_error(
+                "INVALID_TOMBSTONE_LEDGER",
+                locator,
+                "tombstone ledger must be a regular JSON file",
+            ))
+            continue
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            errors.append(_error(
+                "INVALID_TOMBSTONE_LEDGER",
+                locator,
+                "tombstone ledger is unreadable or invalid JSON",
+            ))
+            continue
+        values = payload.get("tombstones") if isinstance(payload, dict) else None
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not WF_ID_RE.fullmatch(value)
+            for value in values
+        ):
+            errors.append(_error(
+                "INVALID_TOMBSTONE_LEDGER",
+                locator,
+                "tombstones must be canonical wf-* IDs",
+            ))
+            continue
+        tombstones.update(values)
+    return sorted(tombstones)
+
+
+def build_inventory(
+    repo_root: str | os.PathLike[str],
+    legacy_root: str | os.PathLike[str],
+) -> dict[str, Any]:
+    """Classify a legacy Work Folder tree without changing it."""
+
+    repo, legacy, legacy_relative = _validate_roots(repo_root, legacy_root)
+    errors: list[dict[str, str]] = []
+    controls: list[dict[str, Any]] = []
+    topics: list[dict[str, Any]] = []
+    tracked = _git_tracked_files(repo)
+    ignored_untracked = _git_ignored_untracked_files(repo)
+
+    for locator in _nested_git_metadata_paths(repo):
+        errors.append(_error(
+            "NESTED_GIT_METADATA",
+            locator,
+            "only the repository-root .git metadata is permitted",
+        ))
+
+    allowed_root_component = legacy_relative.parts[0]
+    for item in _sorted_children(repo):
+        if item.name == ".git":
+            controls.append(
+                _control_record(item, repo, "git-metadata", tracked)
+            )
+            continue
+        if item.name == allowed_root_component:
+            continue
+        if item.name in REPO_ROOT_CONTROL_NAMES:
+            controls.append(
+                _control_record(item, repo, "root-control", tracked)
+            )
+            continue
+        if WF_ID_RE.fullmatch(item.name):
+            errors.append(_error(
+                "DESTINATION_OVERLAP",
+                item.relative_to(repo).as_posix(),
+                "flat Work Folder destination already exists",
+            ))
+            continue
+        errors.append(_error(
+            "UNKNOWN_REPO_ROOT_PAYLOAD",
+            item.relative_to(repo).as_posix(),
+            "repo-root payload is not a classified control or legacy root",
+        ))
+
+    _validate_container_chain(
+        repo,
+        legacy,
+        legacy_relative,
+        controls,
+        errors,
+    )
+
+    nested_root = legacy / DOUBLE_ROOT_RELATIVE
+    nested_parent = legacy / DOUBLE_ROOT_RELATIVE.parts[0]
+    if nested_parent.exists():
+        if (
+            nested_parent.is_symlink()
+            or not nested_parent.is_dir()
+            or not nested_root.is_dir()
+            or nested_root.is_symlink()
+        ):
+            errors.append(_error(
+                "INVALID_DOUBLE_ROOT",
+                nested_parent.relative_to(repo).as_posix(),
+                "double-root payload must be exactly 智元工作/工作记录",
+            ))
+        else:
+            unexpected_nested = [
+                item.relative_to(repo).as_posix()
+                for item in _sorted_children(nested_parent)
+                if item != nested_root
+            ]
+            for locator in unexpected_nested:
+                errors.append(_error(
+                    "INVALID_DOUBLE_ROOT",
+                    locator,
+                    "double-root parent contains unexpected payload",
+                ))
+
+    _scan_date_root(
+        repo,
+        legacy,
+        tracked,
+        controls,
+        topics,
+        errors,
+    )
+    if nested_root.is_dir() and not nested_root.is_symlink():
+        # The primary scan reports 智元工作 as unknown; remove only that exact
+        # diagnostic after the nested root itself has been validated.
+        nested_parent_locator = nested_parent.relative_to(repo).as_posix()
+        errors[:] = [
+            error
+            for error in errors
+            if not (
+                error["code"] == "UNKNOWN_LEGACY_ROOT_PAYLOAD"
+                and error["locator"] == nested_parent_locator
+            )
+        ]
+        _scan_date_root(
+            repo,
+            nested_root,
+            tracked,
+            controls,
+            topics,
+            errors,
+        )
+
+    locator_counts = Counter(topic["old_locator"] for topic in topics)
+    for locator, count in locator_counts.items():
+        if count > 1:
+            errors.append(_error(
+                "DUPLICATE_SOURCE_LOCATOR",
+                locator,
+                "primary and double-root trees contain the same logical topic",
+            ))
+
+    tombstones = _load_tombstones(
+        repo,
+        [
+            repo / ".katana" / "tombstones.json",
+            legacy / ".katana" / "tombstones.json",
+            nested_root / ".katana" / "tombstones.json",
+        ],
+        errors,
+    )
 
     topics.sort(key=lambda item: item["old_locator"].encode("utf-8"))
     controls.sort(key=lambda item: item["repo_relative_path"].encode("utf-8"))
@@ -696,6 +958,12 @@ def build_inventory(
             and WF_ID_RE.fullmatch(old_id)
             and old_id_counts[old_id] == 1
         )
+        if old_id in tombstones:
+            errors.append(_error(
+                "LIVE_ID_TOMBSTONED",
+                topic["old_locator"],
+                f"live brief ID is tombstoned: {old_id}",
+            ))
 
     inventory: dict[str, Any] = {
         "kind": f"{PLAN_KIND}-inventory",
@@ -706,6 +974,8 @@ def build_inventory(
         "source_head": _git_head(repo),
         "topics": topics,
         "controls": controls,
+        "tombstones": tombstones,
+        "ignored_untracked_files": sorted(ignored_untracked),
         "errors": errors,
         "ok": not errors,
     }
@@ -806,6 +1076,302 @@ def _topic_reason(topic: dict[str, Any]) -> str:
     return "legacy-id"
 
 
+def _render_flat_index(mapping: list[dict[str, Any]]) -> bytes:
+    entries: list[dict[str, Any]] = []
+    for item in sorted(mapping, key=lambda entry: entry["new_id"]):
+        content = base64.b64decode(item["brief_after_b64"])
+        frontmatter, _ = _parse_frontmatter(content)
+        body_match = FRONTMATTER_RE.match(content)
+        assert body_match is not None
+        body = body_match.group("tail").decode("utf-8")
+        goal_match = GOAL_RE.search(body)
+        goal = goal_match.group(1).strip() if goal_match else ""
+        updated = frontmatter.get("updated", "")
+        if hasattr(updated, "isoformat"):
+            updated = updated.isoformat()
+        else:
+            updated = str(updated) if updated else ""
+        entries.append({
+            "updated": updated,
+            "status": str(frontmatter.get("status", "")),
+            "id": item["new_id"],
+            "title": str(frontmatter.get("title", "")),
+            "goal": goal,
+        })
+    entries.sort(key=lambda entry: entry["updated"], reverse=True)
+    lines = [
+        "# Work Folder INDEX",
+        "",
+        (
+            f"> 共 {len(entries)} 个 work folder，按 updated 倒序。"
+            "由 wf_reindex 自动生成，勿手改。"
+        ),
+        "",
+        "| updated | status | id | title | goal |",
+        "|---|---|---|---|---|",
+    ]
+    for entry in entries:
+        goal = entry["goal"].replace("|", "\\|")
+        lines.append(
+            f"| {entry['updated']} | {entry['status']} | {entry['id']} | "
+            f"{entry['title']} | {goal} |"
+        )
+    lines.append("")
+    return "\n".join(lines).encode("utf-8")
+
+
+def _normalized_gitignore(repo: Path) -> tuple[bytes | None, bytes]:
+    path = repo / ".gitignore"
+    before = path.read_bytes() if path.is_file() else None
+    if before is None:
+        return None, f"{RUNTIME_GITIGNORE_LINE}\n".encode("utf-8")
+    try:
+        text = before.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MigrationError(
+            "INVALID_GITIGNORE",
+            "root .gitignore must be UTF-8 before migration",
+        ) from exc
+    lines = text.splitlines()
+    if RUNTIME_GITIGNORE_LINE not in lines:
+        lines.append(RUNTIME_GITIGNORE_LINE)
+    return before, ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _control_archive_destination(
+    source: str,
+    *,
+    legacy_relative: str,
+) -> tuple[str, str]:
+    """Return (classification, destination) for one old control file."""
+
+    source_path = PurePosixPath(source)
+    legacy_path = PurePosixPath(legacy_relative)
+    nested_path = legacy_path / DOUBLE_ROOT_RELATIVE
+    root_katana = PurePosixPath(".katana")
+
+    if source_path.parts[:1] == root_katana.parts:
+        rest = PurePosixPath(*source_path.parts[1:])
+        if rest.parts and rest.parts[0] == "manifests":
+            tail = PurePosixPath(*rest.parts[1:])
+            return (
+                "legacy-manifest",
+                (
+                    PurePosixPath(".katana/legacy-manifests/root") / tail
+                ).as_posix(),
+            )
+        return (
+            "root-katana-control",
+            (
+                PurePosixPath(".katana/control-archive/root-katana") / rest
+            ).as_posix(),
+        )
+
+    for physical_root, label in (
+        (nested_path, "double-root"),
+        (legacy_path, "primary-root"),
+    ):
+        try:
+            rest = source_path.relative_to(physical_root)
+        except ValueError:
+            continue
+        if rest.parts and rest.parts[0] == ".katana":
+            katana_rest = PurePosixPath(*rest.parts[1:])
+            if katana_rest.parts and katana_rest.parts[0] == "manifests":
+                tail = PurePosixPath(*katana_rest.parts[1:])
+                return (
+                    "legacy-manifest",
+                    (
+                        PurePosixPath(
+                            f".katana/legacy-manifests/{label}"
+                        ) / tail
+                    ).as_posix(),
+                )
+            return (
+                "legacy-katana-control",
+                (
+                    PurePosixPath(
+                        f".katana/control-archive/{label}/.katana"
+                    ) / katana_rest
+                ).as_posix(),
+            )
+        return (
+            "legacy-root-control",
+            (
+                PurePosixPath(f".katana/control-archive/{label}") / rest
+            ).as_posix(),
+        )
+
+    return (
+        "repo-root-control",
+        (
+            PurePosixPath(".katana/control-archive/repo-root")
+            / source_path
+        ).as_posix(),
+    )
+
+
+def _build_control_actions(
+    inventory: dict[str, Any],
+    mapping: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    repo = Path(inventory["repo_root"])
+    legacy_relative = inventory["legacy_root_relative"]
+    actions: list[dict[str, Any]] = []
+    manifest_inventory: list[dict[str, Any]] = []
+    action_index = 0
+
+    def add_action(action: dict[str, Any]) -> None:
+        nonlocal action_index
+        action_index += 1
+        action["action_id"] = f"control-{action_index:05d}"
+        actions.append(action)
+
+    regular_entries: list[dict[str, Any]] = []
+    for control in inventory["controls"]:
+        if control["classification"] in {
+            "git-metadata",
+            "legacy-container",
+            "legacy-root",
+        }:
+            continue
+        for entry in control["entries"]:
+            kind = entry["kind"]
+            if kind in {"directory"}:
+                continue
+            if kind != "regular_file":
+                raise MigrationError(
+                    "UNSUPPORTED_CONTROL_PAYLOAD",
+                    f"control payload is not a regular file: {entry['relative_path']}",
+                )
+            regular_entries.append(entry)
+
+    by_source = {
+        entry["relative_path"]: entry
+        for entry in regular_entries
+    }
+    if len(by_source) != len(regular_entries):
+        raise MigrationError(
+            "DUPLICATE_CONTROL_INVENTORY",
+            "control inventory contains duplicate files",
+        )
+
+    in_place_writes = {".gitignore", "INDEX.md", ".katana/tombstones.json"}
+    preserved_root = {".gitkeep"}
+    for source, entry in sorted(
+        by_source.items(),
+        key=lambda pair: pair[0].encode("utf-8"),
+    ):
+        if source in preserved_root:
+            continue
+        classification, destination = _control_archive_destination(
+            source,
+            legacy_relative=legacy_relative,
+        )
+        if source in in_place_writes:
+            kind = "copy"
+        else:
+            kind = "move"
+        add_action({
+            "kind": kind,
+            "classification": classification,
+            "source_repo_path": source,
+            "destination_repo_path": destination,
+            "source_sha256": entry["sha256"],
+            "size": entry["size"],
+            "git_tracked": entry["git_tracked"],
+        })
+        if classification == "legacy-manifest":
+            manifest_inventory.append({
+                "source_repo_path": source,
+                "archive_repo_path": destination,
+                "sha256": entry["sha256"],
+                "size": entry["size"],
+                "git_tracked": entry["git_tracked"],
+            })
+
+    before_gitignore, after_gitignore = _normalized_gitignore(repo)
+    generated: list[tuple[str, bytes | None, bytes, str]] = [
+        (
+            ".gitignore",
+            before_gitignore,
+            after_gitignore,
+            "runtime-ignore",
+        ),
+        (
+            "INDEX.md",
+            (repo / "INDEX.md").read_bytes()
+            if (repo / "INDEX.md").is_file()
+            else None,
+            _render_flat_index(mapping),
+            "flat-index",
+        ),
+        (
+            ".katana/tombstones.json",
+            (repo / ".katana/tombstones.json").read_bytes()
+            if (repo / ".katana/tombstones.json").is_file()
+            else None,
+            canonical_json({"tombstones": inventory.get("tombstones") or []}),
+            "merged-tombstones",
+        ),
+        (
+            ".katana/flat-layout.json",
+            None,
+            canonical_json(FLAT_LAYOUT_PAYLOAD),
+            "flat-layout-canary",
+        ),
+        (
+            ".katana/legacy-manifest-inventory.json",
+            None,
+            canonical_json({
+                "schema_version": 1,
+                "manifests": manifest_inventory,
+            }),
+            "legacy-manifest-inventory",
+        ),
+    ]
+    occupied_destinations = {
+        action["destination_repo_path"]
+        for action in actions
+    }
+    for destination, before, after, classification in generated:
+        target = repo / destination
+        if (
+            destination not in in_place_writes
+            and (target.exists() or target.is_symlink())
+        ):
+            raise MigrationError(
+                "CONTROL_DESTINATION_OVERLAP",
+                f"generated control destination already exists: {destination}",
+            )
+        if destination in occupied_destinations:
+            raise MigrationError(
+                "CONTROL_DESTINATION_COLLISION",
+                f"control actions collide at: {destination}",
+            )
+        add_action({
+            "kind": "write",
+            "classification": classification,
+            "source_repo_path": None,
+            "destination_repo_path": destination,
+            "before_sha256": sha256_bytes(before) if before is not None else None,
+            "after_sha256": sha256_bytes(after),
+            "size_after": len(after),
+            "content_b64": base64.b64encode(after).decode("ascii"),
+        })
+
+    destinations = [
+        action["destination_repo_path"]
+        for action in actions
+    ]
+    if len(destinations) != len(set(destinations)):
+        raise MigrationError(
+            "CONTROL_DESTINATION_COLLISION",
+            "control actions contain duplicate destinations",
+        )
+    return actions
+
+
 def build_plan(
     inventory: dict[str, Any],
     *,
@@ -813,7 +1379,10 @@ def build_plan(
 ) -> dict[str, Any]:
     """Build a deterministic, content-addressed flat migration plan."""
 
-    if inventory.get("kind") != f"{PLAN_KIND}-inventory":
+    if (
+        inventory.get("kind") != f"{PLAN_KIND}-inventory"
+        or inventory.get("schema_version") != SCHEMA_VERSION
+    ):
         raise MigrationError(
             "INVALID_INVENTORY",
             "inventory kind is not recognized",
@@ -853,8 +1422,9 @@ def build_plan(
     reserved = {
         topic["old_id"]
         for topic in topics
-        if topic["canonical_id_unique"]
+        if topic["old_id"] and WF_ID_RE.fullmatch(topic["old_id"])
     }
+    reserved.update(inventory.get("tombstones") or [])
     mapping: list[dict[str, Any]] = []
     expected_diff_paths: set[str] = set()
 
@@ -900,11 +1470,19 @@ def build_plan(
 
         hashes: list[dict[str, Any]] = []
         saw_brief = False
+        destination_paths: set[str] = set()
         for file_record in topic["files"]:
-            relative_path = file_record["relative_path"]
+            source_relative_path = file_record["relative_path"]
+            relative_path = file_record["destination_relative_path"]
+            if relative_path in destination_paths:
+                raise MigrationError(
+                    "DESTINATION_FILE_COLLISION",
+                    f"{locator} maps multiple files to {relative_path}",
+                )
+            destination_paths.add(relative_path)
             before_hash = file_record["sha256"]
             before_size = file_record["size"]
-            if relative_path == "_brief.md":
+            if source_relative_path == "_brief.md":
                 saw_brief = True
                 after_hash = sha256_bytes(brief_after)
                 after_size = len(brief_after)
@@ -912,28 +1490,40 @@ def build_plan(
                 after_hash = before_hash
                 after_size = before_size
             hashes.append({
+                "source_relative_path": source_relative_path,
                 "relative_path": relative_path,
                 "before_sha256": before_hash,
                 "after_sha256": after_hash,
                 "size_before": before_size,
                 "size_after": after_size,
+                "git_tracked": file_record["git_tracked"],
+                "content_kind": file_record["content_kind"],
+                "api_tool": file_record["api_tool"],
             })
         if not saw_brief:
             hashes.append({
+                "source_relative_path": "_brief.md",
                 "relative_path": "_brief.md",
                 "before_sha256": None,
                 "after_sha256": sha256_bytes(brief_after),
                 "size_before": None,
                 "size_after": len(brief_after),
+                "git_tracked": False,
+                "content_kind": "utf8_text",
+                "api_tool": "fs_read",
             })
         hashes.sort(key=lambda item: item["relative_path"].encode("utf-8"))
 
         source_repo_path = topic["source_repo_path"]
         for hash_record in hashes:
+            source_relative_path = hash_record["source_relative_path"]
             relative_path = hash_record["relative_path"]
-            if hash_record["before_sha256"] is not None:
+            if (
+                hash_record["before_sha256"] is not None
+                and hash_record["git_tracked"]
+            ):
                 expected_diff_paths.add(
-                    f"{source_repo_path}/{relative_path}"
+                    f"{source_repo_path}/{source_relative_path}"
                 )
             expected_diff_paths.add(f"{new_id}/{relative_path}")
 
@@ -962,6 +1552,21 @@ def build_plan(
             "planned destination IDs are not unique",
         )
 
+    control_actions = _build_control_actions(inventory, mapping)
+    for action in control_actions:
+        source = action.get("source_repo_path")
+        if action["kind"] == "move" and action["git_tracked"]:
+            expected_diff_paths.add(source)
+        if action["kind"] == "copy":
+            expected_diff_paths.add(action["destination_repo_path"])
+        elif action["kind"] == "move":
+            expected_diff_paths.add(action["destination_repo_path"])
+        elif (
+            action["before_sha256"] is None
+            or action["before_sha256"] != action["after_sha256"]
+        ):
+            expected_diff_paths.add(action["destination_repo_path"])
+
     plan: dict[str, Any] = {
         "kind": PLAN_KIND,
         "schema_version": SCHEMA_VERSION,
@@ -971,6 +1576,9 @@ def build_plan(
         "source_head": inventory["source_head"],
         "inventory_hash": inventory["inventory_hash"],
         "controls": inventory["controls"],
+        "control_actions": control_actions,
+        "tombstones": inventory.get("tombstones") or [],
+        "ignored_untracked_files": inventory.get("ignored_untracked_files") or [],
         "map": mapping,
         "expected_diff_paths": sorted(
             expected_diff_paths,
@@ -982,7 +1590,19 @@ def build_plan(
     return plan
 
 
-def maintenance_sentinel_payload(plan: dict[str, Any]) -> dict[str, Any]:
+def maintenance_sentinel_payload(
+    plan: dict[str, Any],
+    *,
+    expected_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    if (
+        expected_plan_hash is not None
+        and expected_plan_hash != plan.get("plan_hash")
+    ):
+        raise MigrationError(
+            "PLAN_HASH_CAS_MISMATCH",
+            "approved plan hash does not match the plan artifact",
+        )
     return {
         "mode": MAINTENANCE_MODE,
         "repo_root": plan["repo_root"],
@@ -1037,6 +1657,9 @@ def _validate_plan_controls(
         _invalid_plan("plan controls must be a list")
     seen: set[str] = set()
     legacy_parts = PurePosixPath(legacy_relative).parts
+    nested_legacy_relative = (
+        PurePosixPath(legacy_relative) / DOUBLE_ROOT_RELATIVE
+    ).as_posix()
     container_paths = {
         PurePosixPath(*legacy_parts[:index]).as_posix()
         for index in range(1, len(legacy_parts))
@@ -1064,6 +1687,9 @@ def _validate_plan_controls(
                 and path
                 in {
                     f"{legacy_relative}/{name}"
+                    for name in LEGACY_ROOT_CONTROL_NAMES
+                } | {
+                    f"{nested_legacy_relative}/{name}"
                     for name in LEGACY_ROOT_CONTROL_NAMES
                 }
             )
@@ -1102,6 +1728,101 @@ def _validate_plan_controls(
                 _invalid_plan("plan control inventory kind is unknown")
 
 
+def _validate_plan_control_actions(
+    actions: Any,
+    controls: list[dict[str, Any]],
+) -> set[str]:
+    if not isinstance(actions, list) or not actions:
+        _invalid_plan("plan control_actions must be a non-empty list")
+    inventory_files = {
+        entry["relative_path"]: entry
+        for control in controls
+        for entry in control["entries"]
+        if entry.get("kind") == "regular_file"
+    }
+    ids: set[str] = set()
+    destinations: set[str] = set()
+    expected_diff: set[str] = set()
+    generated_destinations = {
+        ".gitignore",
+        "INDEX.md",
+        ".katana/tombstones.json",
+        ".katana/flat-layout.json",
+        ".katana/legacy-manifest-inventory.json",
+    }
+    for action in actions:
+        if not isinstance(action, dict):
+            _invalid_plan("control actions must be objects")
+        action_id = action.get("action_id")
+        if (
+            not isinstance(action_id, str)
+            or not re.fullmatch(r"control-[0-9]{5}", action_id)
+            or action_id in ids
+        ):
+            _invalid_plan("control action IDs must be canonical and unique")
+        ids.add(action_id)
+        kind = action.get("kind")
+        if kind not in {"copy", "move", "write"}:
+            _invalid_plan("control action kind is unknown")
+        destination = action.get("destination_repo_path")
+        if (
+            not _is_safe_relative_path(destination)
+            or destination in destinations
+        ):
+            _invalid_plan("control action destinations must be safe and unique")
+        destinations.add(destination)
+
+        if kind in {"copy", "move"}:
+            source = action.get("source_repo_path")
+            if not _is_safe_relative_path(source) or source not in inventory_files:
+                _invalid_plan("control action source is not inventoried")
+            inventory_entry = inventory_files[source]
+            if (
+                action.get("source_sha256") != inventory_entry.get("sha256")
+                or action.get("size") != inventory_entry.get("size")
+                or action.get("git_tracked") != inventory_entry.get("git_tracked")
+            ):
+                _invalid_plan("control action source metadata changed")
+            if not (
+                destination.startswith(".katana/control-archive/")
+                or destination.startswith(".katana/legacy-manifests/")
+            ):
+                _invalid_plan("archived control destination is outside governance")
+            if kind == "move" and action["git_tracked"]:
+                expected_diff.add(source)
+            expected_diff.add(destination)
+            continue
+
+        if action.get("source_repo_path") is not None:
+            _invalid_plan("write control action must not have a source")
+        if destination not in generated_destinations:
+            _invalid_plan("write control destination is not governed")
+        encoded = action.get("content_b64")
+        if not isinstance(encoded, str):
+            _invalid_plan("write control content must be base64")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise MigrationError(
+                "INVALID_PLAN",
+                "write control content is not valid base64",
+            ) from exc
+        before_hash = action.get("before_sha256")
+        if before_hash is not None and (
+            not isinstance(before_hash, str)
+            or not SHA256_RE.fullmatch(before_hash)
+        ):
+            _invalid_plan("write control before hash is invalid")
+        if (
+            action.get("after_sha256") != sha256_bytes(content)
+            or action.get("size_after") != len(content)
+        ):
+            _invalid_plan("write control content does not match its hash")
+        if before_hash is None or before_hash != action["after_sha256"]:
+            expected_diff.add(destination)
+    return expected_diff
+
+
 def _validate_plan_item(
     item: Any,
     *,
@@ -1114,8 +1835,14 @@ def _validate_plan_item(
     if not _valid_old_locator(locator):
         _invalid_plan("plan contains an invalid YYYY/MM/DD/topic locator")
     old_repo_path = item.get("old_repo_path")
-    expected_old_path = f"{legacy_relative}/{locator}"
-    if old_repo_path != expected_old_path:
+    expected_old_paths = {
+        f"{legacy_relative}/{locator}",
+        (
+            f"{legacy_relative}/{DOUBLE_ROOT_RELATIVE.as_posix()}/"
+            f"{locator}"
+        ),
+    }
+    if old_repo_path not in expected_old_paths:
         _invalid_plan("planned source path does not match its old locator")
 
     new_id = item.get("new_id")
@@ -1139,6 +1866,7 @@ def _validate_plan_item(
     if not isinstance(hashes, list) or not hashes:
         _invalid_plan("plan entry has no content hashes")
     by_path: dict[str, dict[str, Any]] = {}
+    source_paths: set[str] = set()
     expected_diff: set[str] = set()
     for record in hashes:
         if not isinstance(record, dict):
@@ -1146,8 +1874,30 @@ def _validate_plan_item(
         relative_path = record.get("relative_path")
         if not _is_safe_relative_path(relative_path):
             _invalid_plan("content hash contains an unsafe relative path")
+        source_relative_path = record.get("source_relative_path")
+        if not _is_safe_relative_path(source_relative_path):
+            _invalid_plan("content hash contains an unsafe source relative path")
         if relative_path in by_path:
             _invalid_plan("content hash paths must be unique per topic")
+        if source_relative_path in source_paths:
+            _invalid_plan("content source paths must be unique per topic")
+        source_paths.add(source_relative_path)
+        if any(
+            part in RESERVED_TOPIC_SEGMENTS
+            for part in PurePosixPath(relative_path).parts
+        ):
+            _invalid_plan("destination content contains a reserved path segment")
+        if type(record.get("git_tracked")) is not bool:
+            _invalid_plan("content git_tracked must be boolean")
+        if record.get("content_kind") not in {"utf8_text", "binary"}:
+            _invalid_plan("content kind is unknown")
+        expected_api = (
+            "fs_read"
+            if record["content_kind"] == "utf8_text"
+            else "fs_read_bytes"
+        )
+        if record.get("api_tool") != expected_api:
+            _invalid_plan("content API reachability classification is invalid")
 
         before_hash = record.get("before_sha256")
         after_hash = record.get("after_sha256")
@@ -1172,8 +1922,8 @@ def _validate_plan_item(
             _invalid_plan("content after hash or size is invalid")
 
         by_path[relative_path] = record
-        if before_hash is not None:
-            expected_diff.add(f"{old_repo_path}/{relative_path}")
+        if before_hash is not None and record["git_tracked"]:
+            expected_diff.add(f"{old_repo_path}/{source_relative_path}")
         expected_diff.add(f"{new_id}/{relative_path}")
 
     brief_record = by_path.get("_brief.md")
@@ -1208,12 +1958,48 @@ def _validate_plan_item(
         ) from exc
     if problems or str(frontmatter.get("id") or "") != new_id:
         _invalid_plan("planned brief metadata does not match destination ID")
+    if brief_record["source_relative_path"] != "_brief.md":
+        _invalid_plan("planned brief source must be _brief.md")
     return expected_diff
+
+
+def _planned_untracked_source_records(
+    plan: dict[str, Any],
+) -> dict[str, tuple[str, int]]:
+    records: dict[str, tuple[str, int]] = {}
+    for item in plan.get("map") or []:
+        for record in item.get("content_hashes") or []:
+            if record.get("before_sha256") is None or record.get("git_tracked"):
+                continue
+            source = (
+                f"{item['old_repo_path']}/"
+                f"{record['source_relative_path']}"
+            )
+            records[source] = (
+                record["before_sha256"],
+                record["size_before"],
+            )
+    for action in plan.get("control_actions") or []:
+        if (
+            action.get("kind") not in {"copy", "move"}
+            or action.get("git_tracked")
+        ):
+            continue
+        records[action["source_repo_path"]] = (
+            action["source_sha256"],
+            action["size"],
+        )
+    return records
 
 
 def _validate_plan(plan: dict[str, Any]) -> None:
     if plan.get("kind") != PLAN_KIND:
         raise MigrationError("INVALID_PLAN", "plan kind is not recognized")
+    if plan.get("schema_version") != SCHEMA_VERSION:
+        raise MigrationError(
+            "INVALID_PLAN",
+            "plan schema version is not supported",
+        )
     expected_hash = _hash_without_key(plan, "plan_hash")
     if plan.get("plan_hash") != expected_hash:
         raise MigrationError(
@@ -1245,10 +2031,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         plan.get("controls"),
         legacy_relative=legacy_relative,
     )
+    expected_diff = _validate_plan_control_actions(
+        plan.get("control_actions"),
+        plan["controls"],
+    )
     mapping = plan.get("map")
     if not isinstance(mapping, list) or not mapping:
         raise MigrationError("INVALID_PLAN", "plan map is empty")
-    expected_diff: set[str] = set()
     for item in mapping:
         expected_diff.update(
             _validate_plan_item(
@@ -1265,6 +2054,16 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise MigrationError(
             "INVALID_PLAN",
             "plan contains duplicate destination IDs",
+        )
+    ignored_sources = plan.get("ignored_untracked_files")
+    if (
+        not isinstance(ignored_sources, list)
+        or any(not _is_safe_relative_path(path) for path in ignored_sources)
+        or len(ignored_sources) != len(set(ignored_sources))
+        or set(ignored_sources) != set(_planned_untracked_source_records(plan))
+    ):
+        _invalid_plan(
+            "plan ignored-untracked sources are incomplete or unsafe"
         )
     expected_diff_paths = sorted(
         expected_diff,
@@ -1317,7 +2116,7 @@ def _validate_pre_apply_content(
             )
         current = _current_topic_files(source)
         expected = {
-            record["relative_path"]: record
+            record["source_relative_path"]: record
             for record in item["content_hashes"]
             if record["before_sha256"] is not None
         }
@@ -1430,7 +2229,21 @@ def _discover_source_anchors(legacy_root: Path) -> list[str]:
     anchors: list[str] = []
     if not legacy_root.is_dir():
         return anchors
-    for year_entry in _sorted_children(legacy_root):
+    roots = [legacy_root]
+    nested_root = legacy_root / DOUBLE_ROOT_RELATIVE
+    if nested_root.is_dir() and not nested_root.is_symlink():
+        roots.append(nested_root)
+    for source_root in roots:
+        anchors.extend(_discover_source_anchors_in_root(source_root, legacy_root))
+    return sorted(anchors, key=lambda value: value.encode("utf-8"))
+
+
+def _discover_source_anchors_in_root(
+    source_root: Path,
+    display_root: Path,
+) -> list[str]:
+    anchors: list[str] = []
+    for year_entry in _sorted_children(source_root):
         if not (
             YEAR_RE.fullmatch(year_entry.name)
             and year_entry.is_dir()
@@ -1454,9 +2267,9 @@ def _discover_source_anchors(legacy_root: Path) -> list[str]:
                 for topic_entry in _sorted_children(day_entry):
                     if topic_entry.is_dir() and not topic_entry.is_symlink():
                         anchors.append(
-                            topic_entry.relative_to(legacy_root).as_posix()
+                            topic_entry.relative_to(display_root).as_posix()
                         )
-    return sorted(anchors, key=lambda value: value.encode("utf-8"))
+    return anchors
 
 
 def _git_diff_paths(repo_root: Path) -> set[str]:
@@ -1471,50 +2284,112 @@ def _git_diff_paths(repo_root: Path) -> set[str]:
         text=False,
     )
     assert isinstance(raw, bytes)
-    return {
+    tracked_changes = {
         item.decode("utf-8")
         for item in raw.split(b"\0")
         if item
     }
+    return (
+        tracked_changes
+        | _git_untracked_files(repo_root)
+        | _git_ignored_untracked_files(repo_root)
+    )
 
 
 def _verify_planned_controls(
     plan: dict[str, Any],
     repo_root: Path,
 ) -> None:
-    for expected in plan["controls"]:
-        relative_path = expected["repo_relative_path"]
-        classification = expected["classification"]
-        control = repo_root / relative_path
-        if classification == "git-metadata":
-            if not control.exists():
-                raise MigrationError(
-                    "CONTROL_CHANGED",
-                    "Git metadata disappeared during migration",
-                )
-            continue
-        if classification in {"legacy-container", "legacy-root"}:
-            if control.is_symlink() or not control.is_dir():
-                raise MigrationError(
-                    "CONTROL_CHANGED",
-                    f"migration container changed: {relative_path}",
-                )
-            continue
-        if not control.exists() and not control.is_symlink():
-            raise MigrationError(
-                "CONTROL_CHANGED",
-                f"inventoried control disappeared: {relative_path}",
-            )
-        actual = _control_record(
-            control,
-            repo_root,
-            classification,
+    if not (repo_root / ".git").is_dir():
+        raise MigrationError(
+            "CONTROL_CHANGED",
+            "Git metadata disappeared during migration",
         )
-        if actual != expected:
+    for action in plan["control_actions"]:
+        destination = repo_root / action["destination_repo_path"]
+        if destination.is_symlink() or not destination.is_file():
             raise MigrationError(
                 "CONTROL_CHANGED",
-                f"inventoried control changed: {relative_path}",
+                f"planned control destination is missing: {destination}",
             )
+        content = destination.read_bytes()
+        expected_hash = (
+            action["source_sha256"]
+            if action["kind"] in {"copy", "move"}
+            else action["after_sha256"]
+        )
+        if sha256_bytes(content) != expected_hash:
+            raise MigrationError(
+                "CONTROL_CHANGED",
+                f"planned control hash changed: {destination}",
+            )
+        if action["kind"] == "move":
+            source = repo_root / action["source_repo_path"]
+            if source.exists() or source.is_symlink():
+                raise MigrationError(
+                    "CONTROL_CHANGED",
+                    f"archived control source remains: {source}",
+                )
+    if (repo_root / ".katana/manifests").exists():
+        raise MigrationError(
+            "CONTROL_CHANGED",
+            "legacy tracked manifest directory remains active",
+        )
+
+
+def _verify_api_reachability(
+    plan: dict[str, Any],
+    repo_root: Path,
+) -> dict[str, int]:
+    """Read every migrated payload through its governed public API."""
+
+    from katana_kernel import (  # noqa: PLC0415 - standalone script
+        GovernedKernel,
+        GovernedVFS,
+        ResourceIdLedger,
+        TransactionManifest,
+    )
+    from katana_work_folder_mcp.fs_tools import FSTools  # noqa: PLC0415
+    from katana_work_folder_mcp.store import _wf_policy  # noqa: PLC0415
+
+    kernel = GovernedKernel()
+    kernel.bind(
+        "work-folder",
+        _wf_policy(),
+        GovernedVFS(str(repo_root)),
+        ResourceIdLedger(
+            str(repo_root / ".katana/tombstones.json"),
+            prefix="wf-",
+        ),
+        TransactionManifest(
+            str(repo_root / ".katana/runtime/manifests"),
+            git_tracked=False,
+        ),
+        str(repo_root),
+    )
+    tools = FSTools(kernel, str(repo_root))
+    counts = {"fs_read": 0, "fs_read_bytes": 0}
+    for item in plan["map"]:
+        for record in item["content_hashes"]:
+            filename = record["relative_path"]
+            if record["api_tool"] == "fs_read":
+                result = tools.fs_read(item["new_id"], filename, limit=1)
+            else:
+                result = tools.fs_read_bytes(
+                    item["new_id"],
+                    filename,
+                    limit=1,
+                )
+            if not result.get("ok"):
+                raise MigrationError(
+                    "API_REACHABILITY_FAILED",
+                    (
+                        f"{item['new_id']}/{filename} is not reachable through "
+                        f"{record['api_tool']}: {result.get('code')}"
+                    ),
+                )
+            counts[record["api_tool"]] += 1
+    return counts
 
 
 def verify_plan(
@@ -1525,7 +2400,11 @@ def verify_plan(
     """Verify the migrated working tree against a frozen plan."""
 
     _validate_plan(plan)
-    repo, legacy, _ = _validate_roots(repo_root, legacy_root)
+    repo, legacy, _ = _validate_roots(
+        repo_root,
+        legacy_root,
+        require_legacy=False,
+    )
     if str(repo) != plan["repo_root"] or str(legacy) != plan["legacy_root"]:
         raise MigrationError(
             "PLAN_ROOT_MISMATCH",
@@ -1535,6 +2414,13 @@ def verify_plan(
         raise MigrationError(
             "HEAD_CAS_MISMATCH",
             "HEAD changed before the migration was committed",
+        )
+    nested_git = _nested_git_metadata_paths(repo)
+    if nested_git:
+        raise MigrationError(
+            "NESTED_GIT_METADATA",
+            "migrated repository contains nested Git metadata",
+            details={"paths": nested_git},
         )
 
     _verify_planned_controls(plan, repo)
@@ -1636,6 +2522,7 @@ def verify_plan(
             },
         )
 
+    api_reachability = _verify_api_reachability(plan, repo)
     return {
         "ok": True,
         "plan_hash": plan["plan_hash"],
@@ -1643,11 +2530,390 @@ def verify_plan(
         "topic_count": len(plan["map"]),
         "source_anchor_count": 0,
         "ids_unique": True,
-        "controls_verified": len(plan["controls"]),
+        "controls_verified": len(plan["control_actions"]),
+        "api_reachability": api_reachability,
         "unexpected_diff_paths": [],
         "missing_diff_paths": [],
         "verified_diff_paths": sorted(actual_diff),
     }
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.migration-tmp-{os.getpid()}")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _checkpoint_binding(plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": f"{PLAN_KIND}-checkpoint",
+        "plan_hash": plan["plan_hash"],
+        "source_head": plan["source_head"],
+        "repo_root": plan["repo_root"],
+        "legacy_root": plan["legacy_root"],
+    }
+
+
+def _checkpoint_path(
+    repo_root: Path,
+    maintenance_sentinel: str | os.PathLike[str],
+    checkpoint_path: str | os.PathLike[str] | None,
+) -> Path:
+    if checkpoint_path is None:
+        checkpoint = Path(
+            f"{Path(maintenance_sentinel).expanduser().resolve()}.checkpoint.json"
+        )
+    else:
+        checkpoint = Path(checkpoint_path).expanduser().resolve()
+    try:
+        checkpoint.relative_to(repo_root)
+    except ValueError:
+        return checkpoint
+    raise MigrationError(
+        "INVALID_CHECKPOINT_PATH",
+        "migration checkpoint must live outside the Git repository",
+    )
+
+
+def _load_checkpoint(
+    checkpoint: Path,
+    plan: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not checkpoint.exists():
+        return None
+    try:
+        payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MigrationError(
+            "INVALID_MIGRATION_CHECKPOINT",
+            f"checkpoint is unreadable: {checkpoint}",
+        ) from exc
+    expected = _checkpoint_binding(plan)
+    if not isinstance(payload, dict) or any(
+        payload.get(key) != value
+        for key, value in expected.items()
+    ):
+        raise MigrationError(
+            "INVALID_MIGRATION_CHECKPOINT",
+            "checkpoint is not bound to this exact plan, HEAD and repository",
+        )
+    if payload.get("status") not in {"applying", "verified"}:
+        raise MigrationError(
+            "INVALID_MIGRATION_CHECKPOINT",
+            "checkpoint status is invalid",
+        )
+    for key in ("completed_topics", "completed_controls"):
+        if not isinstance(payload.get(key), list) or any(
+            not isinstance(value, str)
+            for value in payload[key]
+        ):
+            raise MigrationError(
+                "INVALID_MIGRATION_CHECKPOINT",
+                f"checkpoint {key} must be a string list",
+            )
+    return payload
+
+
+def _save_checkpoint(checkpoint: Path, payload: dict[str, Any]) -> None:
+    _atomic_write(checkpoint, canonical_json(payload))
+
+
+def _validate_resume_gates(
+    plan: dict[str, Any],
+    repo_root: Path,
+    legacy_root: Path,
+    *,
+    expected_head: str,
+    expected_plan_hash: str,
+    maintenance_sentinel: str | os.PathLike[str],
+) -> None:
+    _validate_plan(plan)
+    if str(repo_root) != plan["repo_root"] or str(legacy_root) != plan["legacy_root"]:
+        raise MigrationError(
+            "PLAN_ROOT_MISMATCH",
+            "explicit roots do not match the plan",
+        )
+    if expected_plan_hash != plan["plan_hash"]:
+        raise MigrationError(
+            "PLAN_HASH_CAS_MISMATCH",
+            "expected plan hash does not match the plan",
+        )
+    if expected_head != plan["source_head"] or _git_head(repo_root) != expected_head:
+        raise MigrationError(
+            "HEAD_CAS_MISMATCH",
+            "HEAD changed while migration was in progress",
+        )
+    sentinel = Path(maintenance_sentinel).expanduser().resolve()
+    try:
+        sentinel_payload = json.loads(sentinel.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MigrationError(
+            "INVALID_MAINTENANCE_SENTINEL",
+            "maintenance sentinel disappeared or changed during resume",
+        ) from exc
+    if sentinel_payload != maintenance_sentinel_payload(plan):
+        raise MigrationError(
+            "INVALID_MAINTENANCE_SENTINEL",
+            "maintenance sentinel is not bound to this plan and HEAD",
+        )
+    allowed_partial_sources: set[str] = set()
+    for source, (expected_hash, expected_size) in (
+        _planned_untracked_source_records(plan).items()
+    ):
+        source_path = repo_root / source
+        if not source_path.exists() and not source_path.is_symlink():
+            continue
+        if source_path.is_symlink() or not source_path.is_file():
+            raise MigrationError(
+                "IGNORED_SOURCE_CHANGED",
+                f"planned ignored source is no longer a regular file: {source}",
+            )
+        actual_hash, actual_size = _hash_file(source_path)
+        if actual_hash != expected_hash or actual_size != expected_size:
+            raise MigrationError(
+                "IGNORED_SOURCE_CHANGED",
+                f"planned ignored source changed during resume: {source}",
+            )
+        allowed_partial_sources.add(source)
+    unexpected = sorted(
+        _git_diff_paths(repo_root)
+        - set(plan["expected_diff_paths"])
+        - allowed_partial_sources
+    )
+    if unexpected:
+        raise MigrationError(
+            "UNEXPECTED_RESUME_DIFF",
+            "resume found changes outside the frozen migration plan",
+            details={"unexpected": unexpected},
+        )
+
+
+def _hash_file(path: Path) -> tuple[str, int]:
+    content = path.read_bytes()
+    return sha256_bytes(content), len(content)
+
+
+def _move_planned_file(
+    repo: Path,
+    source: Path,
+    destination: Path,
+    *,
+    expected_hash: str,
+    expected_size: int,
+    git_tracked: bool,
+    destination_hash: str | None = None,
+    destination_size: int | None = None,
+) -> None:
+    source_exists = source.is_file() and not source.is_symlink()
+    destination_exists = destination.is_file() and not destination.is_symlink()
+    if source_exists and destination_exists:
+        raise MigrationError(
+            "PARTIAL_MOVE_COLLISION",
+            f"both source and destination exist: {source} -> {destination}",
+        )
+    if not source_exists and not destination_exists:
+        raise MigrationError(
+            "PARTIAL_MOVE_MISSING",
+            f"neither source nor destination exists: {source} -> {destination}",
+        )
+    if destination_exists:
+        actual_hash, actual_size = _hash_file(destination)
+        allowed = {
+            (expected_hash, expected_size),
+            (
+                destination_hash or expected_hash,
+                destination_size
+                if destination_size is not None
+                else expected_size,
+            ),
+        }
+        if (actual_hash, actual_size) not in allowed:
+            raise MigrationError(
+                "PARTIAL_MOVE_CONTENT_MISMATCH",
+                f"resumed destination differs from plan: {destination}",
+            )
+        _git(repo, "add", "-f", "--", destination.relative_to(repo).as_posix())
+        return
+
+    actual_hash, actual_size = _hash_file(source)
+    if actual_hash != expected_hash or actual_size != expected_size:
+        raise MigrationError(
+            "SOURCE_HASH_MISMATCH",
+            f"source content changed before move: {source}",
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if git_tracked:
+        _git(
+            repo,
+            "mv",
+            "--",
+            source.relative_to(repo).as_posix(),
+            destination.relative_to(repo).as_posix(),
+        )
+    else:
+        shutil.move(str(source), str(destination))
+        _git(repo, "add", "-f", "--", destination.relative_to(repo).as_posix())
+
+
+def _remove_empty_tree(root: Path) -> None:
+    if not root.exists() or root.is_symlink():
+        return
+    for directory in sorted(
+        (item for item in root.rglob("*") if item.is_dir()),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    try:
+        root.rmdir()
+    except OSError:
+        pass
+
+
+def _apply_topic(repo: Path, item: dict[str, Any]) -> None:
+    source_root = repo / item["old_repo_path"]
+    destination_root = repo / item["new_repo_path"]
+    if source_root.exists() and (
+        source_root.is_symlink() or not source_root.is_dir()
+    ):
+        raise MigrationError(
+            "SOURCE_ANCHOR_MISSING",
+            f"planned source is not a directory: {source_root}",
+        )
+    if destination_root.exists() and (
+        destination_root.is_symlink() or not destination_root.is_dir()
+    ):
+        raise MigrationError(
+            "DESTINATION_OVERLAP",
+            f"planned destination is not a directory: {destination_root}",
+        )
+    destination_root.mkdir(parents=True, exist_ok=True)
+    for record in item["content_hashes"]:
+        if record["before_sha256"] is None:
+            continue
+        source = source_root / record["source_relative_path"]
+        destination = destination_root / record["relative_path"]
+        _move_planned_file(
+            repo,
+            source,
+            destination,
+            expected_hash=record["before_sha256"],
+            expected_size=record["size_before"],
+            git_tracked=record["git_tracked"],
+            destination_hash=record["after_sha256"],
+            destination_size=record["size_after"],
+        )
+
+    brief_content = base64.b64decode(item["brief_after_b64"])
+    _atomic_write(destination_root / "_brief.md", brief_content)
+    _git(
+        repo,
+        "add",
+        "-f",
+        "--",
+        f"{item['new_repo_path']}/_brief.md",
+    )
+    _remove_empty_tree(source_root)
+
+
+def _apply_control_action(repo: Path, action: dict[str, Any]) -> None:
+    destination = repo / action["destination_repo_path"]
+    if action["kind"] == "move":
+        _move_planned_file(
+            repo,
+            repo / action["source_repo_path"],
+            destination,
+            expected_hash=action["source_sha256"],
+            expected_size=action["size"],
+            git_tracked=action["git_tracked"],
+        )
+        return
+    if action["kind"] == "copy":
+        source = repo / action["source_repo_path"]
+        actual_hash, actual_size = _hash_file(source)
+        if (
+            actual_hash != action["source_sha256"]
+            or actual_size != action["size"]
+        ):
+            raise MigrationError(
+                "CONTROL_CHANGED",
+                f"control source changed before archive copy: {source}",
+            )
+        if destination.exists():
+            destination_hash, destination_size = _hash_file(destination)
+            if (
+                destination_hash != action["source_sha256"]
+                or destination_size != action["size"]
+            ):
+                raise MigrationError(
+                    "CONTROL_DESTINATION_OVERLAP",
+                    f"archive copy destination differs: {destination}",
+                )
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        _git(repo, "add", "-f", "--", action["destination_repo_path"])
+        return
+
+    content = base64.b64decode(action["content_b64"])
+    if destination.exists() and (
+        destination.is_symlink() or not destination.is_file()
+    ):
+        raise MigrationError(
+            "CONTROL_DESTINATION_OVERLAP",
+            f"generated control destination is not a file: {destination}",
+        )
+    _atomic_write(destination, content)
+    _git(repo, "add", "-f", "--", action["destination_repo_path"])
+
+
+def _verify_completed_control(repo: Path, action: dict[str, Any]) -> None:
+    destination = repo / action["destination_repo_path"]
+    if destination.is_symlink() or not destination.is_file():
+        raise MigrationError(
+            "INVALID_MIGRATION_CHECKPOINT",
+            f"completed control destination is missing: {destination}",
+        )
+    expected_hash = (
+        action["source_sha256"]
+        if action["kind"] in {"copy", "move"}
+        else action["after_sha256"]
+    )
+    if sha256_bytes(destination.read_bytes()) != expected_hash:
+        raise MigrationError(
+            "INVALID_MIGRATION_CHECKPOINT",
+            f"completed control destination changed: {destination}",
+        )
+    if action["kind"] == "move":
+        source = repo / action["source_repo_path"]
+        if source.exists() or source.is_symlink():
+            raise MigrationError(
+                "INVALID_MIGRATION_CHECKPOINT",
+                f"completed control source reappeared: {source}",
+            )
+
+
+def _cleanup_legacy_containers(repo: Path, legacy: Path) -> None:
+    _remove_empty_tree(legacy)
+    current = legacy.parent
+    while current != repo:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
 
 
 def apply_plan(
@@ -1658,19 +2924,80 @@ def apply_plan(
     expected_head: str,
     expected_plan_hash: str,
     maintenance_sentinel: str | os.PathLike[str],
+    checkpoint_path: str | os.PathLike[str] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Apply a frozen plan after all Git, HEAD, plan, content and sentinel gates."""
+    """Apply and verify while holding the governed repository mutation lock."""
 
-    repo, legacy, _ = _validate_roots(repo_root, legacy_root)
-    _validate_apply_gates(
-        plan,
-        repo,
-        legacy,
-        expected_head=expected_head,
-        expected_plan_hash=expected_plan_hash,
-        maintenance_sentinel=maintenance_sentinel,
+    from katana_kernel.gitops import (  # noqa: PLC0415 - standalone script
+        repository_mutation_lock,
     )
+
+    repo, _, _ = _validate_roots(
+        repo_root,
+        legacy_root,
+        require_legacy=False,
+    )
+    with repository_mutation_lock(str(repo)):
+        return _apply_plan_locked(
+            plan,
+            repo,
+            legacy_root,
+            expected_head=expected_head,
+            expected_plan_hash=expected_plan_hash,
+            maintenance_sentinel=maintenance_sentinel,
+            checkpoint_path=checkpoint_path,
+            dry_run=dry_run,
+        )
+
+
+def _apply_plan_locked(
+    plan: dict[str, Any],
+    repo_root: str | os.PathLike[str],
+    legacy_root: str | os.PathLike[str],
+    *,
+    expected_head: str,
+    expected_plan_hash: str,
+    maintenance_sentinel: str | os.PathLike[str],
+    checkpoint_path: str | os.PathLike[str] | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Apply a frozen plan after all gates; caller owns the mutation lock."""
+
+    repo, legacy, _ = _validate_roots(
+        repo_root,
+        legacy_root,
+        require_legacy=False,
+    )
+    checkpoint = _checkpoint_path(
+        repo,
+        maintenance_sentinel,
+        checkpoint_path,
+    )
+    checkpoint_payload = _load_checkpoint(checkpoint, plan)
+    if checkpoint_payload is None:
+        if not legacy.is_dir():
+            raise MigrationError(
+                "LEGACY_ROOT_NOT_FOUND",
+                f"not a directory: {legacy}",
+            )
+        _validate_apply_gates(
+            plan,
+            repo,
+            legacy,
+            expected_head=expected_head,
+            expected_plan_hash=expected_plan_hash,
+            maintenance_sentinel=maintenance_sentinel,
+        )
+    else:
+        _validate_resume_gates(
+            plan,
+            repo,
+            legacy,
+            expected_head=expected_head,
+            expected_plan_hash=expected_plan_hash,
+            maintenance_sentinel=maintenance_sentinel,
+        )
 
     moves = [
         {
@@ -1685,24 +3012,57 @@ def apply_plan(
             "dry_run": True,
             "plan_hash": plan["plan_hash"],
             "source_head": plan["source_head"],
+            "checkpoint_path": str(checkpoint),
             "moves": moves,
         }
 
+    if checkpoint_payload is None:
+        checkpoint_payload = {
+            **_checkpoint_binding(plan),
+            "status": "applying",
+            "completed_topics": [],
+            "completed_controls": [],
+        }
+        _save_checkpoint(checkpoint, checkpoint_payload)
+    elif checkpoint_payload["status"] == "verified":
+        verification = verify_plan(plan, repo, legacy)
+        return {
+            "applied": True,
+            "dry_run": False,
+            "resumed": True,
+            "plan_hash": plan["plan_hash"],
+            "source_head": plan["source_head"],
+            "checkpoint_path": str(checkpoint),
+            "moves": moves,
+            "verification": verification,
+        }
+
     for item in plan["map"]:
-        source = item["old_repo_path"]
-        destination = item["new_repo_path"]
-        _git(repo, "mv", "--", source, destination)
-        brief = repo / destination / "_brief.md"
-        brief.parent.mkdir(parents=True, exist_ok=True)
-        brief.write_bytes(base64.b64decode(item["brief_after_b64"]))
-        _git(repo, "add", "--", f"{destination}/_brief.md")
+        _apply_topic(repo, item)
+        if item["new_id"] not in checkpoint_payload["completed_topics"]:
+            checkpoint_payload["completed_topics"].append(item["new_id"])
+            _save_checkpoint(checkpoint, checkpoint_payload)
+
+    for action in plan["control_actions"]:
+        if action["action_id"] in checkpoint_payload["completed_controls"]:
+            _verify_completed_control(repo, action)
+            continue
+        _apply_control_action(repo, action)
+        if action["action_id"] not in checkpoint_payload["completed_controls"]:
+            checkpoint_payload["completed_controls"].append(action["action_id"])
+            _save_checkpoint(checkpoint, checkpoint_payload)
+
+    _cleanup_legacy_containers(repo, legacy)
 
     verification = verify_plan(plan, repo, legacy)
+    checkpoint_payload["status"] = "verified"
+    _save_checkpoint(checkpoint, checkpoint_payload)
     return {
         "applied": True,
         "dry_run": False,
         "plan_hash": plan["plan_hash"],
         "source_head": plan["source_head"],
+        "checkpoint_path": str(checkpoint),
         "moves": moves,
         "verification": verification,
     }
@@ -1753,12 +3113,25 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--repairs")
     plan_parser.add_argument("--output")
 
+    sentinel_parser = subparsers.add_parser("sentinel")
+    _add_roots(sentinel_parser)
+    sentinel_parser.add_argument("--plan", required=True)
+    sentinel_parser.add_argument("--expected-plan-hash", required=True)
+    sentinel_parser.add_argument("--output", required=True)
+
     apply_parser = subparsers.add_parser("apply")
     _add_roots(apply_parser)
     apply_parser.add_argument("--plan", required=True)
     apply_parser.add_argument("--expected-head", required=True)
     apply_parser.add_argument("--expected-plan-hash", required=True)
     apply_parser.add_argument("--maintenance-sentinel", required=True)
+    apply_parser.add_argument(
+        "--checkpoint",
+        help=(
+            "external durable resume checkpoint; defaults beside the "
+            "maintenance sentinel"
+        ),
+    )
     apply_parser.add_argument("--dry-run", action="store_true")
     apply_parser.add_argument("--output")
 
@@ -1797,6 +3170,18 @@ def main(argv: Iterable[str] | None = None) -> int:
             result = build_plan(inventory, repairs=repairs)
             _emit(result, args.output)
             return 0
+        if args.phase == "sentinel":
+            plan = _load_json(args.plan)
+            _validate_cli_roots(plan, args.repo_root, args.legacy_root)
+            _validate_plan(plan)
+            _emit(
+                maintenance_sentinel_payload(
+                    plan,
+                    expected_plan_hash=args.expected_plan_hash,
+                ),
+                args.output,
+            )
+            return 0
         if args.phase == "apply":
             plan = _load_json(args.plan)
             result = apply_plan(
@@ -1806,6 +3191,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 expected_head=args.expected_head,
                 expected_plan_hash=args.expected_plan_hash,
                 maintenance_sentinel=args.maintenance_sentinel,
+                checkpoint_path=args.checkpoint,
                 dry_run=args.dry_run,
             )
             _emit(result, args.output)

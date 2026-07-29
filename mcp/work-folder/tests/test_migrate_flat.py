@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import hashlib
 import re
 import subprocess
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.migrate_flat as migration
 from scripts.migrate_flat import (
     MigrationError,
     apply_plan,
@@ -19,6 +21,7 @@ from scripts.migrate_flat import (
     maintenance_sentinel_payload,
     verify_plan,
 )
+from katana_work_folder_mcp import server
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -107,7 +110,9 @@ def flat_repo(tmp_path: Path) -> tuple[Path, Path]:
     (legacy_root / "CLAUDE.md").write_text("legacy claude\n", encoding="utf-8")
     legacy_katana = legacy_root / ".katana"
     legacy_katana.mkdir()
-    (legacy_katana / "manifest.json").write_text("{}\n", encoding="utf-8")
+    legacy_manifests = legacy_katana / "manifests"
+    legacy_manifests.mkdir()
+    (legacy_manifests / "manifest.json").write_text("{}\n", encoding="utf-8")
 
     _topic(
         legacy_root,
@@ -147,13 +152,26 @@ def _without_id_line(text: str) -> str:
     return re.sub(r"(?m)^id:[^\n]*\n", "", text)
 
 
-def test_cli_exposes_inventory_plan_apply_verify() -> None:
+def test_cli_exposes_inventory_plan_sentinel_apply_verify() -> None:
     parser = build_parser()
     subparsers = next(
         action for action in parser._actions
         if action.__class__.__name__ == "_SubParsersAction"
     )
-    assert set(subparsers.choices) == {"inventory", "plan", "apply", "verify"}
+    assert set(subparsers.choices) == {
+        "inventory",
+        "plan",
+        "sentinel",
+        "apply",
+        "verify",
+    }
+    sentinel_parser = subparsers.choices["sentinel"]
+    expected_hash = next(
+        action
+        for action in sentinel_parser._actions
+        if action.dest == "expected_plan_hash"
+    )
+    assert expected_hash.required is True
 
 
 def test_inventory_accepts_only_date_topic_anchors_and_classifies_controls(
@@ -229,6 +247,33 @@ def test_inventory_rejects_destination_overlap(
     }
 
 
+def test_inventory_rejects_nested_git_metadata_anywhere_below_root(
+    flat_repo: tuple[Path, Path],
+) -> None:
+    repo, legacy_root = flat_repo
+    nested = legacy_root / ".katana/control-archive/incident/.git"
+    nested.mkdir(parents=True)
+    (nested / "HEAD").write_text(
+        "ref: refs/heads/main\n",
+        encoding="utf-8",
+    )
+
+    inventory = build_inventory(repo, legacy_root)
+
+    assert inventory["ok"] is False
+    assert {
+        (error["code"], error["locator"])
+        for error in inventory["errors"]
+    } >= {
+        (
+            "NESTED_GIT_METADATA",
+            "records/.katana/control-archive/incident/.git",
+        )
+    }
+    with pytest.raises(MigrationError, match="NESTED_GIT_METADATA"):
+        build_plan(inventory)
+
+
 def test_plan_is_byte_deterministic_and_maps_every_topic(
     flat_repo: tuple[Path, Path],
 ) -> None:
@@ -253,6 +298,25 @@ def test_plan_is_byte_deterministic_and_maps_every_topic(
     assert hashlib.sha256(
         canonical_json({k: v for k, v in first.items() if k != "plan_hash"})
     ).hexdigest() == first["plan_hash"]
+
+
+def test_sentinel_rejects_plan_without_matching_approved_hash(
+    flat_repo: tuple[Path, Path],
+) -> None:
+    repo, legacy_root = flat_repo
+    plan = _make_plan(repo, legacy_root)
+
+    approved = maintenance_sentinel_payload(
+        plan,
+        expected_plan_hash=plan["plan_hash"],
+    )
+
+    assert approved["plan_hash"] == plan["plan_hash"]
+    with pytest.raises(MigrationError, match="PLAN_HASH_CAS_MISMATCH"):
+        maintenance_sentinel_payload(
+            plan,
+            expected_plan_hash="f" * 64,
+        )
 
 
 def test_deterministic_id_uses_domain_separation_and_collision_counter() -> None:
@@ -386,6 +450,39 @@ def test_apply_dry_run_is_byte_identical_and_does_not_mutate(
     assert _git(repo, "status", "--porcelain=v1", "--untracked-files=all") == ""
     assert (legacy_root / "2026/07/01/canonical").is_dir()
     assert not (repo / "wf-a1b2c3").exists()
+
+
+def test_apply_holds_governed_repository_lock_through_topic_moves(
+    flat_repo: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, legacy_root = flat_repo
+    plan = _make_plan(repo, legacy_root)
+    sentinel = _write_sentinel(tmp_path, plan)
+    original = migration._apply_topic
+    observed_locked = False
+
+    def assert_locked(repo_arg: Path, item: dict) -> None:
+        nonlocal observed_locked
+        lock_path = repo / ".git/katana-governed.lock"
+        with lock_path.open("a+b") as probe:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        observed_locked = True
+        original(repo_arg, item)
+
+    monkeypatch.setattr(migration, "_apply_topic", assert_locked)
+    apply_plan(
+        plan,
+        repo,
+        legacy_root,
+        expected_head=plan["source_head"],
+        expected_plan_hash=plan["plan_hash"],
+        maintenance_sentinel=sentinel,
+    )
+
+    assert observed_locked is True
 
 
 @pytest.mark.parametrize(
@@ -542,7 +639,20 @@ def test_apply_moves_with_git_updates_only_brief_id_and_verifies(
         repo / legacy_item["new_id"] / "_brief.md"
     ).read_text(encoding="utf-8")
     assert _without_id_line(migrated_brief) == _without_id_line(legacy_brief)
-    assert all((repo / item).read_bytes() == content for item, content in controls_before.items())
+    actions_by_source = {
+        action["source_repo_path"]: action
+        for action in plan["control_actions"]
+        if action["source_repo_path"]
+    }
+    for source, content in controls_before.items():
+        action = actions_by_source[source]
+        archived = repo / action["destination_repo_path"]
+        assert archived.read_bytes() == content
+    assert not (repo / "AGENTS.md").exists()
+    assert not legacy_root.exists()
+    assert (repo / ".katana/flat-layout.json").is_file()
+    assert (repo / ".katana/legacy-manifest-inventory.json").is_file()
+    assert not (repo / ".katana/manifests").exists()
 
 
 def test_verify_rejects_post_apply_content_tampering(
@@ -595,3 +705,299 @@ def test_verify_rejects_ignored_control_tampering(
 
     with pytest.raises(MigrationError, match="CONTROL_CHANGED"):
         verify_plan(plan, repo, legacy_root)
+
+
+def test_verify_and_server_reject_nested_git_in_migrated_tree(
+    flat_repo: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    repo, legacy_root = flat_repo
+    plan = _make_plan(repo, legacy_root)
+    sentinel = _write_sentinel(tmp_path, plan)
+    apply_plan(
+        plan,
+        repo,
+        legacy_root,
+        expected_head=plan["source_head"],
+        expected_plan_hash=plan["plan_hash"],
+        maintenance_sentinel=sentinel,
+    )
+    nested = repo / ".katana/control-archive/injected/.git"
+    nested.mkdir(parents=True)
+    (nested / "HEAD").write_text(
+        "ref: refs/heads/main\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MigrationError, match="NESTED_GIT_METADATA"):
+        verify_plan(plan, repo, legacy_root)
+    with pytest.raises(ValueError, match="nested Git metadata"):
+        server.configure(str(repo))
+
+
+def test_empty_topic_is_inventoried_and_requires_explicit_brief_repair(
+    flat_repo: tuple[Path, Path],
+) -> None:
+    repo, legacy_root = flat_repo
+    empty = legacy_root / "2026/07/04/empty-topic"
+    empty.mkdir(parents=True)
+
+    inventory = build_inventory(repo, legacy_root)
+    topic = next(
+        item
+        for item in inventory["topics"]
+        if item["old_locator"] == "2026/07/04/empty-topic"
+    )
+    assert inventory["ok"] is True
+    assert topic["is_empty"] is True
+    assert topic["brief_state"] == "missing"
+    with pytest.raises(MigrationError, match="REPAIR_METADATA_REQUIRED"):
+        build_plan(inventory)
+
+    plan = build_plan(
+        inventory,
+        repairs={
+            "2026/07/04/empty-topic": {
+                "state": "missing",
+                "brief_text": _brief("Empty Topic", None),
+            }
+        },
+    )
+    assert any(
+        item["old_locator"] == "2026/07/04/empty-topic"
+        for item in plan["map"]
+    )
+
+
+def test_inventory_normalizes_exact_double_root_and_rejects_collision(
+    flat_repo: tuple[Path, Path],
+) -> None:
+    repo, legacy_root = flat_repo
+    source = legacy_root / "2026/07/03/missing-id"
+    nested = (
+        legacy_root
+        / "智元工作/工作记录/2026/07/03/missing-id"
+    )
+    nested.parent.mkdir(parents=True)
+    _git(
+        repo,
+        "mv",
+        source.relative_to(repo).as_posix(),
+        nested.relative_to(repo).as_posix(),
+    )
+    _commit_all(repo, "move one topic into accidental double root")
+
+    inventory = build_inventory(repo, legacy_root)
+    topic = next(
+        item
+        for item in inventory["topics"]
+        if item["old_locator"] == "2026/07/03/missing-id"
+    )
+    assert inventory["ok"] is True
+    assert topic["source_repo_path"].startswith(
+        "records/智元工作/工作记录/"
+    )
+
+    duplicate = (
+        legacy_root
+        / "智元工作/工作记录/2026/07/01/canonical"
+    )
+    _topic(
+        legacy_root / "智元工作/工作记录",
+        "2026/07/01/canonical",
+        title="Duplicate",
+        resource_id="wf-dedede",
+    )
+    assert duplicate.is_dir()
+    _commit_all(repo, "add logical locator collision")
+    rejected = build_inventory(repo, legacy_root)
+    assert rejected["ok"] is False
+    assert "DUPLICATE_SOURCE_LOCATOR" in {
+        error["code"] for error in rejected["errors"]
+    }
+
+
+def test_tombstones_are_reserved_merged_and_live_overlap_fails_closed(
+    flat_repo: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    repo, legacy_root = flat_repo
+    tombstone_path = legacy_root / ".katana/tombstones.json"
+    tombstone_path.write_text(
+        '{"tombstones":["wf-c885d5"]}\n',
+        encoding="utf-8",
+    )
+    _commit_all(repo, "add legacy tombstone")
+
+    plan = _make_plan(repo, legacy_root)
+    assert plan["tombstones"] == ["wf-c885d5"]
+    assert "wf-c885d5" not in {item["new_id"] for item in plan["map"]}
+    sentinel = _write_sentinel(tmp_path, plan)
+    apply_plan(
+        plan,
+        repo,
+        legacy_root,
+        expected_head=plan["source_head"],
+        expected_plan_hash=plan["plan_hash"],
+        maintenance_sentinel=sentinel,
+    )
+    assert (
+        migration._load_json(repo / ".katana/tombstones.json")["tombstones"]
+        == ["wf-c885d5"]
+    )
+
+    # A separate fixture state proves live/tombstone overlap is not repaired.
+    repo2 = tmp_path / "overlap-repo"
+    repo2.mkdir()
+    _git(repo2, "init", "-q")
+    _git(repo2, "config", "user.email", "migration-test@example.com")
+    _git(repo2, "config", "user.name", "Migration Test")
+    legacy2 = repo2 / "records"
+    _topic(
+        legacy2,
+        "2026/07/01/live",
+        title="Live",
+        resource_id="wf-a1b2c3",
+    )
+    controls = legacy2 / ".katana"
+    controls.mkdir()
+    (controls / "tombstones.json").write_text(
+        '{"tombstones":["wf-a1b2c3"]}\n',
+        encoding="utf-8",
+    )
+    _commit_all(repo2)
+    overlap = build_inventory(repo2, legacy2)
+    assert "LIVE_ID_TOMBSTONED" in {
+        error["code"] for error in overlap["errors"]
+    }
+
+
+def test_runtime_dot_dirs_are_archived_and_binary_is_api_reachable(
+    flat_repo: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    repo, legacy_root = flat_repo
+    topic = legacy_root / "2026/07/01/canonical"
+    runtime = topic / ".superpowers"
+    runtime.mkdir()
+    (runtime / "cache.bin").write_bytes(b"\x00\xff\x10")
+    github = topic / ".github"
+    github.mkdir()
+    (github / "workflow.yml").write_text("name: test\n", encoding="utf-8")
+    _commit_all(repo, "add dot payload")
+
+    plan = _make_plan(repo, legacy_root)
+    item = next(
+        entry
+        for entry in plan["map"]
+        if entry["old_locator"] == "2026/07/01/canonical"
+    )
+    binary = next(
+        record
+        for record in item["content_hashes"]
+        if record["source_relative_path"] == ".superpowers/cache.bin"
+    )
+    assert binary["relative_path"] == "archive/runtime/superpowers/cache.bin"
+    assert binary["api_tool"] == "fs_read_bytes"
+    sentinel = _write_sentinel(tmp_path, plan)
+    result = apply_plan(
+        plan,
+        repo,
+        legacy_root,
+        expected_head=plan["source_head"],
+        expected_plan_hash=plan["plan_hash"],
+        maintenance_sentinel=sentinel,
+    )
+    assert result["verification"]["api_reachability"]["fs_read_bytes"] == 1
+    assert (
+        repo / item["new_id"] / "archive/runtime/superpowers/cache.bin"
+    ).read_bytes() == b"\x00\xff\x10"
+    assert (repo / item["new_id"] / ".github/workflow.yml").is_file()
+
+
+def test_apply_resumes_exact_plan_from_external_checkpoint(
+    flat_repo: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, legacy_root = flat_repo
+    plan = _make_plan(repo, legacy_root)
+    sentinel = _write_sentinel(tmp_path, plan)
+    checkpoint = tmp_path / "migration-checkpoint.json"
+    original = migration._apply_control_action
+    calls = 0
+
+    def interrupt_after_one(repo_arg: Path, action: dict) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("synthetic interruption")
+        original(repo_arg, action)
+
+    monkeypatch.setattr(
+        migration,
+        "_apply_control_action",
+        interrupt_after_one,
+    )
+    with pytest.raises(RuntimeError, match="synthetic interruption"):
+        apply_plan(
+            plan,
+            repo,
+            legacy_root,
+            expected_head=plan["source_head"],
+            expected_plan_hash=plan["plan_hash"],
+            maintenance_sentinel=sentinel,
+            checkpoint_path=checkpoint,
+        )
+    payload = migration._load_json(checkpoint)
+    assert payload["status"] == "applying"
+    assert len(payload["completed_controls"]) == 1
+
+    monkeypatch.setattr(migration, "_apply_control_action", original)
+    orphan = repo / ".INDEX.md.migration-tmp-hard-crash"
+    orphan.write_text("partial\n", encoding="utf-8")
+    with pytest.raises(MigrationError, match="UNEXPECTED_RESUME_DIFF"):
+        apply_plan(
+            plan,
+            repo,
+            legacy_root,
+            expected_head=plan["source_head"],
+            expected_plan_hash=plan["plan_hash"],
+            maintenance_sentinel=sentinel,
+            checkpoint_path=checkpoint,
+        )
+    orphan.unlink()
+    resumed = apply_plan(
+        plan,
+        repo,
+        legacy_root,
+        expected_head=plan["source_head"],
+        expected_plan_hash=plan["plan_hash"],
+        maintenance_sentinel=sentinel,
+        checkpoint_path=checkpoint,
+    )
+    assert resumed["verification"]["ok"] is True
+    assert migration._load_json(checkpoint)["status"] == "verified"
+
+
+def test_migrated_and_committed_repository_passes_server_startup_gate(
+    flat_repo: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    repo, legacy_root = flat_repo
+    plan = _make_plan(repo, legacy_root)
+    sentinel = _write_sentinel(tmp_path, plan)
+    apply_plan(
+        plan,
+        repo,
+        legacy_root,
+        expected_head=plan["source_head"],
+        expected_plan_hash=plan["plan_hash"],
+        maintenance_sentinel=sentinel,
+    )
+    _commit_all(repo, "flat cutover")
+
+    server.configure(str(repo))
+
+    assert server._repo_root == str(repo)
+    assert server._kernel is not None
