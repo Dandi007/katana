@@ -28,6 +28,8 @@ def search(
     top_k: int = 10,
     dir: str | None = None,
     exclude: list[str] | None = None,
+    source_root: str | None = None,
+    source_id: str | None = None,
     base_url: str = DEFAULT_BASE_URL,
     client: httpx.Client | None = None,
 ) -> SearchResponse:
@@ -36,6 +38,10 @@ def search(
         filt["dir"] = dir
     if exclude:
         filt["exclude"] = exclude
+    if source_root is not None:
+        filt["source_root"] = source_root
+    if source_id is not None:
+        filt["source_id"] = source_id
     body: dict = {"query": query, "top_k": top_k}
     if filt:
         body["filter"] = filt

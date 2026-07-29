@@ -1,6 +1,7 @@
 """Work Folder server configuration、search 与 public envelope 测试。"""
 
 import asyncio
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -280,9 +281,22 @@ def test_configure_fails_closed_when_runtime_ledger_was_lost(tmp_path):
 
 def test_do_search_shapes_only_flat_id_locators(monkeypatch):
     captured = {}
+    source_root = "/data/work-records"
+    source_id = hashlib.sha256(source_root.encode("utf-8")).hexdigest()
 
-    def fake_search(query, *, top_k=10):
-        captured.update(query=query, top_k=top_k)
+    def fake_search(
+        query,
+        *,
+        top_k=10,
+        source_root=None,
+        source_id=None,
+    ):
+        captured.update(
+            query=query,
+            top_k=top_k,
+            source_root=source_root,
+            source_id=source_id,
+        )
         return SimpleNamespace(
             results=[
                 SimpleNamespace(
@@ -303,14 +317,38 @@ def test_do_search_shapes_only_flat_id_locators(monkeypatch):
                     title="Index",
                     snippet="ignored",
                 ),
+                SimpleNamespace(
+                    path="../wf-def456/escape.md",
+                    score=0.4,
+                    title="Traversal",
+                    snippet="ignored",
+                ),
+                SimpleNamespace(
+                    path="wf-def456/../escape.md",
+                    score=0.3,
+                    title="Nested traversal",
+                    snippet="ignored",
+                ),
+                SimpleNamespace(
+                    path="/wf-def456/absolute.md",
+                    score=0.2,
+                    title="Absolute",
+                    snippet="ignored",
+                ),
             ]
         )
 
+    monkeypatch.setattr(server, "_repo_root", source_root)
     monkeypatch.setattr(server.vault_search, "search", fake_search)
 
     result = server._do_search("工作记录", 5)
 
-    assert captured == {"query": "工作记录", "top_k": 5}
+    assert captured == {
+        "query": "工作记录",
+        "top_k": 20,
+        "source_root": source_root,
+        "source_id": source_id,
+    }
     assert result == [
         {
             "folder_id": "wf-abc123",
@@ -320,6 +358,147 @@ def test_do_search_shapes_only_flat_id_locators(monkeypatch):
             "snippet": "match",
         }
     ]
+
+
+def test_do_search_filters_source_before_top_k(monkeypatch):
+    source_root = "/data/work-records"
+    source_id = hashlib.sha256(source_root.encode("utf-8")).hexdigest()
+    global_hits = [
+        SimpleNamespace(
+            source_root="/data/vault",
+            source_id="wiki-source",
+            path="Zettelkasten/high-score-a.md",
+            score=0.99,
+            title="Foreign A",
+            snippet="foreign",
+        ),
+        SimpleNamespace(
+            source_root="/data/vault",
+            source_id="wiki-source",
+            path="Zettelkasten/high-score-b.md",
+            score=0.98,
+            title="Foreign B",
+            snippet="foreign",
+        ),
+        SimpleNamespace(
+            source_root=source_root,
+            source_id=source_id,
+            path="wf-abc123/findings.md",
+            score=0.91,
+            title="Work A",
+            snippet="work",
+        ),
+        SimpleNamespace(
+            source_root=source_root,
+            source_id=source_id,
+            path="wf-def456/progress.md",
+            score=0.90,
+            title="Work B",
+            snippet="work",
+        ),
+    ]
+
+    def fake_search(
+        query,
+        *,
+        top_k=10,
+        source_root=None,
+        source_id=None,
+    ):
+        filtered = [
+            hit
+            for hit in global_hits
+            if (
+                (source_root is None or hit.source_root == source_root)
+                and (source_id is None or hit.source_id == source_id)
+            )
+        ]
+        return SimpleNamespace(results=filtered[:top_k])
+
+    monkeypatch.setattr(server, "_repo_root", source_root)
+    monkeypatch.setattr(server.vault_search, "search", fake_search)
+
+    result = server._do_search("工作记录", 2)
+
+    assert [(item["folder_id"], item["filename"]) for item in result] == [
+        ("wf-abc123", "findings.md"),
+        ("wf-def456", "progress.md"),
+    ]
+
+
+def test_do_search_oversamples_before_locator_defense(monkeypatch):
+    source_root = "/data/work-records"
+    source_id = hashlib.sha256(source_root.encode("utf-8")).hexdigest()
+    captured = {}
+    same_source_hits = [
+        SimpleNamespace(
+            path="INDEX.md",
+            score=0.99,
+            title="Index",
+            snippet="control",
+        ),
+        SimpleNamespace(
+            path=".katana/control-archive/INDEX.md",
+            score=0.98,
+            title="Archived index",
+            snippet="control",
+        ),
+        SimpleNamespace(
+            path="wf-abc123/findings.md",
+            score=0.91,
+            title="Work A",
+            snippet="work",
+        ),
+        SimpleNamespace(
+            path="wf-def456/progress.md",
+            score=0.90,
+            title="Work B",
+            snippet="work",
+        ),
+        SimpleNamespace(
+            path="wf-fedcba/plan.md",
+            score=0.89,
+            title="Work C",
+            snippet="work",
+        ),
+    ]
+
+    def fake_search(
+        query,
+        *,
+        top_k=10,
+        source_root=None,
+        source_id=None,
+    ):
+        captured.update(
+            top_k=top_k,
+            source_root=source_root,
+            source_id=source_id,
+        )
+        return SimpleNamespace(results=same_source_hits[:top_k])
+
+    monkeypatch.setattr(server, "_repo_root", source_root)
+    monkeypatch.setattr(server.vault_search, "search", fake_search)
+
+    result = server._do_search("Work Folder", 2)
+
+    assert captured == {
+        "top_k": 20,
+        "source_root": source_root,
+        "source_id": source_id,
+    }
+    assert [(item["folder_id"], item["filename"]) for item in result] == [
+        ("wf-abc123", "findings.md"),
+        ("wf-def456", "progress.md"),
+    ]
+    assert len(result) == 2
+
+
+def test_do_search_requires_configured_source_root(monkeypatch):
+    monkeypatch.setattr(server, "_repo_root", None)
+
+    with pytest.raises(RuntimeError, match="not initialized"):
+        server._do_search("工作记录", 5)
 
 
 def test_public_payload_drops_internal_locator_fields_and_extracts_mutation_id(
