@@ -76,6 +76,17 @@ def _sample_body(title: str = "测试页面") -> str:
     return f"# {title}\n\n这是一个测试页面。\n\n## References\n\n- test-source\n\n相关 [[其他页面]]"
 
 
+def _commit_count(data_root: str) -> int:
+    return int(subprocess.run(
+        ["git", "-C", data_root, "rev-list", "--count", "HEAD"],
+        capture_output=True, text=True
+    ).stdout.strip())
+
+
+def _manifest_count(data_root: str) -> int:
+    return len(list((Path(data_root) / ".katana" / "manifests").glob("*.json")))
+
+
 # ── A1: write tool three-state tests ────────────────────────────────────────
 
 class TestWriteThreeState:
@@ -92,7 +103,7 @@ class TestWriteThreeState:
         d = _make_data_root()
         store = _make_store(d)
         result = store.wiki_create("test/path", _sample_body("test/path"),
-                                   _sample_frontmatter())
+                                    _sample_frontmatter())
         assert result["code"] == "VALIDATION_FAILED"
 
     def test_create_reject_id_in_frontmatter(self):
@@ -107,7 +118,7 @@ class TestWriteThreeState:
         d = _make_data_root()
         store = _make_store(d)
         result = store.wiki_create("测试页面", _sample_body("测试页面"),
-                                   _sample_frontmatter())
+                                    _sample_frontmatter())
         assert "id" in result
         assert result["id"].startswith("w-")
         assert result["path"] == "pages/测试页面.md"
@@ -125,18 +136,14 @@ class TestWriteThreeState:
     def test_create_manifest_and_commit(self):
         d = _make_data_root()
         store = _make_store(d)
-        commits_before = subprocess.run(
-            ["git", "-C", d, "rev-list", "--count", "HEAD"],
-            capture_output=True, text=True
-        ).stdout.strip()
+        commits_before = _commit_count(d)
+        manifests_before = _manifest_count(d)
         result = store.wiki_create("测试", _sample_body("测试"), _sample_frontmatter())
-        commits_after = subprocess.run(
-            ["git", "-C", d, "rev-list", "--count", "HEAD"],
-            capture_output=True, text=True
-        ).stdout.strip()
-        assert int(commits_after) == int(commits_before) + 1
+        commits_after = _commit_count(d)
+        manifests_after = _manifest_count(d)
+        assert commits_after == commits_before + 1, "exactly +1 commit per mutation"
+        assert manifests_after == manifests_before + 1, "exactly +1 manifest per mutation"
         manifests = list((Path(d) / ".katana" / "manifests").glob("*.json"))
-        assert len(manifests) >= 1
         manifest = json.loads(manifests[-1].read_text())
         assert manifest["tool"] == "wiki_create"
         assert "pages/测试.md" in manifest["changed_paths"]
@@ -235,6 +242,7 @@ class TestRename:
 
         body_b = store.wiki_get("页面B")
         assert "[[页面A]]" not in body_b["body"]
+        assert "[[页面A]]" not in body_b["body"], "broken link increment must be 0"
 
     def test_rename_to_existing_title_rejected(self):
         d = _make_data_root()
@@ -266,8 +274,11 @@ class TestDelete:
         store.wiki_create("页面A", _sample_body("页面A"), _sample_frontmatter())
         store.wiki_create("页面B", "正文 [[页面A]]", _sample_frontmatter(
             title="页面B", 摘要="页面B"))
+        commits_before = _commit_count(d)
         result = store.wiki_delete("页面A", force=True, inlink_action="remove_links")
+        commits_after = _commit_count(d)
         assert "id" in result
+        assert commits_after == commits_before + 1, "delete + inlink rewrite must land in same commit"
 
         get_a = store.wiki_get("页面A")
         assert get_a["code"] == "NOT_FOUND"
@@ -342,7 +353,7 @@ class TestSearch:
         result = store.wiki_search("测试")
         assert len(result["results"]) >= 0
         health = result["index_health"]
-        assert health["mode"] in ("hybrid", "keyword_only")
+        assert health["mode"] == "hybrid"
 
     def test_error_embedder_keyword_only(self):
         d = _make_data_root()
@@ -354,6 +365,19 @@ class TestSearch:
         health = store.search_engine.index_health()
         assert health["mode"] == "keyword_only"
         assert "service down" in (health["last_error"] or "")
+        assert result["id"] in health["degraded_pages"], "page must be marked degraded"
+
+    def test_error_embedder_write_succeeds(self):
+        d = _make_data_root()
+        embedder = _search.ErrorEmbeddingClient("service down")
+        store = _make_store(d, embedding_client=embedder)
+        result = store.wiki_create("测试降级写", _sample_body("测试降级写"), _sample_frontmatter(
+            title="测试降级写", 摘要="降级写"))
+        assert "id" in result
+        assert "commit" in result
+
+        get_result = store.wiki_get(result["id"])
+        assert get_result["id"] == result["id"]
 
     def test_search_snippet(self):
         d = _make_data_root()
@@ -387,6 +411,21 @@ class TestBadPageIsolation:
 
         search_result = store.wiki_search("正常")
         assert "index_health" in search_result
+
+    def test_bad_page_title_conflict_prevented(self):
+        d = _make_data_root()
+        store = _make_store(d)
+        store.wiki_create("正常页", _sample_body("正常页"), _sample_frontmatter(
+            title="正常页", 摘要="正常"))
+        bad_path = Path(d) / "pages" / "坏页.md"
+        bad_path.write_text("no frontmatter at all, just text")
+        subprocess.run(["git", "-C", d, "add", "pages/坏页.md"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", d, "commit", "-m", "add bad page"],
+                       check=True, capture_output=True)
+
+        result = store.wiki_create("坏页", _sample_body("坏页"), _sample_frontmatter(
+            title="坏页", 摘要="坏页"))
+        assert result["code"] == "TITLE_EXISTS", "should detect bad page as title conflict"
 
 
 # ── A7: migration tests ─────────────────────────────────────────────────────
@@ -516,6 +555,25 @@ class TestMigration:
         for p1, p2 in zip(pages1, pages2):
             assert p1.read_text(encoding="utf-8") == p2.read_text(encoding="utf-8")
 
+    def test_migrate_output_openable_by_v2_server(self):
+        base = tempfile.mkdtemp(prefix="migrate_test_")
+        src = self._make_v1_repo(base)
+        dest = Path(base) / "v2_dest"
+
+        from katana_wiki_v2_mcp.migrate import migrate
+        result = migrate(src, str(dest), dry_run=False)
+        assert result["success"]
+
+        store = _make_store(str(dest))
+        store.rebuild_index()
+
+        search_result = store.wiki_search("测试")
+        assert "index_health" in search_result
+        assert len(search_result["results"]) >= 0
+
+        get_result = store.wiki_get("测试页面")
+        assert get_result["id"] is not None
+
 
 # ── A8: concurrent write serialization ──────────────────────────────────────
 
@@ -540,6 +598,9 @@ class TestConcurrency:
             except Exception as e:
                 errors.append(str(e))
 
+        commits_before = _commit_count(d)
+        manifests_before = _manifest_count(d)
+
         threads = []
         for i in range(5):
             t = threading.Thread(target=create_page, args=(f"并发页{i}",))
@@ -553,11 +614,12 @@ class TestConcurrency:
         assert len(errors) == 0, f"errors: {errors}"
         assert len(ids) == 5
 
-        commits = subprocess.run(
-            ["git", "-C", d, "rev-list", "--count", "HEAD"],
-            capture_output=True, text=True
-        ).stdout.strip()
-        assert int(commits) >= 5 + 1
+        commits_after = _commit_count(d)
+        manifests_after = _manifest_count(d)
+        assert commits_after == commits_before + 5, \
+            f"exactly one commit per mutation, expected +5 got +{commits_after - commits_before}"
+        assert manifests_after == manifests_before + 5, \
+            f"exactly one manifest per mutation, expected +5 got +{manifests_after - manifests_before}"
 
 
 # ── pages.py unit tests ─────────────────────────────────────────────────────
@@ -627,7 +689,7 @@ class TestPages:
 
 # ── invariants.py unit tests ────────────────────────────────────────────────
 
-class TestInvariants:
+class TestInvariantsUnit:
     def test_validate_page_ingest_grade(self):
         fm = _sample_frontmatter()
         body = _sample_body()

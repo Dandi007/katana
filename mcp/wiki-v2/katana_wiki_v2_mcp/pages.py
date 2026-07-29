@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import sys
 from pathlib import Path
 
 import yaml
@@ -150,8 +151,15 @@ def scan_pages(data_root: str) -> list[dict]:
                 "body": body,
                 "id": fm.get("id"),
             })
-        except Exception:
-            pass
+        except Exception as e:
+            pages.append({
+                "path": f"pages/{p.name}",
+                "title": p.stem,
+                "frontmatter": {},
+                "body": "",
+                "id": None,
+                "_error": str(e),
+            })
     return pages
 
 
@@ -170,8 +178,15 @@ def find_page_by_title(data_root: str, title: str) -> dict | None:
             "body": body,
             "id": fm.get("id"),
         }
-    except Exception:
-        return None
+    except Exception as e:
+        return {
+            "path": path,
+            "title": title,
+            "frontmatter": {},
+            "body": "",
+            "id": None,
+            "_error": str(e),
+        }
 
 
 def find_page_by_id(data_root: str, page_id: str) -> dict | None:

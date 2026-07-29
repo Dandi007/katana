@@ -31,16 +31,19 @@ class EmbeddingClient:
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        resp = httpx.post(
-            f"{self.base_url}/v1/embeddings",
-            json={"input": texts, "model": self.model},
-            headers=headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        embeddings = [d["embedding"] for d in data["data"]]
-        return embeddings
+        try:
+            resp = httpx.post(
+                f"{self.base_url}/v1/embeddings",
+                json={"input": texts, "model": self.model},
+                headers=headers,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            embeddings = [d["embedding"] for d in data["data"]]
+            return embeddings
+        except Exception:
+            raise
 
 
 class FakeEmbeddingClient:
@@ -65,6 +68,7 @@ class FakeEmbeddingClient:
 class ErrorEmbeddingClient:
     def __init__(self, error_msg: str = "embedding service unavailable"):
         self.error_msg = error_msg
+        self.dim = 512
 
     def embed(self, texts: list[str]) -> None:
         raise RuntimeError(self.error_msg)
@@ -128,10 +132,12 @@ class WikiSearch:
         self._db = None
 
         if self._embedding_client is not None:
-            if isinstance(self._embedding_client, ErrorEmbeddingClient):
-                self._last_error = self._embedding_client.error_msg
-            else:
-                self._mode = "hybrid"
+            self._mode = "hybrid"
+
+    def _vector_dim(self) -> int:
+        if self._embedding_client is not None and hasattr(self._embedding_client, "dim"):
+            return self._embedding_client.dim
+        return 512
 
     def _ensure_lancedb(self):
         if self._db is not None:
@@ -140,13 +146,14 @@ class WikiSearch:
             import lancedb
             self._index_dir.mkdir(parents=True, exist_ok=True)
             self._db = lancedb.connect(str(self._index_dir))
+            dim = self._vector_dim()
             if "pages" in self._db.list_tables():
                 self._table = self._db.open_table("pages")
             else:
                 import pyarrow as pa
                 self._table = self._db.create_table("pages", pa.table({
                     "id": pa.array([], type=pa.string()),
-                    "vector": pa.array([], type=pa.list_(pa.float32(), 512)),
+                    "vector": pa.array([], type=pa.list_(pa.float32(), dim)),
                 }))
         except Exception as e:
             self._last_error = str(e)
@@ -196,8 +203,6 @@ class WikiSearch:
     def _embed_page(self, page_id: str, text: str) -> None:
         if self._embedding_client is None:
             return
-        if isinstance(self._embedding_client, ErrorEmbeddingClient):
-            return
         try:
             embeddings = self._embedding_client.embed([text])
             self._ensure_lancedb()
@@ -210,6 +215,7 @@ class WikiSearch:
         except Exception as e:
             self._degraded_pages.add(page_id)
             self._last_error = str(e)
+            self._mode = "keyword_only"
 
     def index_page(self, page_id: str, title: str, body: str) -> None:
         self._keyword.add(page_id, f"{title}\n{body}")
@@ -229,7 +235,7 @@ class WikiSearch:
         self._keyword = KeywordIndex()
         self._degraded_pages = set()
         self._last_error = None
-        if self._embedding_client is not None and not isinstance(self._embedding_client, ErrorEmbeddingClient):
+        if self._embedding_client is not None:
             self._mode = "hybrid"
         else:
             self._mode = "keyword_only"
@@ -239,12 +245,14 @@ class WikiSearch:
             try:
                 self._db.drop_table("pages")
                 import pyarrow as pa
+                dim = self._vector_dim()
                 self._table = self._db.create_table("pages", pa.table({
                     "id": pa.array([], type=pa.string()),
-                    "vector": pa.array([], type=pa.list_(pa.float32(), 512)),
+                    "vector": pa.array([], type=pa.list_(pa.float32(), dim)),
                 }))
-            except Exception:
-                pass
+            except Exception as e:
+                self._last_error = str(e)
+                self._mode = "keyword_only"
 
         for page in pages:
             self.index_page(page["id"], page["title"], page["body"])

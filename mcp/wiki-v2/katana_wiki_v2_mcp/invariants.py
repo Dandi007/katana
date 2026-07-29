@@ -108,14 +108,8 @@ def validate_page(
 
     errors.extend(check_outlinks(body))
 
-    page_type = fm.get("类型")
-    if page_type in CODE_TYPES or not require_sources:
+    if require_sources:
         errors.extend(check_provenance(fm, body))
-    else:
-        sources = fm.get("sources")
-        has_sources = isinstance(sources, list) and len(sources) > 0
-        if not has_sources:
-            errors.append("缺 frontmatter sources（ingest 模式要求；# References 不够）")
 
     if require_summary:
         errors.extend(check_summary(fm))

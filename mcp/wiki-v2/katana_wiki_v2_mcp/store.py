@@ -17,6 +17,8 @@ from katana_wiki_v2_mcp import search as _search
 
 
 class WikiStore:
+    _manifest_counter: int = 0
+
     def __init__(self, data_root: str, embedding_client=None):
         self._data_root = data_root
         self._lock = threading.Lock()
@@ -44,7 +46,7 @@ class WikiStore:
     def _load_index(self) -> None:
         pages = _pages.scan_pages(self._data_root)
         for page in pages:
-            if page["id"]:
+            if page["id"] and not page.get("_error"):
                 self._search.index_page(page["id"], page["title"], page["body"])
 
     def _git(self, *args: str) -> subprocess.CompletedProcess:
@@ -79,10 +81,13 @@ class WikiStore:
         return self._head_sha()
 
     def _write_manifest(self, tool: str, changed_paths: list[str], result: dict) -> str:
-        ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        now = datetime.datetime.now()
+        ts = now.strftime("%Y%m%dT%H%M%S")
+        WikiStore._manifest_counter += 1
+        ts = f"{ts}.{now.microsecond:06d}.{WikiStore._manifest_counter:04d}"
         manifest = {
             "tool": tool,
-            "timestamp": datetime.datetime.now().isoformat(),
+            "timestamp": now.isoformat(),
             "changed_paths": changed_paths,
             "result": result,
         }
@@ -93,7 +98,12 @@ class WikiStore:
     def _mutate(self, tool: str, write_fn, commit_msg: str) -> dict:
         with self._lock:
             changed_paths: list[str] = []
-            write_result = write_fn(changed_paths)
+            try:
+                write_result = write_fn(changed_paths)
+            except Exception:
+                self._git_quiet("checkout", "--", ".")
+                self._git_quiet("clean", "-fd", "pages/")
+                raise
             manifest_path = self._write_manifest(tool, changed_paths, write_result)
             all_paths = list(changed_paths) + [manifest_path]
             commit_sha = self._commit(commit_msg, all_paths)
@@ -111,12 +121,20 @@ class WikiStore:
         )
         return result.stdout.strip() == ""
 
+    def _check_page_accessible(self, page: dict | None, ref: str) -> dict | None:
+        if page is None:
+            return {"code": "NOT_FOUND", "message": f"page not found: {ref}"}
+        if page.get("_error"):
+            return {"code": "VALIDATION_FAILED", "message": f"page is unparseable: {ref} ({page['_error']})"}
+        return None
+
     # ── read tools ──────────────────────────────────────────────────────────
 
     def wiki_get(self, ref: str) -> dict:
         page = _pages.find_page_by_ref(self._data_root, ref)
-        if page is None:
-            return {"code": "NOT_FOUND", "message": f"page not found: {ref}"}
+        err = self._check_page_accessible(page, ref)
+        if err is not None:
+            return err
         inlinks = _pages.compute_inlinks(self._data_root, page["title"])
         outlinks = _pages.compute_outlinks(page["body"])
         return {
@@ -130,8 +148,9 @@ class WikiStore:
 
     def wiki_read(self, ref: str, offset: int | None = None, limit: int | None = None) -> dict:
         page = _pages.find_page_by_ref(self._data_root, ref)
-        if page is None:
-            return {"code": "NOT_FOUND", "message": f"page not found: {ref}"}
+        err = self._check_page_accessible(page, ref)
+        if err is not None:
+            return err
         body = page["body"]
         lines = body.split("\n")
         total = len(lines)
@@ -236,6 +255,12 @@ class WikiStore:
 
         existing = _pages.find_page_by_title(self._data_root, title)
         if existing is not None:
+            if existing.get("_error"):
+                return {
+                    "code": "TITLE_EXISTS",
+                    "message": f"title already exists but page is unparseable: {title} ({existing['_error']})",
+                    "existing_id": None,
+                }
             return {
                 "code": "TITLE_EXISTS",
                 "message": f"title already exists: {title}",
@@ -288,8 +313,9 @@ class WikiStore:
 
     def wiki_update(self, ref: str, body: str, frontmatter: dict | None = None) -> dict:
         page = _pages.find_page_by_ref(self._data_root, ref)
-        if page is None:
-            return {"code": "NOT_FOUND", "message": f"page not found: {ref}"}
+        err = self._check_page_accessible(page, ref)
+        if err is not None:
+            return err
 
         new_fm = dict(frontmatter) if frontmatter else dict(page["frontmatter"])
 
@@ -316,8 +342,9 @@ class WikiStore:
 
     def wiki_edit(self, ref: str, old_string: str, new_string: str) -> dict:
         page = _pages.find_page_by_ref(self._data_root, ref)
-        if page is None:
-            return {"code": "NOT_FOUND", "message": f"page not found: {ref}"}
+        err = self._check_page_accessible(page, ref)
+        if err is not None:
+            return err
 
         body = page["body"]
         count = body.count(old_string)
@@ -348,8 +375,9 @@ class WikiStore:
 
     def wiki_rename(self, ref: str, new_title: str) -> dict:
         page = _pages.find_page_by_ref(self._data_root, ref)
-        if page is None:
-            return {"code": "NOT_FOUND", "message": f"page not found: {ref}"}
+        err = self._check_page_accessible(page, ref)
+        if err is not None:
+            return err
 
         title_err = _pages.validate_title(new_title)
         if title_err:
@@ -398,8 +426,9 @@ class WikiStore:
 
     def wiki_delete(self, ref: str, force: bool = False, inlink_action: str | None = None) -> dict:
         page = _pages.find_page_by_ref(self._data_root, ref)
-        if page is None:
-            return {"code": "NOT_FOUND", "message": f"page not found: {ref}"}
+        err = self._check_page_accessible(page, ref)
+        if err is not None:
+            return err
 
         inlinks = _pages.compute_inlinks(self._data_root, page["title"])
         if inlinks and not force:
