@@ -91,29 +91,14 @@ def _call(mcp, tool, args=None):
 
 
 def _wiki_policy():
-    from katana_kernel import DomainPolicy
-    from katana_wiki_mcp import invariants as _inv
-    from katana_wiki_mcp.pages import parse_page
+    """复用生产策略，不在测试里另抄一份。
 
-    def _invariants(domain, op, args):
-        if op.startswith("fs_") and op not in ("fs_batch", "fs_capabilities", "fs_resolve",
-                                                  "fs_stat", "fs_list", "fs_glob", "fs_read"):
-            content = args.get("content")
-            if content is not None:
-                fm, body = parse_page(content)
-                errs = _inv.validate_page(fm, body, require_summary=True, require_sources=True)
-                if errs:
-                    raise ValueError("; ".join(errs))
+    此处曾内联一份 policy 副本（require_sources=True 硬编码），于是 store.py 的
+    策略改动对本文件完全不生效——测试全绿并不代表线上放行。改为直接引用生产实现。
+    """
+    from katana_wiki_mcp.store import _wiki_policy as _prod_policy
 
-    return DomainPolicy(
-        domain="wiki",
-        allowed_ops={
-            "delete",
-            "fs_create", "fs_write", "fs_edit", "fs_copy", "fs_rename",
-            "fs_delete", "fs_batch",
-        },
-        invariants=[_invariants],
-    )
+    return _prod_policy()
 
 
 @pytest.fixture
@@ -1598,3 +1583,41 @@ def test_fs_edit_still_rejects_changing_existing_id(tools):
     bad = tools.fs_edit("有id.md", f"id: {rid}", "id: w-fffff1")
     assert bad.get("code") == "REF_MISMATCH"
     assert "immutable" in bad["message"]
+
+
+def test_fs_edit_uses_edit_grade_not_ingest_grade(tools):
+    """编辑既有页不得沿用入库级 provenance 标准。
+
+    入库要求 provenance 落在 frontmatter sources（# References 不算）。若编辑也照此
+    要求，等于对规则出台前写的页做追溯审查——实测 799 页里仅 11 页（1%）能过，
+    治理写路径对整个存量库不可用。
+    """
+    repo = tools._repo_root
+    # 只有 # References 提供出处、无 frontmatter sources 的既有页
+    content = ("---\n创建日期: 2026-07-08\ntags:\n  - test\n类型: 卡片\n"
+               "摘要: 仅靠 References 提供出处的存量页\n---\n\n正文 [[某页]]。\n\n"
+               "# References\n\n- https://example.com/a\n")
+    with open(os.path.join(repo, "refs_only.md"), "w", encoding="utf-8") as f:
+        f.write(content)
+    subprocess.run(["git", "-C", repo, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", repo, "commit", "-qm", "seed"], check=True,
+                   capture_output=True)
+
+    res = tools.fs_edit("refs_only.md", "正文", "改过的正文")
+    assert res.get("code") is None, res
+    # 但新建页仍须满足入库标准
+    bad = tools.fs_create("新页.md", content)
+    assert bad.get("code") == "INVALID_CONTENT"
+    assert "sources" in bad["message"]
+
+
+def test_meta_files_are_exempt_from_page_invariants(tools):
+    """WIKI.md 是 schema 本身（刻意无 frontmatter），不该被当知识页校验。"""
+    repo = tools._repo_root
+    with open(os.path.join(repo, "WIKI.md"), "w", encoding="utf-8") as f:
+        f.write("# WIKI Schema\n\n本 schema 即产品。\n")
+    subprocess.run(["git", "-C", repo, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", repo, "commit", "-qm", "seed schema"], check=True,
+                   capture_output=True)
+    res = tools.fs_edit("WIKI.md", "本 schema 即产品。", "本 schema 即产品（已更新）。")
+    assert res.get("code") is None, res
