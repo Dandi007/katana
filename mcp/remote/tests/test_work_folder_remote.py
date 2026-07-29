@@ -30,8 +30,7 @@ def _init_repo(tmp_path):
 def _make_wf_app_with_auth(tmp_path, credential_registry, **kwargs):
     wf_root = _init_repo(tmp_path)
     return wf_server.build_remote_app(
-        work_folder_path=wf_root,
-        kb_root=wf_root,
+        repo_root=wf_root,
         credential_registry=credential_registry,
         **kwargs,
     )

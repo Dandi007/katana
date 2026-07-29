@@ -130,7 +130,7 @@ class TestRenderResumeGuide:
             goal="测试目标",
             phase="阶段一",
             status="execution",
-            wf_abs="/some/path/to/wf",
+            folder_id="wf-abc123",
             key_context="关键路径",
             decisions="",
             issues="",
@@ -161,9 +161,10 @@ class TestRenderResumeGuide:
         out = self._render(phase="Phase Y")
         assert "Phase Y" in out
 
-    def test_wf_abs_in_output(self):
-        out = self._render(wf_abs="/abs/path/wf")
-        assert "/abs/path/wf" in out
+    def test_folder_id_in_output(self):
+        out = self._render(folder_id="wf-123abc")
+        assert "**Work folder ID:** wf-123abc" in out
+        assert "/abs/path" not in out
 
     def test_key_context_section(self):
         out = self._render(key_context="some context")
@@ -452,7 +453,7 @@ class TestGenResumeGuide:
             goal="G",
             phase="P",
             status="execution",
-            wf_abs=folder,
+            folder_id="wf-abc123",
             now="2026-06-22 13:00",
         )
         assert set(created) == {"CLAUDE.md", "AGENTS.md"}
@@ -465,7 +466,7 @@ class TestGenResumeGuide:
             goal="G",
             phase="P",
             status="execution",
-            wf_abs=folder,
+            folder_id="wf-abc123",
             now="2026-06-22 13:00",
         )
         claude_content = (Path(folder) / "CLAUDE.md").read_text(encoding="utf-8")
@@ -480,7 +481,7 @@ class TestGenResumeGuide:
             goal="Special Goal",
             phase="P",
             status="execution",
-            wf_abs=folder,
+            folder_id="wf-abc123",
             now="2026-06-22 13:00",
         )
         content = (Path(folder) / "CLAUDE.md").read_text(encoding="utf-8")
@@ -504,34 +505,35 @@ class TestListWorkFolders:
         return str(wf)
 
     def test_excludes_completed(self, tmp_path):
-        self._make_wf(tmp_path, "wf-done", "completed")
-        self._make_wf(tmp_path, "wf-active", "execution", delay=0.01)
+        self._make_wf(tmp_path, "wf-000001", "completed")
+        self._make_wf(tmp_path, "wf-000002", "execution", delay=0.01)
         results = art.list_work_folders(str(tmp_path))
-        paths = [r["path"] for r in results]
-        assert not any("wf-done" in p for p in paths)
-        assert any("wf-active" in p for p in paths)
+        folder_ids = [r["folder_id"] for r in results]
+        assert "wf-000001" not in folder_ids
+        assert "wf-000002" in folder_ids
 
     def test_returns_two_active(self, tmp_path):
-        self._make_wf(tmp_path, "wf-a", "execution")
-        self._make_wf(tmp_path, "wf-b", "brainstorming", delay=0.01)
-        self._make_wf(tmp_path, "wf-done", "completed")
+        self._make_wf(tmp_path, "wf-000001", "execution")
+        self._make_wf(tmp_path, "wf-000002", "brainstorming", delay=0.01)
+        self._make_wf(tmp_path, "wf-000003", "completed")
         results = art.list_work_folders(str(tmp_path))
         assert len(results) == 2
 
     def test_sorted_by_mtime_desc(self, tmp_path):
-        self._make_wf(tmp_path, "wf-old", "execution")
+        self._make_wf(tmp_path, "wf-000001", "execution")
         time.sleep(0.02)
-        self._make_wf(tmp_path, "wf-new", "brainstorming")
+        self._make_wf(tmp_path, "wf-000002", "brainstorming")
         results = art.list_work_folders(str(tmp_path))
-        assert "wf-new" in results[0]["path"]
-        assert "wf-old" in results[1]["path"]
+        assert results[0]["folder_id"] == "wf-000002"
+        assert results[1]["folder_id"] == "wf-000001"
 
     def test_result_schema(self, tmp_path):
-        self._make_wf(tmp_path, "wf-x", "execution")
+        self._make_wf(tmp_path, "wf-000001", "execution")
         results = art.list_work_folders(str(tmp_path))
         assert len(results) == 1
         r = results[0]
-        assert "path" in r
+        assert r["folder_id"] == "wf-000001"
+        assert "path" not in r
         assert "status" in r
         assert "mtime" in r
         assert r["status"] == "execution"
@@ -539,7 +541,7 @@ class TestListWorkFolders:
 
     def test_includes_folder_with_only_claude_md(self, tmp_path):
         """含 CLAUDE.md 但无 progress.md 的目录也应被列出。"""
-        wf = tmp_path / "wf-agent-only"
+        wf = tmp_path / "wf-000001"
         wf.mkdir()
         (wf / "CLAUDE.md").write_text("# Resume Guide\n", encoding="utf-8")
         results = art.list_work_folders(str(tmp_path))
@@ -550,22 +552,17 @@ class TestListWorkFolders:
         results = art.list_work_folders(str(tmp_path))
         assert results == []
 
-    def test_finds_date_nested_folders(self, tmp_path):
-        """真实布局 YYYY/MM/DD/<topic>/ 深嵌，必须递归命中（非 root 直接子目录）。"""
+    def test_ignores_non_flat_nested_folders(self, tmp_path):
         self._make_wf(tmp_path, "2026/06/21/topic-a", "execution")
-        self._make_wf(tmp_path, "2026/06/22/topic-b", "brainstorming", delay=0.01)
+        self._make_wf(tmp_path, "wf-000001", "brainstorming", delay=0.01)
         results = art.list_work_folders(str(tmp_path))
-        paths = [r["path"] for r in results]
-        assert len(results) == 2
-        assert any(p.endswith("topic-a") for p in paths)
-        assert any(p.endswith("topic-b") for p in paths)
+        assert [result["folder_id"] for result in results] == ["wf-000001"]
 
     def test_prunes_at_work_folder_leaf(self, tmp_path):
-        """命中 work-folder 后不再下钻：嵌套子目录里的 progress.md 不被当成独立条目。"""
-        outer = self._make_wf(tmp_path, "2026/06/21/outer", "execution")
+        outer = self._make_wf(tmp_path, "wf-000001", "execution")
         nested = Path(outer) / "subdir"
         nested.mkdir()
         (nested / "progress.md").write_text("# Progress\n\n**Status:** execution\n", encoding="utf-8")
         results = art.list_work_folders(str(tmp_path))
         assert len(results) == 1
-        assert results[0]["path"].endswith("outer")
+        assert results[0]["folder_id"] == "wf-000001"

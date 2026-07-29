@@ -1,1968 +1,1198 @@
-"""fs_* Full VFS contract tests for Work Folder app.
+"""ID-only Full VFS contract and governance tests."""
 
-Covers every operation's success/error envelopes, invariants,
-edge cases, resource-id-primary semantics, non-brief files,
-batch per-op error codes, MCP wrapper triggerability,
-append-only governance for critical files, work-folder directory
-validation, and resume/BROKEN invariant enforcement per spec.
-"""
+from __future__ import annotations
 
 import asyncio
-import os
-import re
+import hashlib
+import inspect
+import json
 import subprocess
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastmcp import Client
 
-from katana_kernel import MutationBrokenError
-from katana_work_folder_mcp import server as _server_mod
-from katana_work_folder_mcp.fs_tools import FSTools, ID_RE
-from katana_work_folder_mcp.store import _wf_policy
+from katana_kernel import (
+    GovernedKernel,
+    GovernedVFS,
+    MutationBrokenError,
+    ResourceIdLedger,
+    TransactionManifest,
+    head_sha,
+)
+from katana_work_folder_mcp import server
+from katana_work_folder_mcp.brief import parse_brief, render_brief
+from katana_work_folder_mcp.fs_tools import FSTools
+from katana_work_folder_mcp.store import WorkFolderStore, _wf_policy
 
 
-def _brief(title="Test Work Folder", goal="Test a work folder", rid="wf-abc123"):
-    return f"""---
-id: {rid}
-title: {title}
-status: active
-created: "2026-07-08"
-updated: "2026-07-08"
-tags: []
-kind: ""
-links: []
----
-\n**Goal:** {goal}
-
-Summary text.
-"""
+FORBIDDEN_KEYS = {
+    "path",
+    "folder",
+    "path_or_id",
+    "resource_id",
+    "virtual_path",
+    "wf_abs",
+    "absolute_path",
+    "changed_paths",
+    "manifest",
+}
 
 
-def _brief_no_id(title="Test Work Folder", goal="Test a work folder"):
-    return f"""---
-title: {title}
-status: active
-created: "2026-07-08"
-updated: "2026-07-08"
-tags: []
-kind: ""
-links: []
----
-\n**Goal:** {goal}
-
-Summary text.
-"""
+def _now():
+    return datetime(2026, 7, 29, 16, 0, 0)
 
 
-def _progress_md():
-    return """# Progress
-
-**Goal:** Test work folder
-**Status:** active
-**Phase:** implementation
-**Updated:** 2026-07-08
-
-## Completed
-- 
-
-## Current
-- 
-
-## Blocked
-- None
-
-## Next
-- 
-
-## Changelog
-| Time | Action | Detail |
-|------|--------|--------|
-| 10:00:00 | checkpoint | initial commit |
-"""
+def _sha(content: str) -> str:
+    return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def _context_md():
-    return """# Context
-
-**Updated:** 2026-07-08
-
-## 工作上下文
-- 
-
-## 关键路径
-| 资源 | 路径 / 地址 | 分支 / 版本 | 备注 |
-|------|------------|------------|------|
-
-## 环境信息
-- 
-"""
+def _init_repo(repo: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Work Folder Test"], cwd=repo, check=True)
+    (repo / ".gitkeep").write_text("", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitkeep"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
 
 
-def _claude_md():
-    return """# Resume Guide
+def _assert_safe(payload, repo: Path) -> None:
+    rendered = json.dumps(payload, ensure_ascii=False, default=str)
+    assert str(repo) not in rendered
 
-> 由 checkpoint 自动生成。上次更新：2026-07-08
+    def walk(value):
+        if isinstance(value, dict):
+            assert FORBIDDEN_KEYS.isdisjoint(value)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
 
-## Goal
-Test work folder
-
-## Status
-- **Phase:** implementation
-- **Status:** active
-- **Work folder:** /tmp/test
-
-## Key Context
-testing
-
-## Key Decisions
-暂无
-
-## Known Issues
-暂无
-
-## Lessons
-暂无
-
-## Resume Steps
-1. 阅读 progress.md 了解当前进度
-2. 阅读 context.md 了解环境状态
-3. 如有 spec.md / plan.md，阅读了解设计与计划
-4. 继续 progress.md 中 Current/Next 列出的任务
-"""
+    walk(payload)
 
 
-def _init_repo(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
-    return str(tmp_path)
+def _mcp_call(name: str, arguments: dict | None = None):
+    async def call():
+        async with Client(server.mcp) as client:
+            return (await client.call_tool(name, arguments or {})).data
 
-
-def _call(mcp, tool, args=None):
-    async def go():
-        async with Client(mcp) as c:
-            return (await c.call_tool(tool, args or {})).data
-    return asyncio.run(go())
-
-
-def _mkdir(tools, dirname):
-    os.makedirs(os.path.join(tools._repo_root, dirname), exist_ok=True)
-
-
-def _create_file(tools, path, content):
-    tools._vfs.write(path, content)
-    subprocess.run(["git", "add", "."], cwd=tools._repo_root, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tools._repo_root, check=True, capture_output=True)
-
-
-def _setup_work_folder(tools, dirname):
-    """Create a valid work-folder directory with progress.md (brief created via fs_create by callers)."""
-    _mkdir(tools, dirname)
-    _create_file(tools, f"{dirname}/progress.md", _progress_md())
-
-
-def _setup_work_folder_with_context(tools, dirname):
-    """Create a valid work-folder directory with progress.md, context.md, and CLAUDE.md (brief created via fs_create by callers)."""
-    _mkdir(tools, dirname)
-    _create_file(tools, f"{dirname}/progress.md", _progress_md())
-    _create_file(tools, f"{dirname}/context.md", _context_md())
-    _create_file(tools, f"{dirname}/CLAUDE.md", _claude_md())
+    return asyncio.run(call())
 
 
 @pytest.fixture
-def srv(tmp_path):
-    repo = _init_repo(tmp_path)
-    from katana_kernel import (
-        GovernedKernel,
-        GovernedVFS,
-        ResourceIdLedger,
-        TransactionManifest,
-    )
+def env(tmp_path, monkeypatch):
+    _init_repo(tmp_path)
     kernel = GovernedKernel()
-    vfs = GovernedVFS(repo)
-    ledger = ResourceIdLedger(os.path.join(repo, ".katana", "tombstones.json"), prefix="wf-")
-    manifest = TransactionManifest(os.path.join(repo, ".katana", "manifests"))
-    policy = _wf_policy()
-    kernel.bind("work-folder", policy, vfs, ledger, manifest, repo)
-    fs_tools = FSTools(kernel, repo)
-    mcp = _server_mod.mcp
-    _server_mod._kernel = kernel
-    _server_mod._fs_tools = fs_tools
-    return mcp, repo, fs_tools
-
-
-@pytest.fixture
-def tools(tmp_path):
-    repo = _init_repo(tmp_path)
-    from katana_kernel import (
-        GovernedKernel,
-        GovernedVFS,
-        ResourceIdLedger,
-        TransactionManifest,
+    vfs = GovernedVFS(str(tmp_path))
+    ledger = ResourceIdLedger(
+        str(tmp_path / ".katana" / "tombstones.json"),
+        prefix="wf-",
     )
-    kernel = GovernedKernel()
-    vfs = GovernedVFS(repo)
-    ledger = ResourceIdLedger(os.path.join(repo, ".katana", "tombstones.json"), prefix="wf-")
-    manifest = TransactionManifest(os.path.join(repo, ".katana", "manifests"))
-    policy = _wf_policy()
-    kernel.bind("work-folder", policy, vfs, ledger, manifest, repo)
-    return FSTools(kernel, repo)
-
-
-# ── fs_capabilities ──────────────────────────────────────────────────────────
-
-def test_fs_capabilities_success_envelope(tools):
-    result = tools.fs_capabilities()
-    assert result["node_type"] == "capabilities"
-    assert "capabilities" in result
-    assert "operations" in result["capabilities"]
-    assert "fs_capabilities" in result["capabilities"]["operations"]
-    assert "fs_create" in result["capabilities"]["operations"]
-    assert "fs_batch" in result["capabilities"]["operations"]
-    assert "commit" in result
-
-
-def test_fs_capabilities_via_mcp(srv):
-    mcp, repo, tools = srv
-    result = _call(mcp, "fs_capabilities")
-    assert "capabilities" in result
-    assert "fs_read" in result["capabilities"]["operations"]
-
-
-def test_fs_create_broken_is_machine_readable_and_never_success(
-    tools, monkeypatch,
-):
-    _setup_work_folder(tools, "broken")
-    broken = MutationBrokenError(
-        "manual recovery required",
-        {"state": "BROKEN", "paths": ["broken/_brief.md"]},
+    manifest = TransactionManifest(str(tmp_path / ".katana" / "manifests"))
+    kernel.bind("work-folder", _wf_policy(), vfs, ledger, manifest, str(tmp_path))
+    store = WorkFolderStore(kernel)
+    tools = FSTools(kernel, str(tmp_path))
+    folder_id = store.create("primary", _now)["folder_id"]
+    monkeypatch.setattr(server, "_kernel", kernel)
+    monkeypatch.setattr(server, "_store", store)
+    monkeypatch.setattr(server, "_fs_tools", tools)
+    monkeypatch.setattr(server, "_repo_root", str(tmp_path))
+    return SimpleNamespace(
+        repo=tmp_path,
+        kernel=kernel,
+        store=store,
+        tools=tools,
+        folder_id=folder_id,
     )
 
-    def _raise_broken(*args, **kwargs):
-        raise broken
 
-    monkeypatch.setattr(tools._kernel, "mutate", _raise_broken)
-    result = tools.fs_create("broken/_brief.md", _brief_no_id("broken"))
+def _add_folder(env, topic="secondary") -> str:
+    return env.store.create(topic, _now)["folder_id"]
+
+
+# Discovery -----------------------------------------------------------------
+
+
+def test_capabilities_are_id_only_and_delete_glob(env):
+    result = env.tools.fs_capabilities()
+    operations = result["capabilities"]["operations"]
+
+    assert result["ok"] is True
+    assert result["capabilities"]["addressing"] == (
+        "folder_id + folder-relative filename"
+    )
+    assert "fs_glob" not in operations
+    assert not hasattr(FSTools, "fs_glob")
+    _assert_safe(result, env.repo)
+
+
+def test_resolve_defaults_to_brief(env):
+    result = env.tools.fs_resolve(env.folder_id)
+
+    assert result["ok"] is True
+    assert result["folder_id"] == env.folder_id
+    assert result["filename"] == "_brief.md"
+    assert result["node_type"] == "file"
+    assert result["content_revision"].startswith("sha256:")
+    _assert_safe(result, env.repo)
+
+
+def test_stat_file_and_directory(env):
+    env.tools.fs_create(env.folder_id, "notes/a.md", "A\n")
+
+    file_result = env.tools.fs_stat(env.folder_id, "notes/a.md")
+    dir_result = env.tools.fs_stat(env.folder_id, "notes")
+
+    assert file_result["node_type"] == "file"
+    assert file_result["size"] == 2
+    assert dir_result["node_type"] == "directory"
+    assert "size" not in dir_result
+
+
+def test_list_root_and_nested_directory(env):
+    env.tools.fs_create(env.folder_id, "notes/a.md", "A\n")
+    env.tools.fs_create(env.folder_id, "notes/b.md", "B\n")
+
+    root = env.tools.fs_list(env.folder_id)
+    nested = env.tools.fs_list(env.folder_id, "notes")
+
+    assert root["node_type"] == "directory"
+    root_names = {entry["filename"] for entry in root["entries"]}
+    assert {"_brief.md", "context.md", "progress.md", "notes"} <= root_names
+    notes = {entry["filename"] for entry in nested["entries"]}
+    assert notes == {"notes/a.md", "notes/b.md"}
+    assert all("path" not in entry for entry in root["entries"] + nested["entries"])
+
+
+def test_read_returns_numbered_slice_and_raw_revision(env):
+    env.tools.fs_create(env.folder_id, "lines.md", "one\ntwo\nthree\n")
+
+    result = env.tools.fs_read(env.folder_id, "lines.md", offset=2, limit=1)
+
+    assert result["content"] == "2\ttwo"
+    assert result["content_revision"] == _sha("one\ntwo\nthree\n")
+
+
+@pytest.mark.parametrize(
+    ("folder_id", "filename", "code"),
+    [
+        ("wf-deadbe", "notes.md", "RESOURCE_NOT_FOUND"),
+        ("not-an-id", "notes.md", "INVALID_PATH"),
+        ("../wf-abc123", "notes.md", "INVALID_PATH"),
+        ("wf-abc123", "../escape.md", "INVALID_PATH"),
+        ("wf-abc123", "/absolute.md", "INVALID_PATH"),
+        ("wf-abc123", ".git/config", "INVALID_PATH"),
+        ("wf-abc123", ".katana/secret", "INVALID_PATH"),
+        ("wf-abc123", "nested/.hidden", "INVALID_PATH"),
+    ],
+)
+def test_discovery_rejects_missing_or_unsafe_locator(env, folder_id, filename, code):
+    if folder_id == "wf-abc123":
+        folder_id = env.folder_id
+
+    result = env.tools.fs_read(folder_id, filename)
+
+    assert result["ok"] is False
+    assert result["code"] == code
+    _assert_safe(result, env.repo)
+
+
+def test_folder_with_missing_or_mismatched_brief_is_invalid(env):
+    missing = env.repo / "wf-deadbe"
+    missing.mkdir()
+    no_brief = env.tools.fs_read("wf-deadbe", "notes.md")
+
+    mismatch_id = _add_folder(env)
+    brief = env.repo / mismatch_id / "_brief.md"
+    brief.write_text(
+        brief.read_text(encoding="utf-8").replace(mismatch_id, "wf-deadbe", 1),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=env.repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "mismatch"], cwd=env.repo, check=True)
+    mismatch = env.tools.fs_read(mismatch_id, "progress.md")
+
+    assert no_brief["code"] == "INVALID_CONTENT"
+    assert mismatch["code"] == "INVALID_CONTENT"
+
+
+def test_tombstoned_folder_id_is_resource_replaced(env):
+    env.kernel.get_binding("work-folder").ledger.tombstone(env.folder_id)
+
+    result = env.tools.fs_resolve(env.folder_id)
+
+    assert result["code"] == "RESOURCE_REPLACED"
+    assert result["folder_id"] == env.folder_id
+
+
+def test_discovery_not_found_variants_and_symlink_are_safe(env):
+    missing_resolve = env.tools.fs_resolve(env.folder_id, "missing.md")
+    missing_stat = env.tools.fs_stat(env.folder_id, "missing.md")
+    missing_list = env.tools.fs_list(env.folder_id, "missing")
+    target = env.repo / env.folder_id / "target.md"
+    target.write_text("target", encoding="utf-8")
+    link = env.repo / env.folder_id / "link.md"
+    link.symlink_to(target)
+    symlink = env.tools.fs_read(env.folder_id, "link.md")
+
+    assert missing_resolve["code"] == "RESOURCE_NOT_FOUND"
+    assert missing_stat["code"] == "RESOURCE_NOT_FOUND"
+    assert missing_list["code"] == "RESOURCE_NOT_FOUND"
+    assert symlink["code"] == "INVALID_PATH"
+    for result in (missing_resolve, missing_stat, missing_list, symlink):
+        _assert_safe(result, env.repo)
+
+
+# Single-file mutations ------------------------------------------------------
+
+
+def test_create_write_edit_delete_roundtrip(env):
+    created = env.tools.fs_create(env.folder_id, "notes.md", "alpha\n")
+    written = env.tools.fs_write(env.folder_id, "notes.md", "beta\n")
+    edited = env.tools.fs_edit(env.folder_id, "notes.md", "beta", "gamma")
+    deleted = env.tools.fs_delete(env.folder_id, "notes.md")
+
+    for result in (created, written, edited, deleted):
+        assert result["ok"] is True
+        assert result["folder_id"] == env.folder_id
+        assert result["filename"] == "notes.md"
+        assert result["commit"]
+        assert result["mutation_id"]
+        _assert_safe(result, env.repo)
+    assert edited["content"] == "gamma\n"
+    assert not (env.repo / env.folder_id / "notes.md").exists()
+
+
+def test_create_rejects_duplicate_empty_too_large_and_lifecycle_files(env):
+    env.tools.fs_create(env.folder_id, "notes.md", "first")
+
+    duplicate = env.tools.fs_create(env.folder_id, "notes.md", "second")
+    empty = env.tools.fs_create(env.folder_id, "empty.md", "")
+    large = env.tools.fs_create(env.folder_id, "large.md", "x" * 1_000_001)
+    brief = env.tools.fs_create(env.folder_id, "_brief.md", "x")
+    progress = env.tools.fs_create(env.folder_id, "progress.md", "x")
+
+    assert duplicate["code"] == "RESOURCE_EXISTS"
+    assert empty["code"] == "POLICY_VIOLATION"
+    assert large["code"] == "CONTENT_TOO_LARGE"
+    assert brief["code"] == "POLICY_VIOLATION"
+    assert progress["code"] == "POLICY_VIOLATION"
+
+
+def test_write_never_implicitly_creates(env):
+    result = env.tools.fs_write(env.folder_id, "missing.md", "content")
+
+    assert result["code"] == "RESOURCE_NOT_FOUND"
+    assert not (env.repo / env.folder_id / "missing.md").exists()
+
+
+def test_edit_requires_exact_or_explicit_replace_all(env):
+    env.tools.fs_create(env.folder_id, "notes.md", "x x")
+
+    ambiguous = env.tools.fs_edit(env.folder_id, "notes.md", "x", "y")
+    all_result = env.tools.fs_edit(
+        env.folder_id,
+        "notes.md",
+        "x",
+        "y",
+        replace_all=True,
+    )
+    absent = env.tools.fs_edit(env.folder_id, "notes.md", "z", "w")
+
+    assert ambiguous["code"] == "INVALID_CONTENT"
+    assert all_result["content"] == "y y"
+    assert absent["code"] == "INVALID_CONTENT"
+
+
+def test_revision_cas_and_idempotency_conflicts_are_machine_readable(env):
+    created = env.tools.fs_create(
+        env.folder_id,
+        "notes.md",
+        "v1",
+        idempotency_key="create-notes",
+    )
+    stale_revision = env.tools.fs_write(
+        env.folder_id,
+        "notes.md",
+        "v2",
+        expected_resource_revision="sha256:" + "0" * 64,
+    )
+    stale_base = env.tools.fs_write(
+        env.folder_id,
+        "notes.md",
+        "v2",
+        expected_base_commit="a" * 40,
+    )
+    replay = env.tools.fs_create(
+        env.folder_id,
+        "other.md",
+        "content",
+        idempotency_key="create-notes",
+    )
+
+    assert created["ok"] is True
+    assert stale_revision["code"] == "REVISION_CONFLICT"
+    assert stale_revision["retryable"] is True
+    assert stale_base["code"] == "BASE_COMMIT_CONFLICT"
+    assert stale_base["retryable"] is True
+    assert replay["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_matching_revision_allows_write(env):
+    created = env.tools.fs_create(env.folder_id, "notes.md", "v1")
+
+    result = env.tools.fs_write(
+        env.folder_id,
+        "notes.md",
+        "v2",
+        expected_resource_revision=created["content_revision"],
+    )
+
+    assert result["ok"] is True
+    assert result["content"] == "v2"
+    assert result["content_revision"] == _sha("v2")
+
+
+def test_brief_id_is_immutable_but_semantic_update_is_allowed(env):
+    brief_path = env.repo / env.folder_id / "_brief.md"
+    parsed = parse_brief(brief_path.read_text(encoding="utf-8"))
+    fm = parsed["frontmatter"]
+    valid = render_brief(
+        id=env.folder_id,
+        title=fm["title"],
+        status="paused",
+        created=str(fm["created"]),
+        updated="2026-07-30",
+        goal=parsed["goal"],
+        summary=parsed["summary"],
+    )
+    invalid = valid.replace(env.folder_id, "wf-deadbe", 1)
+
+    accepted = env.tools.fs_write(env.folder_id, "_brief.md", valid)
+    rejected = env.tools.fs_write(env.folder_id, "_brief.md", invalid)
+
+    assert accepted["ok"] is True
+    assert rejected["code"] == "INVALID_CONTENT"
+    assert "immutable" in rejected["message"]
+
+
+def test_progress_changelog_and_blocked_section_are_conserved(env):
+    progress_path = env.repo / env.folder_id / "progress.md"
+    old = progress_path.read_text(encoding="utf-8")
+    appended = old + "| 16:01 | progress | done |\n"
+
+    accepted = env.tools.fs_write(env.folder_id, "progress.md", appended)
+    rewrite = env.tools.fs_write(
+        env.folder_id,
+        "progress.md",
+        appended.replace("| 16:01 | progress | done |\n", ""),
+    )
+    remove_blocked = env.tools.fs_write(
+        env.folder_id,
+        "progress.md",
+        appended.replace("## Blocked\n- None\n\n", ""),
+    )
+
+    assert accepted["ok"] is True
+    assert rewrite["code"] == "POLICY_VIOLATION"
+    assert remove_blocked["code"] == "POLICY_VIOLATION"
+
+
+def test_edit_preserves_brief_and_append_only_documents(env):
+    brief_path = env.repo / env.folder_id / "_brief.md"
+    brief = brief_path.read_text(encoding="utf-8")
+    identity_edit = env.tools.fs_edit(
+        env.folder_id,
+        "_brief.md",
+        env.folder_id,
+        "wf-deadbe",
+    )
+
+    progress_path = env.repo / env.folder_id / "progress.md"
+    progress = progress_path.read_text(encoding="utf-8")
+    progress_append = env.tools.fs_edit(
+        env.folder_id,
+        "progress.md",
+        progress,
+        progress + "| 16:01 | edit | appended |\n",
+    )
+
+    env.store.save(
+        env.folder_id,
+        _now,
+        golden_order_additions="- original\n",
+    )
+    golden_append = env.tools.fs_edit(
+        env.folder_id,
+        "golden-order.md",
+        "- original\n",
+        "- original\n- appended\n",
+    )
+
+    assert brief_path.read_text(encoding="utf-8") == brief
+    assert identity_edit["code"] == "INVALID_CONTENT"
+    assert progress_append["ok"] is True
+    assert golden_append["ok"] is True
+
+
+def test_golden_order_is_append_only(env):
+    env.store.save(
+        env.folder_id,
+        _now,
+        golden_order_additions="- original\n",
+    )
+    path = env.repo / env.folder_id / "golden-order.md"
+    old = path.read_text(encoding="utf-8")
+
+    accepted = env.tools.fs_write(
+        env.folder_id,
+        "golden-order.md",
+        old + "- appended\n",
+    )
+    rejected = env.tools.fs_write(
+        env.folder_id,
+        "golden-order.md",
+        "- replaced\n",
+    )
+
+    assert accepted["ok"] is True
+    assert rejected["code"] == "POLICY_VIOLATION"
+
+
+@pytest.mark.parametrize(
+    ("filename", "heading"),
+    [
+        ("context.md", "## 关键路径"),
+        ("CLAUDE.md", "## Resume Steps"),
+        ("AGENTS.md", "## Goal"),
+    ],
+)
+def test_governed_document_sections_are_conserved(env, filename, heading):
+    if filename != "context.md":
+        env.store.save(env.folder_id, _now)
+    path = env.repo / env.folder_id / filename
+    old = path.read_text(encoding="utf-8")
+    replacement = old.replace(heading, f"## Removed {heading}")
+
+    result = env.tools.fs_write(env.folder_id, filename, replacement)
+
+    assert result["code"] == "POLICY_VIOLATION"
+
+
+def test_governed_documents_allow_updates_that_preserve_sections(env):
+    env.store.save(env.folder_id, _now)
+    for filename in ("context.md", "CLAUDE.md", "AGENTS.md"):
+        path = env.repo / env.folder_id / filename
+        old = path.read_text(encoding="utf-8")
+        result = env.tools.fs_write(
+            env.folder_id,
+            filename,
+            old + "\n补充上下文。\n",
+        )
+        assert result["ok"] is True
+
+
+@pytest.mark.parametrize("filename", ["_brief.md", "progress.md", "golden-order.md"])
+def test_delete_rejects_identity_and_critical_files(env, filename):
+    if filename == "golden-order.md":
+        env.store.save(
+            env.folder_id,
+            _now,
+            golden_order_additions="- decision\n",
+        )
+
+    result = env.tools.fs_delete(env.folder_id, filename)
+
+    assert result["code"] == "POLICY_VIOLATION"
+
+
+def test_mutation_broken_error_is_sanitized(env, monkeypatch):
+    monkeypatch.setattr(
+        env.kernel,
+        "mutate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            MutationBrokenError(
+                f"recovery evidence at {env.repo}/secret",
+                {"state": "BROKEN", "paths": [str(env.repo / "secret")]},
+            )
+        ),
+    )
+
+    result = env.tools.fs_create(env.folder_id, "notes.md", "content")
 
     assert result["code"] == "BROKEN"
-    assert result["state"] == "BROKEN"
-    assert result["blocked"] is True
-    assert result["manual_recovery_required"] is True
-    assert "git" not in result
+    _assert_safe(result, env.repo)
 
 
-def test_work_folder_server_broken_envelope_is_not_success():
-    broken = MutationBrokenError(
-        "manual recovery required",
-        {"state": "BROKEN", "paths": ["broken/_brief.md"]},
+# Cross-folder transfer ------------------------------------------------------
+
+
+def test_copy_and_rename_across_distinct_folder_ids(env):
+    dest_id = _add_folder(env)
+    env.tools.fs_create(env.folder_id, "source.md", "payload")
+
+    copied = env.tools.fs_copy(
+        env.folder_id,
+        "source.md",
+        dest_id,
+        "copied.md",
     )
-    result = _server_mod._server_mutation(
-        lambda: (_ for _ in ()).throw(broken)
+    renamed = env.tools.fs_rename(
+        env.folder_id,
+        "source.md",
+        dest_id,
+        "renamed.md",
     )
 
-    assert result["code"] == result["state"] == "BROKEN"
-    assert result["blocked"] is True
-    assert "git" not in result
+    assert copied["folder_id"] == dest_id
+    assert copied["filename"] == "copied.md"
+    assert renamed["folder_id"] == dest_id
+    assert renamed["filename"] == "renamed.md"
+    assert (env.repo / dest_id / "copied.md").read_text(encoding="utf-8") == "payload"
+    assert (env.repo / dest_id / "renamed.md").read_text(encoding="utf-8") == "payload"
+    assert not (env.repo / env.folder_id / "source.md").exists()
 
 
-# ── fs_resolve ───────────────────────────────────────────────────────────────
+def test_transfer_rejects_missing_existing_and_critical_files(env):
+    dest_id = _add_folder(env)
+    env.tools.fs_create(env.folder_id, "source.md", "payload")
+    env.tools.fs_create(dest_id, "exists.md", "dest")
 
-def test_fs_resolve_by_path(tools):
-    _setup_work_folder(tools, "test-resolve")
-    tools.fs_create("test-resolve/_brief.md", _brief_no_id("test-resolve"))
-    result = tools.fs_resolve("test-resolve/_brief.md")
-    assert result["node_type"] == "file"
-    assert result["virtual_path"] == "test-resolve/_brief.md"
-    assert result["resource_id"] is not None
-    assert ID_RE.fullmatch(result["resource_id"])
-    assert result["content_hash"] is not None
-    assert result["content_hash"].startswith("sha256:")
-    assert result["resource_revision"] is not None
-    assert result["content_revision"] is not None
-    assert result["commit"] is not None
+    missing = env.tools.fs_copy(
+        env.folder_id,
+        "missing.md",
+        dest_id,
+        "new.md",
+    )
+    exists = env.tools.fs_copy(
+        env.folder_id,
+        "source.md",
+        dest_id,
+        "exists.md",
+    )
+    critical = env.tools.fs_copy(
+        env.folder_id,
+        "progress.md",
+        dest_id,
+        "progress-copy.md",
+    )
+    brief = env.tools.fs_rename(
+        env.folder_id,
+        "_brief.md",
+        dest_id,
+        "brief.md",
+    )
+
+    assert missing["code"] == "RESOURCE_NOT_FOUND"
+    assert exists["code"] == "RESOURCE_EXISTS"
+    assert critical["code"] == "POLICY_VIOLATION"
+    assert brief["code"] == "POLICY_VIOLATION"
 
 
-def test_fs_resolve_by_id(tools):
-    _setup_work_folder(tools, "test-resolve-id")
-    tools.fs_create("test-resolve-id/_brief.md", _brief_no_id("test-resolve-id"))
-    stat = tools.fs_stat("test-resolve-id/_brief.md")
-    rid = stat["resource_id"]
-    result = tools.fs_resolve(rid)
-    assert result["resource_id"] == rid
-    assert result["virtual_path"] == "test-resolve-id/_brief.md"
+def test_transfer_rejects_source_and_destination_traversal(env):
+    dest_id = _add_folder(env)
+    env.tools.fs_create(env.folder_id, "source.md", "payload")
+
+    bad_source = env.tools.fs_copy(
+        env.folder_id,
+        "../source.md",
+        dest_id,
+        "copy.md",
+    )
+    bad_dest = env.tools.fs_rename(
+        env.folder_id,
+        "source.md",
+        dest_id,
+        "../rename.md",
+    )
+
+    assert bad_source["code"] == "INVALID_PATH"
+    assert bad_dest["code"] == "INVALID_PATH"
+    assert (env.repo / env.folder_id / "source.md").exists()
 
 
-def test_fs_resolve_not_found(tools):
-    result = tools.fs_resolve("nonexistent.md")
+def test_delete_missing_file_is_not_found(env):
+    result = env.tools.fs_delete(env.folder_id, "missing.md")
+
     assert result["code"] == "RESOURCE_NOT_FOUND"
 
 
-def test_fs_resolve_bad_id(tools):
-    result = tools.fs_resolve("wf-ffffff")
+# Batch ---------------------------------------------------------------------
+
+
+def _op(op: str, **args) -> dict:
+    return {"op": op, "args": args}
+
+
+def test_batch_create_write_edit_delete_and_safe_results(env):
+    env.tools.fs_create(env.folder_id, "write.md", "old")
+    env.tools.fs_create(env.folder_id, "edit.md", "before")
+    env.tools.fs_create(env.folder_id, "delete.md", "bye")
+
+    result = env.tools.fs_batch(
+        [
+            _op(
+                "fs_create",
+                folder_id=env.folder_id,
+                filename="created.md",
+                content="new",
+            ),
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="write.md",
+                content="updated",
+            ),
+            _op(
+                "fs_edit",
+                folder_id=env.folder_id,
+                filename="edit.md",
+                old_string="before",
+                new_string="after",
+            ),
+            _op(
+                "fs_delete",
+                folder_id=env.folder_id,
+                filename="delete.md",
+            ),
+        ],
+        idempotency_key="batch-one",
+    )
+
+    assert result["ok"] is True
+    assert result["node_type"] == "batch"
+    assert [item["op"] for item in result["batch_results"]] == [
+        "fs_create",
+        "fs_write",
+        "fs_edit",
+        "fs_delete",
+    ]
+    assert (env.repo / env.folder_id / "created.md").read_text() == "new"
+    assert (env.repo / env.folder_id / "write.md").read_text() == "updated"
+    assert (env.repo / env.folder_id / "edit.md").read_text() == "after"
+    assert not (env.repo / env.folder_id / "delete.md").exists()
+    _assert_safe(result, env.repo)
+
+
+def test_batch_cross_folder_copy_and_rename(env):
+    dest_id = _add_folder(env)
+    env.tools.fs_create(env.folder_id, "copy.md", "copy")
+    env.tools.fs_create(env.folder_id, "rename.md", "rename")
+
+    result = env.tools.fs_batch(
+        [
+            _op(
+                "fs_copy",
+                source_folder_id=env.folder_id,
+                source_filename="copy.md",
+                dest_folder_id=dest_id,
+                dest_filename="copied.md",
+            ),
+            _op(
+                "fs_rename",
+                source_folder_id=env.folder_id,
+                source_filename="rename.md",
+                dest_folder_id=dest_id,
+                dest_filename="renamed.md",
+            ),
+        ]
+    )
+
+    assert result["ok"] is True
+    assert result["batch_results"][0]["folder_id"] == dest_id
+    assert result["batch_results"][1]["folder_id"] == dest_id
+    assert (env.repo / dest_id / "copied.md").read_text() == "copy"
+    assert (env.repo / dest_id / "renamed.md").read_text() == "rename"
+
+
+def test_batch_validation_is_all_or_nothing(env):
+    result = env.tools.fs_batch(
+        [
+            _op(
+                "fs_create",
+                folder_id=env.folder_id,
+                filename="would-create.md",
+                content="new",
+            ),
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="missing.md",
+                content="bad",
+            ),
+        ]
+    )
+
+    assert result["ok"] is False
     assert result["code"] == "RESOURCE_NOT_FOUND"
-    assert result["resource_id"] == "wf-ffffff"
-
-
-def test_fs_resolve_tombstoned_returns_replaced(tools):
-    _setup_work_folder(tools, "tomb-resolve")
-    tools.fs_create("tomb-resolve/_brief.md", _brief_no_id("tomb-resolve"))
-    stat = tools.fs_stat("tomb-resolve/_brief.md")
-    rid = stat["resource_id"]
-    tools.fs_delete("tomb-resolve/_brief.md")
-    result = tools.fs_resolve(rid)
-    assert result["code"] == "RESOURCE_REPLACED"
-
-
-def test_fs_resolve_path_traversal_rejected(tools):
-    result = tools.fs_resolve("../etc/passwd")
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_fs_resolve_root_level_brief_ignored(tools):
-    _create_file(tools, "_brief.md", _brief_no_id("root-brief"))
-    result = tools.fs_resolve("_brief.md")
-    assert result["resource_id"] is None
-
-
-def test_fs_resolve_non_work_folder_brief_ignored(tools):
-    _mkdir(tools, "not-a-wf")
-    _create_file(tools, "not-a-wf/_brief.md", _brief_no_id("not-a-wf"))
-    result = tools.fs_resolve("not-a-wf/_brief.md")
-    assert result["resource_id"] is None
-
-
-# ── fs_stat ──────────────────────────────────────────────────────────────────
-
-def test_fs_stat_file_success_envelope(tools):
-    _setup_work_folder(tools, "test-stat")
-    tools.fs_create("test-stat/_brief.md", _brief_no_id("test-stat"))
-    result = tools.fs_stat("test-stat/_brief.md")
-    assert result["node_type"] == "file"
-    assert result["virtual_path"] == "test-stat/_brief.md"
-    assert result["resource_id"] is not None
-    assert ID_RE.fullmatch(result["resource_id"])
-    assert result["size"] > 0
-    assert result["media_type"] == "text/markdown"
-    assert result["content_hash"] is not None
-    assert result["content_hash"].startswith("sha256:")
-    assert result["resource_revision"] is not None
-    assert result["content_revision"] is not None
-    assert result["commit"] is not None
-
-
-def test_fs_stat_non_brief_file(tools):
-    _setup_work_folder(tools, "test-stat-nonbrief")
-    tools.fs_create("notes.md", "# Notes\n\nChangelog entry.")
-    result = tools.fs_stat("notes.md")
-    assert result["node_type"] == "file"
-    assert result["virtual_path"] == "notes.md"
-    assert result["resource_id"] is None
-    assert result["content_hash"] is not None
-    assert result["content"].startswith("# Notes")
-
-
-def test_fs_stat_directory(tools):
-    os.makedirs(os.path.join(tools._repo_root, "testdir"))
-    result = tools.fs_stat("testdir")
-    assert result["node_type"] == "directory"
-    assert result["resource_id"] is None
-    assert result["size"] is None
-    assert result["media_type"] is None
-
-
-def test_fs_stat_not_found(tools):
-    result = tools.fs_stat("nope.md")
-    assert result["code"] == "RESOURCE_NOT_FOUND"
-
-
-def test_fs_stat_path_traversal_rejected(tools):
-    result = tools.fs_stat("../etc/passwd")
-    assert result["code"] == "INVALID_PATH"
-
-
-# ── fs_list ──────────────────────────────────────────────────────────────────
-
-def test_fs_list_root(tools):
-    _setup_work_folder(tools, "test-list-1")
-    tools.fs_create("test-list-1/_brief.md", _brief_no_id("test-list-1"))
-    _setup_work_folder(tools, "test-list-2")
-    tools.fs_create("test-list-2/_brief.md", _brief_no_id("test-list-2"))
-    result = tools.fs_list("")
-    assert result["node_type"] == "directory"
-    assert "entries" in result
-    paths = [e["virtual_path"] for e in result["entries"]]
-    assert "test-list-1/_brief.md" in paths
-    assert "test-list-2/_brief.md" in paths
-    for entry in result["entries"]:
-        if entry["virtual_path"].endswith("_brief.md"):
-            assert entry["resource_id"] is not None
-        assert entry["node_type"] == "file"
-        assert entry["size"] > 0
-        assert entry["media_type"] == "text/markdown"
-        assert entry["content_hash"] is not None
-
-
-def test_fs_list_includes_non_brief_files(tools):
-    _setup_work_folder(tools, "test-list-brief")
-    tools.fs_create("test-list-brief/_brief.md", _brief_no_id("test-list-brief"))
-    tools.fs_create("notes.md", "# Notes\n\ncontent")
-    result = tools.fs_list("")
-    paths = [e["virtual_path"] for e in result["entries"]]
-    assert "test-list-brief/_brief.md" in paths
-    assert "notes.md" in paths
-    for entry in result["entries"]:
-        if entry["virtual_path"] == "notes.md":
-            assert entry["resource_id"] is None
-
-
-def test_fs_list_directory(tools):
-    os.makedirs(os.path.join(tools._repo_root, "listdir"))
-    _setup_work_folder(tools, "listdir/test-list-1")
-    tools.fs_create("listdir/test-list-1/_brief.md", _brief_no_id("listdir/test-list-1"))
-    _setup_work_folder(tools, "listdir/test-list-2")
-    tools.fs_create("listdir/test-list-2/_brief.md", _brief_no_id("listdir/test-list-2"))
-    result = tools.fs_list("")
-    assert result["node_type"] == "directory"
-    assert "entries" in result
-    paths = [e["virtual_path"] for e in result["entries"]]
-    assert "listdir/test-list-1/_brief.md" in paths
-    assert "listdir/test-list-2/_brief.md" in paths
-
-
-def test_fs_list_empty_root(tools):
-    result = tools.fs_list("")
-    assert result["node_type"] == "directory"
-    assert "entries" in result
-
-
-def test_fs_list_nonexistent_dir(tools):
-    result = tools.fs_list("nonexistent")
-    assert result["code"] in ("INVALID_PATH", "RESOURCE_NOT_FOUND")
-
-
-# ── fs_glob ──────────────────────────────────────────────────────────────────
-
-def test_fs_glob_match(tools):
-    _setup_work_folder(tools, "test-glob-1")
-    tools.fs_create("test-glob-1/_brief.md", _brief_no_id("test-glob-1"))
-    _setup_work_folder(tools, "test-glob-2")
-    tools.fs_create("test-glob-2/_brief.md", _brief_no_id("test-glob-2"))
-    result = tools.fs_glob("test-glob-*/_brief.md")
-    assert result["node_type"] == "glob"
-    assert "hits" in result
-    assert len(result["hits"]) == 2
-
-
-def test_fs_glob_no_match(tools):
-    result = tools.fs_glob("nonexistent-*.md")
-    assert result["node_type"] == "glob"
-    assert "hits" in result
-    assert len(result["hits"]) == 0
-
-
-def test_fs_glob_path_traversal_rejected(tools):
-    result = tools.fs_glob("../*.md")
-    assert result["code"] == "INVALID_PATH"
-
-
-# ── fs_read ──────────────────────────────────────────────────────────────────
-
-def test_fs_read_success_envelope(tools):
-    _setup_work_folder(tools, "test-read")
-    tools.fs_create("test-read/_brief.md", _brief_no_id("test-read"))
-    result = tools.fs_read("test-read/_brief.md")
-    assert result["node_type"] == "file"
-    assert result["resource_id"] is not None
-    assert result["content"] is not None
-    assert result["content_hash"] is not None
-    assert result["content_hash"] == _hash(result["content"])
-    assert "content_field" in result
-    assert "total_lines" in result
-    assert result["total_lines"] > 0
-
-
-def _hash(s):
-    import hashlib
-    return "sha256:" + hashlib.sha256(s.encode("utf-8")).hexdigest()
-
-
-def test_fs_read_non_brief_file(tools):
-    _setup_work_folder(tools, "test-read-nonbrief")
-    tools.fs_create("notes.md", "# Notes\n\nLine 1\nLine 2")
-    result = tools.fs_read("notes.md")
-    assert result["node_type"] == "file"
-    assert result["resource_id"] is None
-    assert result["content_hash"] == _hash(result["content"])
-
-
-def test_fs_read_offset_limit(tools):
-    _setup_work_folder(tools, "test-read-offset")
-    tools.fs_create("test-read-offset/_brief.md", _brief_no_id("test-read-offset"))
-    result = tools.fs_read("test-read-offset/_brief.md", offset=1, limit=1)
-    assert result["offset"] == 1
-    assert result["limit"] == 1
-
-
-def test_fs_read_not_found(tools):
-    result = tools.fs_read("nope.md")
-    assert result["code"] == "RESOURCE_NOT_FOUND"
-
-
-def test_fs_read_path_traversal_rejected(tools):
-    result = tools.fs_read("../secret.txt")
-    assert result["code"] == "INVALID_PATH"
-
-
-# ── fs_create ────────────────────────────────────────────────────────────────
-
-def test_fs_create_success_envelope(tools):
-    _setup_work_folder(tools, "test-create")
-    result = tools.fs_create("test-create/_brief.md", _brief_no_id("test-create"))
-    assert result["node_type"] == "file"
-    assert result["virtual_path"] == "test-create/_brief.md"
-    assert result["resource_id"] is not None
-    assert ID_RE.fullmatch(result["resource_id"])
-    assert result["size"] > 0
-    assert result["media_type"] == "text/markdown"
-    assert result["content_hash"] is not None
-    assert result["content_hash"].startswith("sha256:")
-    assert result["resource_revision"] is not None
-    assert result["content_revision"] is not None
-    assert result["commit"] is not None
-    assert "git" in result
-    assert result["git"]["committed"] is True
-
-
-def test_fs_create_non_brief_file(tools):
-    _setup_work_folder(tools, "test-create-nonbrief")
-    result = tools.fs_create("notes.md", "# Notes\n\ncontent")
-    assert result["node_type"] == "file"
-    assert result["virtual_path"] == "notes.md"
-    assert result["resource_id"] is None
-    assert result["content_hash"] is not None
-
-
-def test_fs_create_auto_generates_id(tools):
-    _setup_work_folder(tools, "test-auto-id")
-    result = tools.fs_create("test-auto-id/_brief.md", _brief_no_id("test-auto-id"))
-    rid = result["resource_id"]
-    assert ID_RE.fullmatch(rid)
-    assert rid.startswith("wf-")
-
-
-def test_fs_create_resource_id_prefix(tools):
-    _setup_work_folder(tools, "test-wf-prefix")
-    result = tools.fs_create("test-wf-prefix/_brief.md", _brief_no_id("test-wf-prefix"))
-    assert result["resource_id"].startswith("wf-")
-    assert len(result["resource_id"]) == 9
-
-
-def test_fs_create_duplicate_path_rejected(tools):
-    _setup_work_folder(tools, "test-dup")
-    result = tools.fs_create("test-dup/_brief.md", _brief_no_id("test-dup"))
-    assert result["code"] == "RESOURCE_EXISTS"
-
-
-def test_fs_create_invalid_content_rejected(tools):
-    _setup_work_folder(tools, "test-invalid")
-    result = tools.fs_create("test-invalid/_brief.md", "not valid brief content")
-    assert result["code"] == "INVALID_CONTENT"
-
-
-def test_fs_create_content_too_large(tools):
-    _setup_work_folder(tools, "test-big")
-    big = "x" * 2_000_000
-    result = tools.fs_create("test-big.md", big)
-    assert result["code"] == "CONTENT_TOO_LARGE"
-
-
-def test_fs_create_path_traversal_rejected(tools):
-    result = tools.fs_create("../escape/_brief.md", _brief_no_id("escape"))
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_fs_create_cas_rejects_stale_sha(tools):
-    _setup_work_folder(tools, "test-stale")
-    result = tools.fs_create(
-        "test-stale/_brief.md", _brief_no_id("test-stale"),
+    assert not (env.repo / env.folder_id / "would-create.md").exists()
+
+
+def test_batch_rejects_empty_unknown_stale_cas_revision_and_replay(env):
+    empty = env.tools.fs_batch([])
+    unknown = env.tools.fs_batch([{"op": "unknown", "args": {}}])
+    stale_cas = env.tools.fs_batch(
+        [
+            _op(
+                "fs_create",
+                folder_id=env.folder_id,
+                filename="cas.md",
+                content="x",
+            )
+        ],
         expected_base_commit="a" * 40,
     )
-    assert result["code"] == "BASE_COMMIT_CONFLICT"
-    assert result["retryable"] is True
-
-
-def test_fs_create_critical_file_rejected(tools):
-    _setup_work_folder(tools, "test-crit-create")
-    result = tools.fs_create("progress.md", "## critical content")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_create_critical_golden_order_rejected(tools):
-    _setup_work_folder(tools, "test-crit-go")
-    result = tools.fs_create("golden-order.md", "## critical content")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-# ── Work-folder directory validation tests ───────────────────────────────────
-
-def test_fs_create_brief_in_non_work_folder_rejected(tools):
-    _mkdir(tools, "not-a-wf")
-    result = tools.fs_create("not-a-wf/_brief.md", _brief_no_id("not-a-wf"))
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_create_brief_at_root_rejected(tools):
-    result = tools.fs_create("_brief.md", _brief_no_id("root-brief"))
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_scan_ignores_root_level_brief(tools):
-    _create_file(tools, "_brief.md", _brief_no_id("root-brief"))
-    briefs = tools._scan_briefs()
-    assert len(briefs) == 0
-
-
-def test_fs_scan_ignores_non_work_folder_brief(tools):
-    _mkdir(tools, "not-a-wf")
-    _create_file(tools, "not-a-wf/_brief.md", _brief_no_id("not-a-wf"))
-    briefs = tools._scan_briefs()
-    assert len(briefs) == 0
-
-
-def test_fs_scan_includes_work_folder_brief(tools):
-    _setup_work_folder(tools, "valid-wf")
-    tools.fs_create("valid-wf/_brief.md", _brief_no_id("valid-wf"))
-    briefs = tools._scan_briefs()
-    assert len(briefs) == 1
-    assert briefs[0]["path"] == "valid-wf/_brief.md"
-
-
-# ── fs_write ─────────────────────────────────────────────────────────────────
-
-def test_fs_write_success_envelope(tools):
-    _setup_work_folder(tools, "test-write")
-    result = tools.fs_create("test-write/_brief.md", _brief_no_id("test-write"))
-    rid = result["resource_id"]
-    content = _brief("test-write-updated", rid=rid)
-    result = tools.fs_write("test-write/_brief.md", content)
-    assert result["node_type"] == "file"
-    assert result["resource_id"] == rid
-    assert result["content_hash"] is not None
-    assert "git" in result
-    assert result["git"]["committed"] is True
-
-
-def test_fs_write_does_not_implicitly_create(tools):
-    result = tools.fs_write("nonexistent.md", _brief("nonexistent"))
-    assert result["code"] == "RESOURCE_NOT_FOUND"
-
-
-def test_fs_write_id_immutable(tools):
-    _setup_work_folder(tools, "test-immutable")
-    result = tools.fs_create("test-immutable/_brief.md", _brief_no_id("test-immutable"))
-    rid = result["resource_id"]
-    content = _brief("test-immutable-changed", rid="wf-def456")
-    result = tools.fs_write("test-immutable/_brief.md", content)
-    assert result["code"] == "REF_MISMATCH"
-
-
-def test_fs_write_ref_mismatch(tools):
-    _setup_work_folder(tools, "test-ref-mismatch")
-    result = tools.fs_create("test-ref-mismatch/_brief.md", _brief_no_id("test-ref-mismatch"))
-    rid = result["resource_id"]
-    content = _brief("test-ref-mismatch", rid=rid)
-    result = tools.fs_write("test-ref-mismatch/_brief.md", content, resource_id="wf-999999")
-    assert result["code"] in ("REF_MISMATCH", "RESOURCE_NOT_FOUND")
-
-
-def test_fs_write_revision_conflict(tools):
-    _setup_work_folder(tools, "test-rev-conflict")
-    result = tools.fs_create("test-rev-conflict/_brief.md", _brief_no_id("test-rev-conflict"))
-    rid = result["resource_id"]
-    content = _brief("test-rev-conflict-updated", rid=rid)
-    result = tools.fs_write(
-        "test-rev-conflict/_brief.md", content,
-        expected_resource_revision="sha256:deadbeef",
+    created = env.tools.fs_create(env.folder_id, "revision.md", "v1")
+    stale_revision = env.tools.fs_batch(
+        [
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="revision.md",
+                content="v2",
+                expected_resource_revision="sha256:" + "0" * 64,
+            )
+        ]
     )
-    assert result["code"] == "REVISION_CONFLICT"
-    assert result["retryable"] is True
-
-
-def test_fs_write_not_found(tools):
-    result = tools.fs_write("nope.md", _brief("nope"))
-    assert result["code"] == "RESOURCE_NOT_FOUND"
-
-
-def test_fs_write_non_brief_file(tools):
-    _setup_work_folder(tools, "test-write-nonbrief")
-    tools.fs_create("notes.md", "# Notes\n\nOld content")
-    result = tools.fs_write("notes.md", "# Notes\n\nNew content")
-    assert result["node_type"] == "file"
-    assert result["resource_id"] is None
-    assert "New content" in result["content"]
-
-
-def test_fs_write_resource_id_auto_resolved(tools):
-    _setup_work_folder(tools, "test-auto-resolve")
-    result = tools.fs_create("test-auto-resolve/_brief.md", _brief_no_id("test-auto-resolve"))
-    rid = result["resource_id"]
-    content = _brief("test-auto-resolve-updated", rid=rid)
-    result = tools.fs_write("test-auto-resolve/_brief.md", content)
-    assert result["resource_id"] == rid
-
-
-def test_fs_write_resource_id_resolved_even_without_param(tools):
-    _setup_work_folder(tools, "test-no-rid")
-    result = tools.fs_create("test-no-rid/_brief.md", _brief_no_id("test-no-rid"))
-    rid = result["resource_id"]
-    content = _brief("test-no-rid-updated", rid=rid)
-    result = tools.fs_write("test-no-rid/_brief.md", content)
-    assert result["resource_id"] == rid
-
-
-# ── Append-only tests for critical files ─────────────────────────────────────
-
-def test_fs_write_progress_append_only_allowed(tools):
-    _setup_work_folder(tools, "test-progress-append")
-    old_content = tools.fs_read("test-progress-append/progress.md")["content"]
-    new_content = old_content + "\n| 11:00:00 | test | appended entry |\n"
-    result = tools.fs_write("test-progress-append/progress.md", new_content)
-    assert result["node_type"] == "file"
-    assert "appended entry" in result["content"]
-
-
-def test_fs_write_progress_changelog_rewrite_rejected(tools):
-    _setup_work_folder(tools, "test-progress-rewrite")
-    old_content = tools.fs_read("test-progress-rewrite/progress.md")["content"]
-    new_content = old_content.replace("10:00:00", "99:99:99")
-    result = tools.fs_write("test-progress-rewrite/progress.md", new_content)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_write_progress_truncation_rejected(tools):
-    _setup_work_folder(tools, "test-progress-trunc")
-    old_content = tools.fs_read("test-progress-trunc/progress.md")["content"]
-    truncated = old_content[:len(old_content) // 2]
-    result = tools.fs_write("test-progress-trunc/progress.md", truncated)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_write_golden_order_append_only_allowed(tools):
-    _setup_work_folder(tools, "test-go-append")
-    _create_file(tools, "test-go-append/golden-order.md", "# Golden Order\n\nRule 1: First rule\n")
-    result = tools.fs_write("test-go-append/golden-order.md",
-        "# Golden Order\n\nRule 1: First rule\n\nRule 2: Second rule\n")
-    assert result["node_type"] == "file"
-
-
-def test_fs_write_golden_order_rewrite_rejected(tools):
-    _setup_work_folder(tools, "test-go-rewrite")
-    _create_file(tools, "test-go-rewrite/golden-order.md", "Rule 1: First rule\n")
-    result = tools.fs_write("test-go-rewrite/golden-order.md", "Rule 2: Something else\n")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_delete_progress_rejected(tools):
-    _setup_work_folder(tools, "test-del-progress")
-    result = tools.fs_delete("test-del-progress/progress.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_delete_golden_order_rejected(tools):
-    _setup_work_folder(tools, "test-del-go")
-    _create_file(tools, "test-del-go/golden-order.md", "## golden order")
-    result = tools.fs_delete("test-del-go/golden-order.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-# ── Resume/BROKEN invariant tests ────────────────────────────────────────────
-
-def test_fs_write_claude_resume_guide_conserved(tools):
-    _setup_work_folder_with_context(tools, "test-claude")
-    old_content = tools.fs_read("test-claude/CLAUDE.md")["content"]
-    new_content = old_content + "\n\nAdditional note at the end.\n"
-    result = tools.fs_write("test-claude/CLAUDE.md", new_content)
-    assert result["node_type"] == "file"
-
-
-def test_fs_write_claude_resume_guide_removed_rejected(tools):
-    _setup_work_folder_with_context(tools, "test-claude-rm")
-    result = tools.fs_write("test-claude-rm/CLAUDE.md",
-        "# Totally different content\n\nNo resume guide here.\n")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_write_agents_resume_guide_removed_rejected(tools):
-    _setup_work_folder_with_context(tools, "test-agents-rm")
-    result = tools.fs_write("test-agents-rm/AGENTS.md",
-        "# Different content\n\nNo resume guide.\n")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_write_context_structure_conserved(tools):
-    _setup_work_folder_with_context(tools, "test-ctx")
-    old_content = tools.fs_read("test-ctx/context.md")["content"]
-    new_content = old_content + "\n\nMore context details.\n"
-    result = tools.fs_write("test-ctx/context.md", new_content)
-    assert result["node_type"] == "file"
-
-
-def test_fs_write_context_removed_rejected(tools):
-    _setup_work_folder_with_context(tools, "test-ctx-rm")
-    result = tools.fs_write("test-ctx-rm/context.md",
-        "# Just a header\n\nNo context structure.\n")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_edit_claude_preserves_resume_guide(tools):
-    _setup_work_folder_with_context(tools, "test-edit-claude")
-    result = tools.fs_edit("test-edit-claude/CLAUDE.md",
-        "暂无", "Some decisions were made")
-    assert result["node_type"] == "file"
-
-
-def test_fs_edit_claude_removes_section_rejected(tools):
-    _setup_work_folder_with_context(tools, "test-edit-claude-rm")
-    old_content = tools.fs_read("test-edit-claude-rm/CLAUDE.md")["content"]
-    result = tools.fs_edit("test-edit-claude-rm/CLAUDE.md",
-        "## Goal", "## No Goal")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_write_progress_broken_blocks_conserved(tools):
-    _setup_work_folder(tools, "test-broken")
-    old_content = tools.fs_read("test-broken/progress.md")["content"]
-    new_content = old_content.replace("## Blocked\n- None", "## Blocked\n- BROKEN: resource unavailable")
-    new_content += "\n| 11:00:00 | test | appended |\n"
-    result = tools.fs_write("test-broken/progress.md", new_content)
-    assert result["node_type"] == "file"
-
-
-def test_fs_write_progress_broken_block_removed_rejected(tools):
-    _setup_work_folder(tools, "test-broken-rm")
-    old_content = tools.fs_read("test-broken-rm/progress.md")["content"]
-    new_content = old_content.replace("## Blocked\n- None", "## Removed\n- None")
-    new_content += "\n| 11:00:00 | test | appended |\n"
-    result = tools.fs_write("test-broken-rm/progress.md", new_content)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-# ── fs_edit ──────────────────────────────────────────────────────────────────
-
-def test_fs_edit_success(tools):
-    _setup_work_folder(tools, "test-edit")
-    result = tools.fs_create("test-edit/_brief.md", _brief_no_id("test-edit"))
-    rid = result["resource_id"]
-    result = tools.fs_edit("test-edit/_brief.md", "Test a work folder", "Updated work goal")
-    assert result["node_type"] == "file"
-    assert result["resource_id"] == rid
-    assert "Updated work goal" in result["content"]
-
-
-def test_fs_edit_exact_match(tools):
-    _setup_work_folder(tools, "test-edit-exact")
-    tools.fs_create("test-edit-exact/_brief.md", _brief_no_id("test-edit-exact"))
-    result = tools.fs_edit("test-edit-exact/_brief.md", "nonexistent string", "replacement")
-    assert result["code"] == "INVALID_CONTENT"
-
-
-def test_fs_edit_multiple_matches_no_replace_all(tools):
-    _setup_work_folder(tools, "test-edit-multi")
-    tools.fs_create("test-edit-multi/_brief.md", _brief_no_id("test-edit-multi"))
-    old = tools.fs_read("test-edit-multi/_brief.md")["content"]
-    new = old.replace("Test a work folder", "duplicate duplicate goal")
-    tools.fs_write("test-edit-multi/_brief.md", new)
-    result = tools.fs_edit("test-edit-multi/_brief.md", "duplicate", "changed")
-    assert result["code"] == "INVALID_CONTENT"
-
-
-def test_fs_edit_replace_all(tools):
-    _setup_work_folder(tools, "test-edit-all")
-    tools.fs_create("test-edit-all/_brief.md", _brief_no_id("test-edit-all"))
-    result = tools.fs_edit("test-edit-all/_brief.md", "test", "CHANGED", replace_all=True)
-    assert result["node_type"] == "file"
-
-
-def test_fs_edit_id_immutable(tools):
-    _setup_work_folder(tools, "test-edit-id")
-    result = tools.fs_create("test-edit-id/_brief.md", _brief_no_id("test-edit-id"))
-    rid = result["resource_id"]
-    result = tools.fs_edit("test-edit-id/_brief.md", rid, "wf-999999")
-    assert result["code"] == "REF_MISMATCH"
-
-
-def test_fs_edit_not_found(tools):
-    result = tools.fs_edit("nope.md", "old", "new")
-    assert result["code"] == "RESOURCE_NOT_FOUND"
-
-
-def test_fs_edit_empty_old_string(tools):
-    _setup_work_folder(tools, "test-edit-empty")
-    tools.fs_create("test-edit-empty/_brief.md", _brief_no_id("test-edit-empty"))
-    result = tools.fs_edit("test-edit-empty/_brief.md", "", "new")
-    assert result["code"] == "INVALID_CONTENT"
-
-
-def test_fs_edit_non_brief_file(tools):
-    _setup_work_folder(tools, "test-edit-nonbrief")
-    tools.fs_create("notes.md", "# Notes\n\nhello world")
-    result = tools.fs_edit("notes.md", "hello", "goodbye")
-    assert result["node_type"] == "file"
-    assert "goodbye" in result["content"]
-
-
-def test_fs_edit_progress_append_only_allowed(tools):
-    _setup_work_folder(tools, "test-edit-progress")
-    old_content = tools.fs_read("test-edit-progress/progress.md")["content"]
-    result = tools.fs_edit("test-edit-progress/progress.md",
-        "## Next\n- ", "## Next\n- New task\n")
-    assert result["node_type"] == "file"
-    assert "New task" in result["content"]
-
-
-def test_fs_edit_progress_changelog_rewrite_rejected(tools):
-    _setup_work_folder(tools, "test-edit-progress-rewrite")
-    result = tools.fs_edit("test-edit-progress-rewrite/progress.md",
-        "10:00:00", "99:99:99")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_edit_golden_order_append_only_allowed(tools):
-    _setup_work_folder(tools, "test-edit-go")
-    _create_file(tools, "test-edit-go/golden-order.md", "Rule 1: First rule\n")
-    result = tools.fs_edit("test-edit-go/golden-order.md",
-        "Rule 1: First rule", "Rule 1: First rule\n\nRule 2: Second rule")
-    assert result["node_type"] == "file"
-
-
-def test_fs_edit_golden_order_rewrite_rejected(tools):
-    _setup_work_folder(tools, "test-edit-go-rewrite")
-    _create_file(tools, "test-edit-go-rewrite/golden-order.md", "Rule 1: First rule\n")
-    result = tools.fs_edit("test-edit-go-rewrite/golden-order.md",
-        "Rule 1: First rule", "Rule 2: Different rule")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-# ── fs_copy ──────────────────────────────────────────────────────────────────
-
-def test_fs_copy_success(tools):
-    _setup_work_folder(tools, "test-copy-src")
-    tools.fs_create("test-copy-src/_brief.md", _brief_no_id("test-copy-src"))
-    _setup_work_folder(tools, "test-copy-dst")
-    result = tools.fs_copy("test-copy-src/_brief.md", "test-copy-dst/_brief.md")
-    assert result["node_type"] == "file"
-    assert result["virtual_path"] == "test-copy-dst/_brief.md"
-    assert result["resource_id"] is not None
-    assert result["resource_id"].startswith("wf-")
-
-
-def test_fs_copy_new_id(tools):
-    _setup_work_folder(tools, "test-copy-new-id")
-    tools.fs_create("test-copy-new-id/_brief.md", _brief_no_id("test-copy-new-id"))
-    src_stat = tools.fs_stat("test-copy-new-id/_brief.md")
-    src_rid = src_stat["resource_id"]
-    _setup_work_folder(tools, "test-copy-new-dst")
-    result = tools.fs_copy("test-copy-new-id/_brief.md", "test-copy-new-dst/_brief.md")
-    assert result["resource_id"] != src_rid
-
-
-def test_fs_copy_source_not_found(tools):
-    result = tools.fs_copy("nonexistent.md", "dest.md")
-    assert result["code"] == "RESOURCE_NOT_FOUND"
-
-
-def test_fs_copy_dest_exists(tools):
-    _setup_work_folder(tools, "test-copy-exists-src")
-    tools.fs_create("test-copy-exists-src/_brief.md", _brief_no_id("test-copy-exists-src"))
-    _setup_work_folder(tools, "test-copy-exists-dst")
-    tools.fs_create("test-copy-exists-dst/_brief.md", _brief_no_id("test-copy-exists-dst"))
-    result = tools.fs_copy("test-copy-exists-src/_brief.md", "test-copy-exists-dst/_brief.md")
-    assert result["code"] == "RESOURCE_EXISTS"
-
-
-def test_fs_copy_source_traversal_rejected(tools):
-    result = tools.fs_copy("../escape/_brief.md", "dest.md")
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_fs_copy_dest_traversal_rejected(tools):
-    _setup_work_folder(tools, "test-copy-dest-trav")
-    tools.fs_create("test-copy-dest-trav/_brief.md", _brief_no_id("test-copy-dest-trav"))
-    result = tools.fs_copy("test-copy-dest-trav/_brief.md", "../escape/_brief.md")
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_fs_copy_non_brief_file(tools):
-    _setup_work_folder(tools, "test-copy-nonbrief")
-    tools.fs_create("notes.md", "# Notes\n\ncontent")
-    result = tools.fs_copy("notes.md", "notes-copy.md")
-    assert result["node_type"] == "file"
-    assert result["virtual_path"] == "notes-copy.md"
-    assert result["resource_id"] is None
-
-
-def test_fs_copy_critical_source_rejected(tools):
-    _setup_work_folder(tools, "test-copy-crit-src")
-    result = tools.fs_copy("test-copy-crit-src/progress.md", "backup.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_copy_critical_dest_rejected(tools):
-    _setup_work_folder(tools, "test-copy-crit-dst")
-    tools.fs_create("notes.md", "# Notes\n\ncontent")
-    result = tools.fs_copy("notes.md", "progress.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_copy_non_brief_to_brief_rejected(tools):
-    _setup_work_folder(tools, "test-copy-nb2b")
-    tools.fs_create("test-copy-nb2b/_brief.md", _brief_no_id("test-copy-nb2b"))
-    tools.fs_create("notes.md", "# Notes\n\ncontent")
-    _setup_work_folder(tools, "folder")
-    result = tools.fs_copy("notes.md", "folder/_brief.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_copy_brief_to_non_brief_rejected(tools):
-    _setup_work_folder(tools, "test-copy-b2nb")
-    tools.fs_create("test-copy-b2nb/_brief.md", _brief_no_id("test-copy-b2nb"))
-    result = tools.fs_copy("test-copy-b2nb/_brief.md", "copy.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_copy_brief_to_non_work_folder_rejected(tools):
-    _setup_work_folder(tools, "test-copy-b2nowf")
-    tools.fs_create("test-copy-b2nowf/_brief.md", _brief_no_id("test-copy-b2nowf"))
-    _mkdir(tools, "not-a-wf")
-    result = tools.fs_copy("test-copy-b2nowf/_brief.md", "not-a-wf/_brief.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_single_cas_expected_base_commit(tools):
-    _setup_work_folder(tools, "test-cas-param")
-    tools.fs_create("test-cas-param/_brief.md", _brief_no_id("test-cas-param"))
-    content = _brief("test-cas-param-updated", rid="wf-abc123")
-    result = tools.fs_write(
-        "test-cas-param/_brief.md", content,
-        expected_base_commit="a" * 40,
+    first = env.tools.fs_batch(
+        [
+            _op(
+                "fs_create",
+                folder_id=env.folder_id,
+                filename="idem.md",
+                content="x",
+            )
+        ],
+        idempotency_key="batch-idem",
     )
-    assert result["code"] == "BASE_COMMIT_CONFLICT"
-    assert result["retryable"] is True
-
-
-# ── fs_rename ────────────────────────────────────────────────────────────────
-
-def test_fs_rename_success(tools):
-    _setup_work_folder(tools, "test-rename-src")
-    tools.fs_create("test-rename-src/_brief.md", _brief_no_id("test-rename-src"))
-    _setup_work_folder(tools, "test-rename-dst")
-    result = tools.fs_rename("test-rename-src/_brief.md", "test-rename-dst/_brief.md")
-    assert result["node_type"] == "file"
-    assert result["virtual_path"] == "test-rename-dst/_brief.md"
-
-
-def test_fs_rename_preserves_id(tools):
-    _setup_work_folder(tools, "test-rename-id")
-    tools.fs_create("test-rename-id/_brief.md", _brief_no_id("test-rename-id"))
-    stat = tools.fs_stat("test-rename-id/_brief.md")
-    rid = stat["resource_id"]
-    _setup_work_folder(tools, "test-rename-id-dst")
-    result = tools.fs_rename("test-rename-id/_brief.md", "test-rename-id-dst/_brief.md")
-    assert result["resource_id"] == rid
-
-
-def test_fs_rename_source_not_found(tools):
-    result = tools.fs_rename("nonexistent.md", "dest.md")
-    assert result["code"] == "RESOURCE_NOT_FOUND"
-
-
-def test_fs_rename_dest_exists(tools):
-    _setup_work_folder(tools, "test-rename-exists-src")
-    tools.fs_create("test-rename-exists-src/_brief.md", _brief_no_id("test-rename-exists-src"))
-    _setup_work_folder(tools, "test-rename-exists-dst")
-    tools.fs_create("test-rename-exists-dst/_brief.md", _brief_no_id("test-rename-exists-dst"))
-    result = tools.fs_rename("test-rename-exists-src/_brief.md", "test-rename-exists-dst/_brief.md")
-    assert result["code"] == "RESOURCE_EXISTS"
-
-
-def test_fs_rename_source_traversal_rejected(tools):
-    result = tools.fs_rename("../escape/_brief.md", "dest.md")
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_fs_rename_dest_traversal_rejected(tools):
-    _setup_work_folder(tools, "test-rename-dest-trav")
-    tools.fs_create("test-rename-dest-trav/_brief.md", _brief_no_id("test-rename-dest-trav"))
-    result = tools.fs_rename("test-rename-dest-trav/_brief.md", "../escape/_brief.md")
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_fs_rename_non_brief_file(tools):
-    _setup_work_folder(tools, "test-rename-nonbrief")
-    tools.fs_create("notes.md", "# Notes\n\ncontent")
-    result = tools.fs_rename("notes.md", "notes-renamed.md")
-    assert result["node_type"] == "file"
-    assert result["virtual_path"] == "notes-renamed.md"
-    assert result["resource_id"] is None
-
-
-def test_fs_rename_critical_source_rejected(tools):
-    _setup_work_folder(tools, "test-rename-crit-src")
-    result = tools.fs_rename("test-rename-crit-src/progress.md", "old.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_rename_critical_dest_rejected(tools):
-    _setup_work_folder(tools, "test-rename-crit-dst")
-    tools.fs_create("notes.md", "# Notes\n\ncontent")
-    result = tools.fs_rename("notes.md", "progress.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_rename_non_brief_to_brief_rejected(tools):
-    _setup_work_folder(tools, "test-rename-nb2b")
-    tools.fs_create("notes.md", "# Notes\n\ncontent")
-    _setup_work_folder(tools, "folder")
-    result = tools.fs_rename("notes.md", "folder/_brief.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_rename_brief_to_non_brief_rejected(tools):
-    _setup_work_folder(tools, "test-rename-b2nb")
-    tools.fs_create("test-rename-b2nb/_brief.md", _brief_no_id("test-rename-b2nb"))
-    result = tools.fs_rename("test-rename-b2nb/_brief.md", "renamed.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_rename_brief_to_non_work_folder_rejected(tools):
-    _setup_work_folder(tools, "test-rename-b2nowf")
-    tools.fs_create("test-rename-b2nowf/_brief.md", _brief_no_id("test-rename-b2nowf"))
-    _mkdir(tools, "not-a-wf")
-    result = tools.fs_rename("test-rename-b2nowf/_brief.md", "not-a-wf/_brief.md")
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-# ── fs_delete ────────────────────────────────────────────────────────────────
-
-def test_fs_delete_success(tools):
-    _setup_work_folder(tools, "test-delete")
-    tools.fs_create("test-delete/_brief.md", _brief_no_id("test-delete"))
-    stat = tools.fs_stat("test-delete/_brief.md")
-    rid = stat["resource_id"]
-    result = tools.fs_delete("test-delete/_brief.md")
-    assert result["node_type"] == "file"
-    assert result["resource_id"] == rid
-    assert result["size"] == 0
-    assert result.get("content") is None
-
-
-def test_fs_delete_leaves_tombstone(tools):
-    _setup_work_folder(tools, "test-tombstone")
-    tools.fs_create("test-tombstone/_brief.md", _brief_no_id("test-tombstone"))
-    result = tools.fs_delete("test-tombstone/_brief.md")
-    rid = result["resource_id"]
-    resolve_result = tools.fs_resolve(rid)
-    assert resolve_result["code"] == "RESOURCE_REPLACED"
-
-
-def test_fs_delete_id_not_reused(tools):
-    _setup_work_folder(tools, "test-no-reuse")
-    tools.fs_create("test-no-reuse/_brief.md", _brief_no_id("test-no-reuse"))
-    stat = tools.fs_stat("test-no-reuse/_brief.md")
-    rid = stat["resource_id"]
-    tools.fs_delete("test-no-reuse/_brief.md")
-    _setup_work_folder(tools, "test-no-reuse-2")
-    result = tools.fs_create("test-no-reuse-2/_brief.md", _brief_no_id("test-no-reuse-2"), resource_id=rid)
-    assert result["code"] == "RESOURCE_REPLACED"
-
-
-def test_fs_delete_not_found(tools):
-    result = tools.fs_delete("nope.md")
-    assert result["code"] == "RESOURCE_NOT_FOUND"
-
-
-def test_fs_delete_ref_mismatch(tools):
-    _setup_work_folder(tools, "test-del-ref")
-    tools.fs_create("test-del-ref/_brief.md", _brief_no_id("test-del-ref"))
-    result = tools.fs_delete("test-del-ref/_brief.md", resource_id="wf-999999")
-    assert result["code"] in ("REF_MISMATCH", "RESOURCE_NOT_FOUND")
-
-
-def test_fs_delete_non_brief_file(tools):
-    _setup_work_folder(tools, "test-del-nonbrief")
-    tools.fs_create("notes.md", "# Notes\n\ncontent")
-    result = tools.fs_delete("notes.md")
-    assert result["node_type"] == "file"
-    assert result["resource_id"] is None
-
-
-# ── fs_batch ─────────────────────────────────────────────────────────────────
-
-def test_fs_batch_success(tools):
-    _setup_work_folder(tools, "batch-1")
-    _setup_work_folder(tools, "batch-2")
-    ops = [
-        {"op": "fs_create", "args": {"path": "batch-1/_brief.md", "content": _brief_no_id("batch-1")}},
-        {"op": "fs_create", "args": {"path": "batch-2/_brief.md", "content": _brief_no_id("batch-2")}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-    assert "batch_results" in result
-    assert len(result["batch_results"]) == 2
-    assert result["batch_results"][0]["op"] == "fs_create"
-    assert result["batch_results"][1]["op"] == "fs_create"
-
-
-def test_fs_batch_write(tools):
-    _setup_work_folder(tools, "batch-write")
-    result = tools.fs_create("batch-write/_brief.md", _brief_no_id("batch-write"))
-    rid = result["resource_id"]
-    content = _brief("batch-write-updated", rid=rid)
-    ops = [
-        {"op": "fs_write", "args": {"path": "batch-write/_brief.md", "content": content}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-    assert len(result["batch_results"]) == 1
-    assert result["batch_results"][0]["op"] == "fs_write"
-
-
-def test_fs_batch_edit(tools):
-    _setup_work_folder(tools, "batch-edit")
-    tools.fs_create("batch-edit/_brief.md", _brief_no_id("batch-edit"))
-    ops = [
-        {"op": "fs_edit", "args": {"path": "batch-edit/_brief.md", "old_string": "Test a work folder", "new_string": "Changed"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-    assert "Changed" in tools.fs_read("batch-edit/_brief.md")["content"]
-
-
-def test_fs_batch_copy(tools):
-    _setup_work_folder(tools, "batch-copy-src")
-    tools.fs_create("batch-copy-src/_brief.md", _brief_no_id("batch-copy-src"))
-    _setup_work_folder(tools, "batch-copy-dst")
-    ops = [
-        {"op": "fs_copy", "args": {"source": "batch-copy-src/_brief.md", "dest": "batch-copy-dst/_brief.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-    assert result["batch_results"][0]["resource_id"].startswith("wf-")
-
-
-def test_fs_batch_rename(tools):
-    _setup_work_folder(tools, "batch-rename-src")
-    tools.fs_create("batch-rename-src/_brief.md", _brief_no_id("batch-rename-src"))
-    _setup_work_folder(tools, "batch-rename-dst")
-    stat = tools.fs_stat("batch-rename-src/_brief.md")
-    rid = stat["resource_id"]
-    ops = [
-        {"op": "fs_rename", "args": {"source": "batch-rename-src/_brief.md", "dest": "batch-rename-dst/_brief.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-    assert result["batch_results"][0]["resource_id"] == rid
-
-
-def test_fs_batch_delete(tools):
-    _setup_work_folder(tools, "batch-delete")
-    tools.fs_create("batch-delete/_brief.md", _brief_no_id("batch-delete"))
-    stat = tools.fs_stat("batch-delete/_brief.md")
-    rid = stat["resource_id"]
-    ops = [
-        {"op": "fs_delete", "args": {"path": "batch-delete/_brief.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-    assert result["batch_results"][0]["resource_id"] == rid
-
-
-def test_fs_batch_all_or_nothing(tools):
-    _setup_work_folder(tools, "batch-aon")
-    tools.fs_create("batch-aon/_brief.md", _brief_no_id("batch-aon"))
-    ops = [
-        {"op": "fs_edit", "args": {"path": "batch-aon/_brief.md", "old_string": "Test a work folder", "new_string": "Modified goal"}},
-        {"op": "fs_edit", "args": {"path": "batch-aon/_brief.md", "old_string": "nonexistent string", "new_string": "replacement"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "INVALID_CONTENT"
-    assert "Modified goal" not in tools.fs_read("batch-aon/_brief.md").get("content", "")
-
-
-def test_fs_batch_cas(tools):
-    _setup_work_folder(tools, "batch-cas")
-    tools.fs_create("batch-cas/_brief.md", _brief_no_id("batch-cas"))
-    stat = tools.fs_stat("batch-cas/_brief.md")
-    rid = stat["resource_id"]
-    ops = [
-        {"op": "fs_write", "args": {"path": "batch-cas/_brief.md", "content": _brief("batch-cas-u", rid=rid)}},
-    ]
-    result = tools.fs_batch(ops, expected_base_commit="a" * 40)
-    assert result["code"] == "BASE_COMMIT_CONFLICT"
-    assert result["retryable"] is True
-
-
-def test_fs_batch_empty_operations(tools):
-    result = tools.fs_batch([])
-    assert result["code"] == "INVALID_CONTENT"
-
-
-def test_fs_batch_unknown_operation(tools):
-    ops = [
-        {"op": "fs_unknown", "args": {"path": "test.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "INVALID_CONTENT"
-
-
-def test_fs_batch_idempotency(tools):
-    _setup_work_folder(tools, "batch-idem")
-    tools.fs_create("batch-idem/_brief.md", _brief_no_id("batch-idem"))
-    stat = tools.fs_stat("batch-idem/_brief.md")
-    rid = stat["resource_id"]
-    ops = [
-        {"op": "fs_write", "args": {"path": "batch-idem/_brief.md", "content": _brief("batch-idem-u", rid=rid)}},
-    ]
-    result = tools.fs_batch(ops, idempotency_key="key-batch-1")
-    assert result["node_type"] == "batch"
-    result2 = tools.fs_batch(ops, idempotency_key="key-batch-1")
-    assert result2["code"] == "IDEMPOTENCY_CONFLICT"
-
-
-def test_fs_batch_path_traversal_rejected(tools):
-    ops = [
-        {"op": "fs_create", "args": {"path": "../escape/_brief.md", "content": _brief_no_id("escape")}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_fs_batch_per_op_revision_conflict(tools):
-    _setup_work_folder(tools, "batch-rev")
-    tools.fs_create("batch-rev/_brief.md", _brief_no_id("batch-rev"))
-    ops = [
-        {"op": "fs_write", "args": {
-            "path": "batch-rev/_brief.md",
-            "content": _brief("batch-rev-u", rid="wf-000000"),
-            "expected_resource_revision": "sha256:deadbeef",
-        }},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "REVISION_CONFLICT"
-
-
-def test_fs_batch_critical_delete_rejected(tools):
-    _setup_work_folder(tools, "batch-crit-del")
-    ops = [
-        {"op": "fs_delete", "args": {"path": "batch-crit-del/progress.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_batch_critical_copy_rejected(tools):
-    _setup_work_folder(tools, "batch-crit-copy")
-    ops = [
-        {"op": "fs_copy", "args": {"source": "batch-crit-copy/progress.md", "dest": "backup.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_batch_critical_rename_rejected(tools):
-    _setup_work_folder(tools, "batch-crit-rename")
-    ops = [
-        {"op": "fs_rename", "args": {"source": "batch-crit-rename/progress.md", "dest": "old.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_batch_non_brief_files(tools):
-    _setup_work_folder(tools, "batch-nonbrief")
-    ops = [
-        {"op": "fs_create", "args": {"path": "notes.md", "content": "# Notes\n\ncontent"}},
-        {"op": "fs_create", "args": {"path": "batch-nonbrief/context.md", "content": _context_md()}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-    assert len(result["batch_results"]) == 2
-
-
-def test_fs_batch_non_brief_copy(tools):
-    _setup_work_folder(tools, "batch-nonbrief-copy")
-    tools.fs_create("batch-nonbrief-copy/context.md", _context_md())
-    ops = [
-        {"op": "fs_copy", "args": {"source": "batch-nonbrief-copy/context.md", "dest": "batch-nonbrief-copy/context2.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-
-
-def test_fs_batch_copy_non_brief_to_brief_rejected(tools):
-    _setup_work_folder(tools, "batch-nb2b")
-    tools.fs_create("notes.md", "# Notes\n\ncontent")
-    _setup_work_folder(tools, "folder")
-    ops = [
-        {"op": "fs_copy", "args": {"source": "notes.md", "dest": "folder/_brief.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_batch_copy_brief_to_non_brief_rejected(tools):
-    _setup_work_folder(tools, "batch-b2nb")
-    tools.fs_create("batch-b2nb/_brief.md", _brief_no_id("batch-b2nb"))
-    ops = [
-        {"op": "fs_copy", "args": {"source": "batch-b2nb/_brief.md", "dest": "copy.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_batch_rename_non_brief_to_brief_rejected(tools):
-    _setup_work_folder(tools, "batch-rnb2b")
-    tools.fs_create("notes.md", "# Notes\n\ncontent")
-    _setup_work_folder(tools, "folder")
-    ops = [
-        {"op": "fs_rename", "args": {"source": "notes.md", "dest": "folder/_brief.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_batch_rename_brief_to_non_brief_rejected(tools):
-    _setup_work_folder(tools, "batch-r2nb")
-    tools.fs_create("batch-r2nb/_brief.md", _brief_no_id("batch-r2nb"))
-    ops = [
-        {"op": "fs_rename", "args": {"source": "batch-r2nb/_brief.md", "dest": "renamed.md"}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-# ── Batch append-only and governed tests ─────────────────────────────────────
-
-def test_fs_batch_progress_append_only_allowed(tools):
-    _setup_work_folder(tools, "batch-progress-ok")
-    old_content = tools.fs_read("batch-progress-ok/progress.md")["content"]
-    new_content = old_content + "\n| 11:00:00 | test | batch append |\n"
-    ops = [
-        {"op": "fs_write", "args": {"path": "batch-progress-ok/progress.md", "content": new_content}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-
-
-def test_fs_batch_progress_rewrite_rejected(tools):
-    _setup_work_folder(tools, "batch-progress-rewrite")
-    old_content = tools.fs_read("batch-progress-rewrite/progress.md")["content"]
-    new_content = old_content.replace("10:00:00", "99:99:99")
-    ops = [
-        {"op": "fs_write", "args": {"path": "batch-progress-rewrite/progress.md", "content": new_content}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_batch_golden_order_append_only_allowed(tools):
-    _setup_work_folder(tools, "batch-go")
-    _create_file(tools, "batch-go/golden-order.md", "Rule 1: First rule\n")
-    ops = [
-        {"op": "fs_write", "args": {
-            "path": "batch-go/golden-order.md",
-            "content": "Rule 1: First rule\n\nRule 2: Second rule\n",
-        }},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-
-
-def test_fs_batch_claude_resume_guide_conserved(tools):
-    _setup_work_folder_with_context(tools, "batch-claude")
-    old_content = tools.fs_read("batch-claude/CLAUDE.md")["content"]
-    new_content = old_content + "\n\nAppended note.\n"
-    ops = [
-        {"op": "fs_write", "args": {"path": "batch-claude/CLAUDE.md", "content": new_content}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-
-
-def test_fs_batch_claude_resume_guide_removed_rejected(tools):
-    _setup_work_folder_with_context(tools, "batch-claude-rm")
-    ops = [
-        {"op": "fs_write", "args": {
-            "path": "batch-claude-rm/CLAUDE.md",
-            "content": "# Different\n\nNo resume guide.\n",
-        }},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_batch_context_conserved(tools):
-    _setup_work_folder_with_context(tools, "batch-ctx")
-    old_content = tools.fs_read("batch-ctx/context.md")["content"]
-    new_content = old_content + "\n\nAppended context.\n"
-    ops = [
-        {"op": "fs_write", "args": {"path": "batch-ctx/context.md", "content": new_content}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-
-
-def test_fs_batch_context_removed_rejected(tools):
-    _setup_work_folder_with_context(tools, "batch-ctx-rm")
-    ops = [
-        {"op": "fs_write", "args": {
-            "path": "batch-ctx-rm/context.md",
-            "content": "# Just a header\n\nNo context.\n",
-        }},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_fs_batch_broken_blocks_conserved(tools):
-    _setup_work_folder(tools, "batch-broken")
-    old_content = tools.fs_read("batch-broken/progress.md")["content"]
-    new_content = old_content.replace("## Blocked\n- None", "## Blocked\n- BROKEN: test")
-    new_content += "\n| 11:00:00 | test | appended |\n"
-    ops = [
-        {"op": "fs_write", "args": {"path": "batch-broken/progress.md", "content": new_content}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["node_type"] == "batch"
-
-
-def test_fs_batch_non_work_folder_brief_rejected(tools):
-    _mkdir(tools, "not-a-wf")
-    ops = [
-        {"op": "fs_create", "args": {"path": "not-a-wf/_brief.md", "content": _brief_no_id("not-a-wf")}},
-    ]
-    result = tools.fs_batch(ops)
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-# ── error envelope tests ─────────────────────────────────────────────────────
-
-def test_error_envelope_fields(tools):
-    _setup_work_folder(tools, "test-error-env")
-    result = tools.fs_resolve("nonexistent.md")
-    assert "code" in result
-    assert "message" in result
-    assert "retryable" in result
-    assert result["code"] in ("RESOURCE_NOT_FOUND", "INVALID_PATH")
-
-
-def test_error_no_partial_mutation(tools):
-    _setup_work_folder(tools, "test-partial")
-    original_count = len(tools.fs_list("").get("entries", []))
-    try:
-        tools.fs_create("test-partial/_brief.md", "not valid")
-    except Exception:
-        pass
-    current_count = len(tools.fs_list("").get("entries", []))
-    assert current_count == original_count
-
-
-# ── path governance tests ────────────────────────────────────────────────────
-
-def test_path_traversal_write_rejected(tools):
-    result = tools.fs_create("../outside/_brief.md", _brief_no_id("outside"))
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_absolute_path_rejected(tools):
-    result = tools.fs_create("/tmp/outside/_brief.md", _brief_no_id("outside"))
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_dot_prefix_path_rejected(tools):
-    result = tools.fs_create(".hidden/hidden/_brief.md", _brief_no_id("hidden"))
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_excluded_dir_git_rejected(tools):
-    result = tools.fs_create(".git/config.md", _brief_no_id("config"))
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_excluded_dir_katana_rejected(tools):
-    result = tools.fs_create(".katana/secret.md", _brief_no_id("secret"))
-    assert result["code"] == "INVALID_PATH"
-
-
-# ── resource-id-primary tests ────────────────────────────────────────────────
-
-def test_delete_then_resolve_returns_resource_replaced(tools):
-    _setup_work_folder(tools, "test-del-resolve")
-    tools.fs_create("test-del-resolve/_brief.md", _brief_no_id("test-del-resolve"))
-    stat = tools.fs_stat("test-del-resolve/_brief.md")
-    rid = stat["resource_id"]
-    tools.fs_delete("test-del-resolve/_brief.md")
-    result = tools.fs_resolve(rid)
-    assert result["code"] == "RESOURCE_REPLACED"
-
-
-def test_write_after_delete_returns_resource_replaced(tools):
-    _setup_work_folder(tools, "test-write-after-del")
-    tools.fs_create("test-write-after-del/_brief.md", _brief_no_id("test-write-after-del"))
-    stat = tools.fs_stat("test-write-after-del/_brief.md")
-    rid = stat["resource_id"]
-    tools.fs_delete("test-write-after-del/_brief.md")
-    content = _brief("test-write-after-del", rid=rid)
-    result = tools.fs_write("test-write-after-del/_brief.md", content, resource_id=rid)
-    assert result["code"] == "RESOURCE_REPLACED"
-
-
-def test_batch_delete_then_resolve_returns_replaced(tools):
-    _setup_work_folder(tools, "batch-del-resolve")
-    tools.fs_create("batch-del-resolve/_brief.md", _brief_no_id("batch-del-resolve"))
-    stat = tools.fs_stat("batch-del-resolve/_brief.md")
-    rid = stat["resource_id"]
-    ops = [
-        {"op": "fs_delete", "args": {"path": "batch-del-resolve/_brief.md"}},
-    ]
-    tools.fs_batch(ops)
-    result = tools.fs_resolve(rid)
-    assert result["code"] == "RESOURCE_REPLACED"
-
-
-# ── MCP wrapper triggerability tests ─────────────────────────────────────────
-
-def test_fs_create_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-create")
-    result = _call(mcp, "fs_create", {
-        "path": "mcp-create/_brief.md",
-        "content": _brief_no_id("mcp-create"),
-    })
-    assert result["node_type"] == "file"
-    assert result["resource_id"] is not None
-
-
-def test_fs_read_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-read")
-    tools.fs_create("mcp-read/_brief.md", _brief_no_id("mcp-read"))
-    result = _call(mcp, "fs_read", {"path": "mcp-read/_brief.md"})
-    assert result["node_type"] == "file"
-    assert result["content"] is not None
-
-
-def test_fs_write_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-write")
-    result = tools.fs_create("mcp-write/_brief.md", _brief_no_id("mcp-write"))
-    rid = result["resource_id"]
-    content = _brief("mcp-write-updated", rid=rid)
-    result = _call(mcp, "fs_write", {
-        "path": "mcp-write/_brief.md",
-        "content": content,
-    })
-    assert result["node_type"] == "file"
-
-
-def test_fs_delete_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-delete")
-    tools.fs_create("mcp-delete/_brief.md", _brief_no_id("mcp-delete"))
-    result = _call(mcp, "fs_delete", {"path": "mcp-delete/_brief.md"})
-    assert result["node_type"] == "file"
-
-
-def test_fs_batch_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-batch-1")
-    _setup_work_folder(tools, "mcp-batch-2")
-    result = _call(mcp, "fs_batch", {
-        "operations": [
-            {"op": "fs_create", "args": {"path": "mcp-batch-1/_brief.md", "content": _brief_no_id("mcp-batch-1")}},
-            {"op": "fs_create", "args": {"path": "mcp-batch-2/_brief.md", "content": _brief_no_id("mcp-batch-2")}},
+    replay = env.tools.fs_batch(
+        [
+            _op(
+                "fs_create",
+                folder_id=env.folder_id,
+                filename="other.md",
+                content="x",
+            )
         ],
-    })
-    assert result["node_type"] == "batch"
+        idempotency_key="batch-idem",
+    )
+
+    assert empty["code"] == "INVALID_CONTENT"
+    assert unknown["code"] == "INVALID_CONTENT"
+    assert stale_cas["code"] == "BASE_COMMIT_CONFLICT"
+    assert stale_revision["code"] == "REVISION_CONFLICT"
+    assert created["ok"] is True and first["ok"] is True
+    assert replay["code"] == "IDEMPOTENCY_CONFLICT"
 
 
-def test_fs_resolve_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-resolve")
-    tools.fs_create("mcp-resolve/_brief.md", _brief_no_id("mcp-resolve"))
-    result = _call(mcp, "fs_resolve", {"path_or_id": "mcp-resolve/_brief.md"})
-    assert result["node_type"] == "file"
+def test_batch_enforces_critical_file_invariants(env):
+    progress = (env.repo / env.folder_id / "progress.md").read_text(encoding="utf-8")
+
+    create_critical = env.tools.fs_batch(
+        [
+            _op(
+                "fs_create",
+                folder_id=env.folder_id,
+                filename="_brief.md",
+                content="x",
+            )
+        ]
+    )
+    rewrite_progress = env.tools.fs_batch(
+        [
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="progress.md",
+                content=progress.replace("## Blocked\n- None\n\n", ""),
+            )
+        ]
+    )
+    delete_progress = env.tools.fs_batch(
+        [
+            _op(
+                "fs_delete",
+                folder_id=env.folder_id,
+                filename="progress.md",
+            )
+        ]
+    )
+
+    assert create_critical["code"] == "POLICY_VIOLATION"
+    assert rewrite_progress["code"] == "POLICY_VIOLATION"
+    assert delete_progress["code"] == "POLICY_VIOLATION"
 
 
-def test_fs_stat_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-stat")
-    tools.fs_create("mcp-stat/_brief.md", _brief_no_id("mcp-stat"))
-    result = _call(mcp, "fs_stat", {"path": "mcp-stat/_brief.md"})
-    assert result["node_type"] == "file"
+def test_batch_rejects_traversal_large_content_and_critical_transfer(env):
+    dest_id = _add_folder(env)
+    traversal = env.tools.fs_batch(
+        [
+            _op(
+                "fs_create",
+                folder_id=env.folder_id,
+                filename="../escape.md",
+                content="x",
+            )
+        ]
+    )
+    too_large = env.tools.fs_batch(
+        [
+            _op(
+                "fs_create",
+                folder_id=env.folder_id,
+                filename="large.md",
+                content="x" * 1_000_001,
+            )
+        ]
+    )
+    critical_copy = env.tools.fs_batch(
+        [
+            _op(
+                "fs_copy",
+                source_folder_id=env.folder_id,
+                source_filename="progress.md",
+                dest_folder_id=dest_id,
+                dest_filename="copy.md",
+            )
+        ]
+    )
+    critical_rename = env.tools.fs_batch(
+        [
+            _op(
+                "fs_rename",
+                source_folder_id=env.folder_id,
+                source_filename="_brief.md",
+                dest_folder_id=dest_id,
+                dest_filename="brief.md",
+            )
+        ]
+    )
+
+    assert traversal["code"] == "INVALID_PATH"
+    assert too_large["code"] == "CONTENT_TOO_LARGE"
+    assert critical_copy["code"] == "POLICY_VIOLATION"
+    assert critical_rename["code"] == "POLICY_VIOLATION"
+    assert not (env.repo.parent / "escape.md").exists()
 
 
-def test_fs_list_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-list")
-    tools.fs_create("mcp-list/_brief.md", _brief_no_id("mcp-list"))
-    result = _call(mcp, "fs_list", {})
-    assert "entries" in result
+def test_batch_allows_append_and_structure_preserving_updates(env):
+    env.store.save(
+        env.folder_id,
+        _now,
+        golden_order_additions="- original\n",
+    )
+    progress_path = env.repo / env.folder_id / "progress.md"
+    context_path = env.repo / env.folder_id / "context.md"
+    claude_path = env.repo / env.folder_id / "CLAUDE.md"
+    progress = progress_path.read_text(encoding="utf-8")
+    context = context_path.read_text(encoding="utf-8")
+    claude = claude_path.read_text(encoding="utf-8")
+
+    result = env.tools.fs_batch(
+        [
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="progress.md",
+                content=progress + "| 16:02 | batch | append |\n",
+            ),
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="golden-order.md",
+                content="- original\n- appended\n",
+            ),
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="context.md",
+                content=context + "\ncontext addition\n",
+            ),
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="CLAUDE.md",
+                content=claude + "\nresume addition\n",
+            ),
+        ]
+    )
+
+    assert result["ok"] is True
+    assert len(result["batch_results"]) == 4
+    assert "batch | append" in progress_path.read_text(encoding="utf-8")
+    assert "appended" in (
+        env.repo / env.folder_id / "golden-order.md"
+    ).read_text(encoding="utf-8")
 
 
-def test_fs_glob_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-glob")
-    tools.fs_create("mcp-glob/_brief.md", _brief_no_id("mcp-glob"))
-    result = _call(mcp, "fs_glob", {"pattern": "mcp-glob*/_brief.md"})
-    assert result["node_type"] == "glob"
+# MCP schema and public envelopes -------------------------------------------
 
 
-def test_fs_edit_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-edit")
-    tools.fs_create("mcp-edit/_brief.md", _brief_no_id("mcp-edit"))
-    result = _call(mcp, "fs_edit", {
-        "path": "mcp-edit/_brief.md",
-        "old_string": "Test a work folder",
-        "new_string": "Changed via MCP",
-    })
-    assert result["node_type"] == "file"
+def test_mcp_discovery_and_mutation_use_exact_id_filename_schema(env):
+    created = _mcp_call(
+        "fs_create",
+        {
+            "folder_id": env.folder_id,
+            "filename": "mcp.md",
+            "content": "one\ntwo\n",
+        },
+    )
+    read = _mcp_call(
+        "fs_read",
+        {
+            "folder_id": env.folder_id,
+            "filename": "mcp.md",
+            "offset": 2,
+            "limit": 1,
+        },
+    )
+    edited = _mcp_call(
+        "fs_edit",
+        {
+            "folder_id": env.folder_id,
+            "filename": "mcp.md",
+            "old_string": "two",
+            "new_string": "three",
+        },
+    )
+
+    assert created["filename"] == "mcp.md"
+    assert read["content"] == "2\ttwo"
+    assert edited["content"] == "one\nthree\n"
+    for result in (created, read, edited):
+        _assert_safe(result, env.repo)
 
 
-def test_fs_copy_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-copy-src")
-    tools.fs_create("mcp-copy-src/_brief.md", _brief_no_id("mcp-copy-src"))
-    _setup_work_folder(tools, "mcp-copy-dst")
-    result = _call(mcp, "fs_copy", {
-        "source": "mcp-copy-src/_brief.md",
-        "dest": "mcp-copy-dst/_brief.md",
-    })
-    assert result["node_type"] == "file"
+def test_mcp_cross_folder_and_batch_fields(env):
+    dest_id = _add_folder(env)
+    env.tools.fs_create(env.folder_id, "source.md", "payload")
+
+    copied = _mcp_call(
+        "fs_copy",
+        {
+            "source_folder_id": env.folder_id,
+            "source_filename": "source.md",
+            "dest_folder_id": dest_id,
+            "dest_filename": "copied.md",
+        },
+    )
+    batched = _mcp_call(
+        "fs_batch",
+        {
+            "operations": [
+                _op(
+                    "fs_create",
+                    folder_id=dest_id,
+                    filename="batch.md",
+                    content="batch",
+                )
+            ]
+        },
+    )
+
+    assert copied["folder_id"] == dest_id
+    assert copied["filename"] == "copied.md"
+    assert batched["batch_results"] == [
+        {
+            "op": "fs_create",
+            "folder_id": dest_id,
+            "filename": "batch.md",
+        }
+    ]
 
 
-def test_fs_rename_via_mcp(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-rename-src")
-    tools.fs_create("mcp-rename-src/_brief.md", _brief_no_id("mcp-rename-src"))
-    _setup_work_folder(tools, "mcp-rename-dst")
-    result = _call(mcp, "fs_rename", {
-        "source": "mcp-rename-src/_brief.md",
-        "dest": "mcp-rename-dst/_brief.md",
-    })
-    assert result["node_type"] == "file"
+def test_all_id_only_fs_tools_are_triggerable_through_mcp(env):
+    dest_id = _add_folder(env)
+    results = [
+        _mcp_call("fs_capabilities"),
+        _mcp_call("fs_resolve", {"folder_id": env.folder_id}),
+        _mcp_call(
+            "fs_stat",
+            {"folder_id": env.folder_id, "filename": "progress.md"},
+        ),
+        _mcp_call("fs_list", {"folder_id": env.folder_id}),
+    ]
+    created = _mcp_call(
+        "fs_create",
+        {
+            "folder_id": env.folder_id,
+            "filename": "all-tools.md",
+            "content": "v1",
+        },
+    )
+    results.append(created)
+    results.append(
+        _mcp_call(
+            "fs_read",
+            {"folder_id": env.folder_id, "filename": "all-tools.md"},
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_write",
+            {
+                "folder_id": env.folder_id,
+                "filename": "all-tools.md",
+                "content": "v2",
+                "expected_resource_revision": created["content_revision"],
+            },
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_edit",
+            {
+                "folder_id": env.folder_id,
+                "filename": "all-tools.md",
+                "old_string": "v2",
+                "new_string": "v3",
+            },
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_copy",
+            {
+                "source_folder_id": env.folder_id,
+                "source_filename": "all-tools.md",
+                "dest_folder_id": dest_id,
+                "dest_filename": "copied.md",
+            },
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_rename",
+            {
+                "source_folder_id": dest_id,
+                "source_filename": "copied.md",
+                "dest_folder_id": dest_id,
+                "dest_filename": "renamed.md",
+            },
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_delete",
+            {"folder_id": env.folder_id, "filename": "all-tools.md"},
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_batch",
+            {
+                "operations": [
+                    _op(
+                        "fs_create",
+                        folder_id=dest_id,
+                        filename="batch-trigger.md",
+                        content="batch",
+                    )
+                ]
+            },
+        )
+    )
+
+    assert all(result["ok"] is True for result in results)
+    for result in results:
+        _assert_safe(result, env.repo)
 
 
-# ── content_revision / content_hash consistency ──────────────────────────────
+def test_mcp_errors_preserve_machine_codes_without_locator_leaks(env):
+    created = env.tools.fs_create(env.folder_id, "revision-mcp.md", "v1")
+    results = [
+        _mcp_call(
+            "fs_read",
+            {"folder_id": env.folder_id, "filename": "../escape.md"},
+        ),
+        _mcp_call(
+            "fs_create",
+            {
+                "folder_id": env.folder_id,
+                "filename": "cas-mcp.md",
+                "content": "x",
+                "expected_base_commit": "a" * 40,
+            },
+        ),
+        _mcp_call(
+            "fs_write",
+            {
+                "folder_id": env.folder_id,
+                "filename": "revision-mcp.md",
+                "content": "v2",
+                "expected_resource_revision": "sha256:" + "0" * 64,
+            },
+        ),
+        _mcp_call(
+            "fs_batch",
+            {
+                "operations": [
+                    _op(
+                        "fs_create",
+                        folder_id=env.folder_id,
+                        filename=".katana/escape.md",
+                        content="x",
+                    )
+                ]
+            },
+        ),
+    ]
 
-def test_fs_read_content_hash_matches_content(tools):
-    _setup_work_folder(tools, "test-hash")
-    tools.fs_create("test-hash/_brief.md", _brief_no_id("test-hash"))
-    result = tools.fs_read("test-hash/_brief.md")
-    assert result["content_hash"] == _hash(result["content"])
-
-
-def test_fs_write_content_hash_matches_content(tools):
-    _setup_work_folder(tools, "test-write-hash")
-    result = tools.fs_create("test-write-hash/_brief.md", _brief_no_id("test-write-hash"))
-    rid = result["resource_id"]
-    content = _brief("test-write-hash-updated", rid=rid)
-    result = tools.fs_write("test-write-hash/_brief.md", content)
-    assert result["content_hash"] == _hash(result["content"])
-
-
-def test_fs_create_content_hash_matches_content(tools):
-    _setup_work_folder(tools, "test-create-hash")
-    result = tools.fs_create("test-create-hash/_brief.md", _brief_no_id("test-create-hash"))
-    assert result["content_hash"] == _hash(result["content"])
-
-
-# ── _brief.md scan uses correct pattern ──────────────────────────────────────
-
-def test_scan_uses_brief_pattern(tools):
-    _setup_work_folder(tools, "test-scan")
-    tools.fs_create("test-scan/_brief.md", _brief_no_id("test-scan"))
-    tools.fs_create("notes.md", "# Notes\n\ncontent")
-    result = tools.fs_resolve("test-scan/_brief.md")
-    assert result["resource_id"] is not None
-    result = tools.fs_resolve("notes.md")
-    assert result["resource_id"] is None
-
-
-# ── MCP wrapper error-code triggerability ─────────────────────────────────────
-
-def test_mcp_error_base_commit_conflict(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-err-cas")
-    tools.fs_create("mcp-err-cas/_brief.md", _brief_no_id("mcp-err-cas"))
-    result = _call(mcp, "fs_write", {
-        "path": "mcp-err-cas/_brief.md",
-        "content": _brief("mcp-err-cas-updated", rid="wf-abc123"),
-        "expected_base_commit": "0" * 40,
-    })
-    assert result["code"] == "BASE_COMMIT_CONFLICT"
-
-
-def test_mcp_error_revision_conflict(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-err-rev")
-    tools.fs_create("mcp-err-rev/_brief.md", _brief_no_id("mcp-err-rev"))
-    result = _call(mcp, "fs_write", {
-        "path": "mcp-err-rev/_brief.md",
-        "content": _brief("mcp-err-rev-updated", rid="wf-abc123"),
-        "expected_resource_revision": "sha256:" + "0" * 64,
-    })
-    assert result["code"] == "REVISION_CONFLICT"
+    assert [result["code"] for result in results] == [
+        "INVALID_PATH",
+        "BASE_COMMIT_CONFLICT",
+        "REVISION_CONFLICT",
+        "INVALID_PATH",
+    ]
+    assert created["ok"] is True
+    for result in results:
+        _assert_safe(result, env.repo)
 
 
-def test_mcp_error_idempotency_conflict(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-err-idem")
-    key = "idem-key-mcp"
-    tools.fs_create("mcp-err-idem/_brief.md", _brief_no_id("mcp-err-idem"), idempotency_key=key)
-    _setup_work_folder(tools, "mcp-err-idem-2")
-    result = _call(mcp, "fs_create", {
-        "path": "mcp-err-idem-2/_brief.md",
-        "content": _brief_no_id("mcp-err-idem-2"),
-        "idempotency_key": key,
-    })
-    assert result["code"] == "IDEMPOTENCY_CONFLICT"
+def test_mcp_schema_has_no_legacy_path_or_glob(env):
+    tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
+
+    assert "fs_glob" not in tools
+    assert "path" not in tools["fs_create"].parameters["properties"]
+    assert "path_or_id" not in tools["fs_resolve"].parameters["properties"]
+    assert set(tools["fs_copy"].parameters["required"]) >= {
+        "source_folder_id",
+        "source_filename",
+        "dest_folder_id",
+        "dest_filename",
+    }
+    assert list(inspect.signature(FSTools.fs_resolve).parameters) == [
+        "self",
+        "folder_id",
+        "filename",
+    ]
 
 
-def test_mcp_error_resource_replaced(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-err-replaced")
-    result = tools.fs_create("mcp-err-replaced/_brief.md", _brief_no_id("mcp-err-replaced"))
-    rid = result["resource_id"]
-    tools.fs_delete("mcp-err-replaced/_brief.md")
-    result = _call(mcp, "fs_resolve", {"path_or_id": rid})
-    assert result["code"] == "RESOURCE_REPLACED"
+def test_success_and_error_envelopes_never_leak_locator(env):
+    success = env.tools.fs_resolve(env.folder_id)
+    error = env.tools.fs_read(env.folder_id, "../escape.md")
+
+    _assert_safe(success, env.repo)
+    _assert_safe(error, env.repo)
+    assert success["ok"] is True
+    assert error["ok"] is False
+    assert set(error) >= {"ok", "code", "message", "retryable"}
 
 
-def test_mcp_error_ref_mismatch(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-err-ref")
-    result = tools.fs_create("mcp-err-ref/_brief.md", _brief_no_id("mcp-err-ref"))
-    rid = result["resource_id"]
-    fake_id = "wf-999999"
-    result = _call(mcp, "fs_write", {
-        "path": "mcp-err-ref/_brief.md",
-        "content": _brief("mcp-err-ref-updated", rid=fake_id),
-        "resource_id": rid,
-    })
-    assert result["code"] == "REF_MISMATCH"
+def test_each_successful_mutation_advances_head_and_keeps_tree_clean(env):
+    before = head_sha(str(env.repo))
+    result = env.tools.fs_create(env.folder_id, "commit.md", "content")
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=env.repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
 
-
-def test_mcp_error_policy_violation(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-err-policy")
-    result = _call(mcp, "fs_write", {
-        "path": "mcp-err-policy/progress.md",
-        "content": "# Overwritten Progress\n\ndata",
-    })
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_mcp_error_invalid_content(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-err-content")
-    result = _call(mcp, "fs_create", {
-        "path": "mcp-err-content/_brief.md",
-        "content": "not a valid brief",
-    })
-    assert result["code"] == "INVALID_CONTENT"
-
-
-def test_mcp_error_invalid_path(srv):
-    mcp, repo, tools = srv
-    result = _call(mcp, "fs_read", {"path": "../etc/passwd"})
-    assert result["code"] == "INVALID_PATH"
-
-
-def test_mcp_error_content_too_large(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-err-large")
-    tools.fs_create("mcp-err-large/_brief.md", _brief_no_id("mcp-err-large"))
-    huge = "x" * 1_000_001
-    result = _call(mcp, "fs_write", {
-        "path": "mcp-err-large/_brief.md",
-        "content": huge,
-    })
-    assert result["code"] == "CONTENT_TOO_LARGE"
-
-
-def test_mcp_batch_error_ref_mismatch(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-batch-ref")
-    tools.fs_create("mcp-batch-ref/_brief.md", _brief_no_id("mcp-batch-ref"))
-    result = _call(mcp, "fs_batch", {
-        "operations": [
-            {"op": "fs_write", "args": {
-                "path": "mcp-batch-ref/_brief.md",
-                "content": _brief("mcp-batch-ref-updated", rid="wf-999999"),
-            }},
-        ],
-    })
-    assert result["code"] == "REF_MISMATCH"
-
-
-def test_mcp_batch_error_content_too_large(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-batch-large")
-    tools.fs_create("mcp-batch-large/_brief.md", _brief_no_id("mcp-batch-large"))
-    huge = "x" * 1_000_001
-    result = _call(mcp, "fs_batch", {
-        "operations": [
-            {"op": "fs_write", "args": {
-                "path": "mcp-batch-large/_brief.md",
-                "content": huge,
-            }},
-        ],
-    })
-    assert result["code"] == "CONTENT_TOO_LARGE"
-
-
-# ── MCP append-only error via MCP wrapper ────────────────────────────────────
-
-def test_mcp_append_only_progress_violation(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-ao-progress")
-    old_content = tools.fs_read("mcp-ao-progress/progress.md")["content"]
-    new_content = old_content.replace("10:00:00", "99:99:99")
-    result = _call(mcp, "fs_write", {
-        "path": "mcp-ao-progress/progress.md",
-        "content": new_content,
-    })
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_mcp_append_only_golden_order_violation(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder(tools, "mcp-ao-go")
-    _create_file(tools, "mcp-ao-go/golden-order.md", "Rule 1: First rule\n")
-    result = _call(mcp, "fs_write", {
-        "path": "mcp-ao-go/golden-order.md",
-        "content": "Rule 2: Different\n",
-    })
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_mcp_resume_guide_violation(srv):
-    mcp, repo, tools = srv
-    _setup_work_folder_with_context(tools, "mcp-rg-violation")
-    result = _call(mcp, "fs_write", {
-        "path": "mcp-rg-violation/CLAUDE.md",
-        "content": "# No resume guide\n\nJust content.\n",
-    })
-    assert result["code"] == "POLICY_VIOLATION"
-
-
-def test_mcp_non_work_folder_brief_violation(srv):
-    mcp, repo, tools = srv
-    _mkdir(tools, "not-a-wf")
-    result = _call(mcp, "fs_create", {
-        "path": "not-a-wf/_brief.md",
-        "content": _brief_no_id("not-a-wf"),
-    })
-    assert result["code"] == "POLICY_VIOLATION"
+    assert result["commit"] != before
+    assert result["commit"] == head_sha(str(env.repo))
+    assert status == ""

@@ -1,118 +1,108 @@
-"""folder_id by-id addressing for fs_* writes (D1).
+"""Opaque folder ID addressing makes path-based ghost nesting impossible."""
 
-Root-cause fix for the double-nesting bug: agents can address a work folder
-by its wf-xxxxxx id and write files by folder-relative logical path, without
-ever deriving/learning the physical _wf_root layout. This makes the
-"agent mis-judged VFS root and wrote to ghost nested path" failure class
-structurally impossible.
+from __future__ import annotations
 
-See docs/specs/2026-07-15-wf-fs-path-contract-virtualization.md (D1, D3-A).
-"""
-import os
+import inspect
 import subprocess
+from datetime import datetime
 
 import pytest
+
 from katana_kernel import (
     GovernedKernel,
     GovernedVFS,
     ResourceIdLedger,
     TransactionManifest,
 )
-
 from katana_work_folder_mcp.fs_tools import FSTools
-from katana_work_folder_mcp.store import _wf_policy
+from katana_work_folder_mcp.store import WorkFolderStore, _wf_policy
 
 
-def _brief_no_id(title: str) -> str:
-    return f"""---
-title: {title}
-status: active
-created: "2026-07-15"
-updated: "2026-07-15"
-tags: []
-kind: ""
-links: []
----
-\n**Goal:** {title}
-
-Summary.
-"""
-
-
-def _progress_md() -> str:
-    return """# Progress
-
-**Goal:** x
-**Status:** active
-**Phase:**
-**Updated:** 2026-07-15
-
-## Changelog
-| Time | Action | Detail |
-|------|--------|--------|
-"""
+def _now():
+    return datetime(2026, 7, 29, 16, 0, 0)
 
 
 @pytest.fixture
-def tools(tmp_path):
-    repo = str(tmp_path)
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "-C", repo, "config", "user.email", "t@t"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", repo, "config", "user.name", "t"], check=True, capture_output=True)
+def flat(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitkeep").write_text("", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitkeep"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path, check=True)
+
     kernel = GovernedKernel()
-    vfs = GovernedVFS(repo)
-    ledger = ResourceIdLedger(os.path.join(repo, ".katana", "tombstones.json"), prefix="wf-")
-    manifest = TransactionManifest(os.path.join(repo, ".katana", "manifests"))
-    kernel.bind("work-folder", _wf_policy(), vfs, ledger, manifest, repo)
-    return FSTools(kernel, repo)
+    vfs = GovernedVFS(str(tmp_path))
+    ledger = ResourceIdLedger(
+        str(tmp_path / ".katana" / "tombstones.json"),
+        prefix="wf-",
+    )
+    manifest = TransactionManifest(str(tmp_path / ".katana" / "manifests"))
+    kernel.bind("work-folder", _wf_policy(), vfs, ledger, manifest, str(tmp_path))
+    store = WorkFolderStore(kernel)
+    tools = FSTools(kernel, str(tmp_path))
+    folder_id = store.create("addressing", _now)["folder_id"]
+    return tmp_path, folder_id, tools
 
 
-def _seed_folder(tools, folder: str):
-    """wf_create 等价: 建目录 + progress.md + commit, 然后 fs_create _brief 注册 id。"""
-    os.makedirs(os.path.join(tools._repo_root, folder), exist_ok=True)
-    tools._vfs.write(f"{folder}/progress.md", _progress_md())
-    subprocess.run(["git", "add", "."], cwd=tools._repo_root, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "seed"], cwd=tools._repo_root, check=True, capture_output=True)
-    return tools.fs_create(f"{folder}/_brief.md", _brief_no_id(folder.split("/")[-1]))["resource_id"]
+def test_create_by_id_writes_only_inside_flat_folder(flat):
+    repo, folder_id, tools = flat
+
+    result = tools.fs_create(folder_id, "design.md", "# Design\n")
+
+    assert result["ok"] is True
+    assert result["folder_id"] == folder_id
+    assert result["filename"] == "design.md"
+    assert (repo / folder_id / "design.md").is_file()
+    assert list(repo.rglob("design.md")) == [repo / folder_id / "design.md"]
 
 
-def test_fs_create_by_folder_id_writes_inside_folder(tools):
-    """folder_id + folder 内相对 path → 文件落在 folder 内, agent 无需知道物理路径"""
-    fid = _seed_folder(tools, "2026/07/15/gw")
-    assert fid and fid.startswith("wf-")
-    r = tools.fs_create("design.md", "# Design\n", folder_id=fid)
-    assert "code" not in r, f"unexpected error: {r}"
-    assert tools._vfs.exists("2026/07/15/gw/design.md")
+def test_write_by_id_never_accepts_physical_locator(flat):
+    repo, folder_id, tools = flat
+    tools.fs_create(folder_id, "findings.md", "init\n")
+
+    result = tools.fs_write(folder_id, "findings.md", "# Findings\n")
+
+    assert result["ok"] is True
+    assert (repo / folder_id / "findings.md").read_text(encoding="utf-8") == "# Findings\n"
+    assert not (repo / "智元工作").exists()
 
 
-def test_fs_write_by_folder_id(tools):
-    fid = _seed_folder(tools, "2026/07/15/gw")
-    tools.fs_create("2026/07/15/gw/findings.md", "init\n")  # write 不隐式创建, 先建
-    r = tools.fs_write("findings.md", "# Findings updated\n", folder_id=fid)
-    assert "code" not in r, f"unexpected error: {r}"
-    assert "Findings updated" in tools._vfs.read_text("2026/07/15/gw/findings.md")
+def test_missing_folder_id_is_not_resolved_by_scan(flat):
+    _, _, tools = flat
+
+    result = tools.fs_create("wf-deadbe", "design.md", "# Design\n")
+
+    assert result["ok"] is False
+    assert result["code"] == "RESOURCE_NOT_FOUND"
+    assert result["folder_id"] == "wf-deadbe"
 
 
-def test_fs_create_folder_id_not_found(tools):
-    r = tools.fs_create("design.md", "# x", folder_id="wf-deadbe")
-    assert r["code"] == "RESOURCE_NOT_FOUND"
+@pytest.mark.parametrize(
+    "folder_id",
+    ["2026/07/29/topic", "../wf-abc123", "/abs/path", "wf-ABCDEF"],
+)
+def test_legacy_and_path_like_folder_ids_are_rejected(flat, folder_id):
+    _, _, tools = flat
+
+    result = tools.fs_read(folder_id, "progress.md")
+
+    assert result["ok"] is False
+    assert result["code"] == "INVALID_PATH"
 
 
-def test_folder_id_immune_to_double_nesting(tools):
-    """folder_id + folder 内相对 path 永不产生 智元工作/工作记录/智元工作/工作记录/ 幽灵嵌套"""
-    fid = _seed_folder(tools, "2026/07/15/gw")
-    tools.fs_create("plan.md", "# Plan", folder_id=fid)
-    assert tools._vfs.exists("2026/07/15/gw/plan.md")
-    # 不应出现任何错位的物理 root 段嵌套
-    assert not os.path.exists(os.path.join(tools._repo_root, "智元工作"))
-
-
-def test_fs_create_without_folder_id_still_works(tools):
-    """兼容: 不给 folder_id 时, 旧 path-based 用法 (含根目录孤立文件) 不受影响"""
-    fid = _seed_folder(tools, "2026/07/15/gw")
-    # 旧的 folder 内 path 写法仍工作
-    r = tools.fs_create("2026/07/15/gw/notes.md", "# Notes\n")
-    assert "code" not in r
-    # 根目录孤立 md 也仍合法 (VFS 是通用 md FS, D2 不做 folder 归属硬校验)
-    r2 = tools.fs_create("rootfile.md", "# Root\n")
-    assert "code" not in r2
+def test_old_optional_folder_id_call_shape_no_longer_exists():
+    assert list(inspect.signature(FSTools.fs_create).parameters)[:4] == [
+        "self",
+        "folder_id",
+        "filename",
+        "content",
+    ]
+    assert list(inspect.signature(FSTools.fs_write).parameters)[:4] == [
+        "self",
+        "folder_id",
+        "filename",
+        "content",
+    ]
+    with pytest.raises(TypeError):
+        FSTools.fs_create(object(), "design.md", "# Design\n")

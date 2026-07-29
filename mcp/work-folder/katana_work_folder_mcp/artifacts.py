@@ -12,9 +12,10 @@
 """
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
+
+_FOLDER_ID_RE = re.compile(r"^wf-[0-9a-f]{6}$")
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +95,7 @@ def render_resume_guide(
     goal: str,
     phase: str,
     status: str,
-    wf_abs: str,
+    folder_id: str,
     key_context: str,
     decisions: str = "",
     issues: str = "",
@@ -119,7 +120,7 @@ def render_resume_guide(
         "## Status\n"
         f"- **Phase:** {phase}\n"
         f"- **Status:** {status}\n"
-        f"- **Work folder:** {wf_abs}\n"
+        f"- **Work folder ID:** {folder_id}\n"
         "\n"
         "## Key Context\n"
         f"{key_context}\n"
@@ -266,7 +267,7 @@ def gen_resume_guide(
     goal: str,
     phase: str,
     status: str,
-    wf_abs: str,
+    folder_id: str,
     key_context: str = "",
     decisions: str = "",
     issues: str = "",
@@ -281,7 +282,7 @@ def gen_resume_guide(
         goal=goal,
         phase=phase,
         status=status,
-        wf_abs=wf_abs,
+        folder_id=folder_id,
         key_context=key_context,
         decisions=decisions,
         issues=issues,
@@ -294,11 +295,11 @@ def gen_resume_guide(
 
 
 def list_work_folders(root: str) -> list[dict]:
-    """列举 root 下所有 work-folder（含 progress.md 或 CLAUDE.md 的目录）。
+    """列举 root 下所有扁平 work-folder。
 
     过滤：排除 status == "completed" 的目录。
     排序：按 progress.md（或 CLAUDE.md）的 mtime 降序。
-    返回：[{"path": <abs>, "status": <str>, "mtime": <float>}]
+    返回：[{"folder_id": <wf-id>, "status": <str>, "mtime": <float>}]
     """
     results: list[dict] = []
     root_path = Path(root)
@@ -306,13 +307,9 @@ def list_work_folders(root: str) -> list[dict]:
     if not root_path.is_dir():
         return results
 
-    # 递归遍历：真实 work folder 嵌在 YYYY/MM/DD/<topic>/ 多层下，非 root 直接子目录。
-    # 命中含 progress.md/CLAUDE.md 的目录即视为 work-folder 叶子，不再下钻（work folder 不嵌套）；
-    # 跳过隐藏目录（.git/.superpowers 等）。
-    for dirpath, dirnames, _filenames in os.walk(root_path):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-
-        entry = Path(dirpath)
+    for entry in root_path.iterdir():
+        if not entry.is_dir() or not _FOLDER_ID_RE.fullmatch(entry.name):
+            continue
         progress_file = entry / "progress.md"
         claude_file = entry / "CLAUDE.md"
 
@@ -321,9 +318,6 @@ def list_work_folders(root: str) -> list[dict]:
 
         if not has_progress and not has_claude:
             continue
-
-        # 命中 work-folder 叶子：剪枝，不再下钻其子目录
-        dirnames[:] = []
 
         if has_progress:
             md = progress_file.read_text(encoding="utf-8")
@@ -338,7 +332,7 @@ def list_work_folders(root: str) -> list[dict]:
             continue
 
         results.append({
-            "path": str(entry.resolve()),
+            "folder_id": entry.name,
             "status": status,
             "mtime": mtime,
         })
