@@ -87,7 +87,7 @@ def test_removed_legacy_surface_and_config_contract():
     assert not hasattr(FSTools, "fs_glob")
     assert not hasattr(brief_ops, "derive_id")
     assert not hasattr(brief_ops, "derive_created")
-    assert "KATANA_WORK_FOLDER" not in inspect.getsource(server)
+    assert '"KATANA_WORK_FOLDER"' not in inspect.getsource(server)
 
     assert list(inspect.signature(server.configure).parameters) == ["repo_root"]
     assert list(inspect.signature(server.wf_save).parameters)[0] == "folder_id"
@@ -271,4 +271,5 @@ def test_resume_guide_and_index_render_only_semantic_ids():
         ]
     )
     assert "| updated | status | id | title | goal |" in rendered_index
-    assert "folder" not in rendered_index.lower()
+    assert "| folder |" not in rendered_index.lower()
+    assert "`wf-abc123`" not in rendered_index

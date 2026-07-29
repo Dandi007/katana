@@ -22,38 +22,19 @@ from katana_work_folder_mcp.brief import (
     render_brief,
 )
 
-# YYYY/MM/DD/<slug> 布局：从路径末四段推 id 与 created
-_DATE_SEG_RE = re.compile(r"^\d{4}$")
+_FOLDER_ID_RE = re.compile(r"^wf-[0-9a-f]{6}$")
 
 
-def derive_id(folder: str) -> str:
-    """从 work folder 绝对路径推 brief id：``YYYY-MMDD-<slug>``。
-
-    末四段形如 ``2026/07/01/some-topic`` → ``2026-0701-some-topic``。
-    非日期布局（推不出年月日）时退化为末段 slug，保证不崩。
-    """
-    parts = Path(folder).parts
-    slug = parts[-1] if parts else folder
-    if len(parts) >= 4:
-        yyyy, mm, dd = parts[-4], parts[-3], parts[-2]
-        if _DATE_SEG_RE.match(yyyy) and len(mm) == 2 and len(dd) == 2 and mm.isdigit() and dd.isdigit():
-            return f"{yyyy}-{mm}{dd}-{slug}"
-    return slug
-
-
-def derive_created(folder: str) -> str:
-    """从 work folder 路径末四段推 created 日期 ``YYYY-MM-DD``；推不出返回空串。"""
-    parts = Path(folder).parts
-    if len(parts) >= 4:
-        yyyy, mm, dd = parts[-4], parts[-3], parts[-2]
-        if _DATE_SEG_RE.match(yyyy) and len(mm) == 2 and len(dd) == 2 and mm.isdigit() and dd.isdigit():
-            return f"{yyyy}-{mm}-{dd}"
-    return ""
+def _require_folder_id(folder_id: str) -> str:
+    if not _FOLDER_ID_RE.fullmatch(folder_id):
+        raise ValueError(f"invalid folder_id: {folder_id}")
+    return folder_id
 
 
 def seed_brief(
     folder: str,
     *,
+    folder_id: str,
     title: str,
     goal: str,
     status: str = "active",
@@ -72,12 +53,12 @@ def seed_brief(
     brief = Path(folder) / BRIEF_NAME
     if brief.exists():
         return False
-    created = derive_created(folder) or now
+    folder_id = _require_folder_id(folder_id)
     text = render_brief(
-        id=derive_id(folder),
+        id=folder_id,
         title=title,
         status=status,
-        created=created,
+        created=now,
         updated=now,
         goal=goal,
         summary=summary,
@@ -93,6 +74,7 @@ def seed_brief(
 def touch_brief(
     folder: str,
     *,
+    folder_id: str,
     now: str,
     reactivate: bool = True,
     seed_title: str | None = None,
@@ -115,6 +97,7 @@ def touch_brief(
         if seed_title is not None and seed_goal is not None:
             return seed_brief(
                 folder,
+                folder_id=folder_id,
                 title=seed_title,
                 goal=seed_goal,
                 status="active",
@@ -128,15 +111,20 @@ def touch_brief(
         return False
 
     fm = r["frontmatter"]
+    folder_id = _require_folder_id(folder_id)
+    if fm.get("id") != folder_id:
+        raise ValueError(
+            f"brief id does not match folder_id: {fm.get('id')} != {folder_id}"
+        )
     status = str(fm.get("status") or "active")
     if reactivate and status in ("paused", "archived"):
         status = "active"
 
     text = render_brief(
-        id=fm.get("id", derive_id(folder)),
+        id=folder_id,
         title=fm.get("title", ""),
         status=status,
-        created=_as_iso(fm.get("created")) or derive_created(folder) or now,
+        created=_as_iso(fm.get("created")) or now,
         updated=now,
         goal=r["goal"],
         summary=r["summary"],
@@ -194,7 +182,13 @@ def main(argv=None) -> int:
 
     touched = 0
     for f in folders:
-        if touch_brief(f, now=date, reactivate=reactivate):
+        folder_id = Path(f).name
+        if touch_brief(
+            f,
+            folder_id=folder_id,
+            now=date,
+            reactivate=reactivate,
+        ):
             touched += 1
             print(f"[touched] {f}")
         else:

@@ -7,34 +7,52 @@
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 from katana_work_folder_mcp.brief import BRIEF_NAME, BriefError, parse_brief
 
 INDEX_NAME = "INDEX.md"
+_FOLDER_ID_RE = re.compile(r"^wf-[0-9a-f]{6}$")
 
 
 def collect_briefs(root: str, return_errors: bool = False):
-    """递归扫 root 下所有 _brief.md，parse 返回 entries 列表。
+    """扫描 root 的扁平 ``wf-ID/`` 目录，parse 返回 entries 列表。
 
-    每条 entry: {"folder": str, "fm": dict, "goal": str}。
+    每条 entry: {"folder_id": str, "fm": dict, "goal": str}。
     解析失败的跳过（若 return_errors=True，额外返回 errors 列表）。
     """
     entries: list[dict] = []
     errors: list[str] = []
     root_p = Path(root)
-    for brief in root_p.rglob(BRIEF_NAME):
-        folder = str(brief.parent)
+    if not root_p.is_dir():
+        return (entries, errors) if return_errors else entries
+    for folder in root_p.iterdir():
+        if not folder.is_dir() or not _FOLDER_ID_RE.fullmatch(folder.name):
+            continue
+        brief = folder / BRIEF_NAME
+        if not brief.is_file():
+            continue
         try:
             r = parse_brief(brief.read_text(encoding="utf-8"))
         except BriefError as e:
-            errors.append(f"{folder}: {e}")
+            errors.append(f"{folder.name}/{BRIEF_NAME}: {e}")
             continue
         except Exception as e:  # noqa: BLE001 — 任何读取/解析异常都跳过，不中断全量
-            errors.append(f"{folder}: {e}")
+            errors.append(f"{folder.name}/{BRIEF_NAME}: {e}")
             continue
-        entries.append({"folder": folder, "fm": r["frontmatter"], "goal": r["goal"]})
+        brief_id = r["frontmatter"].get("id")
+        if brief_id != folder.name:
+            errors.append(
+                f"{folder.name}/{BRIEF_NAME}: id mismatch ({brief_id} != {folder.name})"
+            )
+            continue
+        entries.append({
+            "folder_id": folder.name,
+            "fm": r["frontmatter"],
+            "goal": r["goal"],
+        })
     if return_errors:
         return entries, errors
     return entries
@@ -43,7 +61,7 @@ def collect_briefs(root: str, return_errors: bool = False):
 def render_index(entries: list[dict]) -> str:
     """按 updated 倒序生成 INDEX.md 内容（markdown 表格）。
 
-    每行：updated · status · id · title · goal · folder
+    每行：updated · status · id · title · goal
     """
 
     def _updated_key(e):
@@ -68,8 +86,8 @@ def render_index(entries: list[dict]) -> str:
         "",
         f"> 共 {len(sorted_entries)} 个 work folder，按 updated 倒序。由 wf-reindex 自动生成，勿手改。",
         "",
-        "| updated | status | id | title | goal | folder |",
-        "|---|---|---|---|---|---|",
+        "| updated | status | id | title | goal |",
+        "|---|---|---|---|---|",
     ]
     for e in sorted_entries:
         fm = e["fm"]
@@ -78,15 +96,13 @@ def render_index(entries: list[dict]) -> str:
         id_ = fm.get("id", "")
         title = fm.get("title", "")
         goal = (e["goal"] or "").replace("|", "\\|")
-        # folder 用相对根的短路径更可读，但这里无根信息，留绝对路径末两段
-        folder = e["folder"]
-        lines.append(f"| {updated} | {status} | {id_} | {title} | {goal} | `{folder}` |")
+        lines.append(f"| {updated} | {status} | {id_} | {title} | {goal} |")
     lines.append("")
     return "\n".join(lines)
 
 
 def reindex(root: str, dry_run: bool = False) -> dict:
-    """扫 root 生成 INDEX.md。返回 {indexed, skipped, errors, index_path, preview?}。
+    """扫 root 生成 INDEX.md。返回 {indexed, skipped, errors, preview?}。
 
     - dry_run=True：不写文件，preview 字段含将生成的 INDEX 内容。
     - skipped：root 下无 _brief.md 的 folder 数（统计用，需扫目录）。
@@ -94,14 +110,17 @@ def reindex(root: str, dry_run: bool = False) -> dict:
     root_p = Path(root)
     entries, errors = collect_briefs(str(root_p), return_errors=True)
 
-    # 统计无 brief 的 folder 数（work folder = YYYY/MM/DD/<slug> 四级嵌套叶子）。
-    # 只把"含 progress.md 但缺 _brief.md"的目录算作 skipped（normalizer 该补 brief 的目标），
-    # 避免把中间目录（YYYY/、MM/、DD/）和 artifacts/ 等误算。
-    brief_folders = {Path(e["folder"]) for e in entries}
+    brief_folders = {e["folder_id"] for e in entries}
     skipped = 0
-    for d in root_p.rglob("progress.md"):
-        folder = d.parent
-        if folder in brief_folders:
+    if root_p.is_dir():
+        folders = [
+            d for d in root_p.iterdir()
+            if d.is_dir() and _FOLDER_ID_RE.fullmatch(d.name)
+        ]
+    else:
+        folders = []
+    for folder in folders:
+        if folder.name in brief_folders or not (folder / "progress.md").is_file():
             continue
         skipped += 1
 
@@ -112,7 +131,6 @@ def reindex(root: str, dry_run: bool = False) -> dict:
         "indexed": len(entries),
         "skipped": skipped,
         "errors": errors,
-        "index_path": str(index_path),
     }
     if dry_run:
         result["preview"] = md
@@ -141,7 +159,7 @@ def main(argv=None) -> int:
         print("--- preview ---")
         print(r["preview"])
     else:
-        print(f"[reindex] wrote {r['index_path']}")
+        print(f"[reindex] wrote {INDEX_NAME}")
     return 0
 
 
