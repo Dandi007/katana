@@ -25,6 +25,7 @@ from katana_kernel.gitops import cas_guard
 from katana_kernel.policy import PolicyViolationError
 from katana_kernel.vfs import VFSError
 from katana_wiki_mcp import invariants as _inv
+from katana_wiki_mcp.enumerate import safe_parse_page
 from katana_wiki_mcp.pages import parse_page, render_page
 
 ID_RE = re.compile(r"w-[0-9a-f]{6}")
@@ -48,6 +49,9 @@ _ERROR_CODES = {
 }
 
 _EXCLUDE_DIRS = {".git", ".obsidian", ".wiki", ".trash", ".katana"}
+
+#: 仓根元文件豁免见 invariants.META_FILES（store 侧策略层复用同一份）。
+_META_FILES = _inv.META_FILES
 
 
 def _make_error(
@@ -204,9 +208,15 @@ class FSTools:
                 continue
             try:
                 text = self._vfs.read_text(p)
+                # Tolerate unparseable frontmatter: this is a read-only scan feeding
+                # id/duplicate checks, and a strict parse here would raise on any one
+                # corrupt page (e.g. a file parked in _quarantine) and thereby block
+                # every governed mutation repo-wide.
+                fm, _ = safe_parse_page(text)
             except Exception:
                 continue
-            fm, _ = parse_page(text)
+            if not isinstance(fm, dict):
+                continue
             pid = fm.get("id")
             if not pid or not fm.get("tags") or not fm.get("类型"):
                 continue
@@ -322,7 +332,24 @@ class FSTools:
             return f"path must not be inside excluded directory: {parts[0]}"
         return None
 
-    def _validate_page_content(self, content: str, allow_missing_id: bool = False) -> str | None:
+    def _validate_page_content(self, content: str, allow_missing_id: bool = False,
+                               *, ingest_grade: bool = True,
+                               path: str | None = None) -> str | None:
+        """校验页面内容。
+
+        path 属仓根元文件（WIKI.md / log.md）时整体豁免：它们不是知识页。
+
+        ingest_grade=True 是入库标准（provenance 必须落在 frontmatter `sources`，
+        `# References` 不算），用于新建页。ingest_grade=False 用于**编辑既有页**：
+        provenance 放宽到「sources 或 # References」，与 lint 的判定一致。
+
+        理由：入库时该拦的是「新知识没有出处」，而编辑时若沿用入库标准，等于对
+        规则出台前写的页做追溯审查——实测 799 页里只有 11 页（1%）能过入库级校验，
+        于是治理写路径对整个存量库不可用。既有页的 provenance 债应由 lint 报告并
+        专门修，而不是让所有无关编辑（改错字、清死链）都被它挡住。
+        """
+        if path and path.replace("\\", "/") in _META_FILES:
+            return None
         fm, body = parse_page(content)
         if not fm and not body:
             return "content is not a valid page (unparseable frontmatter)"
@@ -330,7 +357,8 @@ class FSTools:
             return "page must have an id"
         if fm.get("id") and not ID_RE.fullmatch(fm["id"]):
             return f"invalid id format: {fm['id']}"
-        errs = _inv.validate_page(fm, body, require_summary=True, require_sources=True)
+        errs = _inv.validate_page(fm, body, require_summary=True,
+                                  require_sources=ingest_grade)
         if errs:
             return "; ".join(errs)
         return None
@@ -1024,7 +1052,7 @@ class FSTools:
                 virtual_path=path, current_commit=self._commit(), retryable=False,
             )
 
-        err = self._validate_page_content(content, allow_missing_id=True)
+        err = self._validate_page_content(content, allow_missing_id=True, path=path)
         if err:
             return _make_error(
                 "INVALID_CONTENT", err,
@@ -1162,7 +1190,13 @@ class FSTools:
                     current_commit=commit, retryable=False,
                 )
 
-        err = self._validate_page_content(content)
+        # allow_missing_id: 792 of 801 pages predate the id mechanism and
+        # deliberately keep none (ingest_apply enforces the same rule). The
+        # id-immutability and duplicate-id guards above already handle both the
+        # None and the forged case, so requiring an id here would make the
+        # governed write path unusable for 98% of the repo.
+        err = self._validate_page_content(content, allow_missing_id=True,
+                                         ingest_grade=False, path=path)
         if err:
             return _make_error(
                 "INVALID_CONTENT", err,
@@ -1305,8 +1339,23 @@ class FSTools:
                 resource_id=old_rid, virtual_path=path,
                 current_commit=commit, retryable=False,
             )
+        if not old_rid and new_rid:
+            # Legacy pages (created before ids existed) deliberately have none —
+            # ingest_apply enforces the same rule ("legacy page has no id; update
+            # must not add or forge id"). Editing such a page must not mint one.
+            return _make_error(
+                "REF_MISMATCH",
+                "legacy page has no id; edits must not add or forge one",
+                virtual_path=path,
+                current_commit=commit, retryable=False,
+            )
 
-        err = self._validate_page_content(new_text)
+        # allow_missing_id: an edit must not depend on the page having an id.
+        # 792 of 801 pages predate the id mechanism, and the two id-based guards
+        # above already tolerate None, so requiring one here made the governed
+        # path read-only for 98% of the repo.
+        err = self._validate_page_content(new_text, allow_missing_id=True,
+                                         ingest_grade=False, path=path)
         if err:
             return _make_error(
                 "INVALID_CONTENT", err,
@@ -1755,7 +1804,9 @@ class FSTools:
                         raise ValueError(f"batch op {i}: id is immutable")
                     if old_rid and not new_rid:
                         content = tools._inject_id(content, old_rid)
-                    err = tools._validate_page_content(content)
+                    # 与单体 fs_write 一致：存量页无 id 是设计如此，不得因此拒写
+                    err = tools._validate_page_content(content, allow_missing_id=True,
+                                                       ingest_grade=False, path=path)
                     if err:
                         raise ValueError(f"batch op {i}: {err}")
                     binding.vfs.write(path, content, op="fs_write", args={"path": path})
@@ -1779,7 +1830,9 @@ class FSTools:
                         else text.replace(old_string, new_string, 1)
                     if len(new_text.encode("utf-8")) > _MAX_FILE_SIZE:
                         raise ValueError(f"batch op {i}: result exceeds max file size")
-                    err = tools._validate_page_content(new_text)
+                    # 与单体 fs_edit 一致：存量页无 id 不阻塞编辑
+                    err = tools._validate_page_content(new_text, allow_missing_id=True,
+                                                       ingest_grade=False, path=path)
                     if err:
                         raise ValueError(f"batch op {i}: {err}")
                     new_rid = _page_id_from_content(new_text)

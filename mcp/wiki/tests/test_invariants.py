@@ -64,8 +64,21 @@ def test_provenance_missing_both():
 
 
 def test_summary_too_long():
-    fm = _valid_fm(); fm["摘要"] = "字" * 50
+    """按上限边界断言，不写死数字。
+
+    上限从 40 放宽到 100：WIKI.md 原文是「≤~40 字」（约数指引），代码却按精确 40
+    硬判，导致 667 个有摘要的页里 642 个（96%）被判非法——实测中位 66 字、p90 97。
+    是规则数字与真实写作水位脱节，不是数据脏。
+    """
+    limit = inv.DEFAULT_SUMMARY_MAX_LEN
+    fm = _valid_fm(); fm["摘要"] = "字" * (limit + 1)
     assert any("摘要超长" in e for e in inv.check_summary(fm))
+    # 恰好等于上限须通过
+    fm["摘要"] = "字" * limit
+    assert inv.check_summary(fm) == []
+    # 实测水位（p90 = 97 字）必须落在合法区间内
+    fm["摘要"] = "字" * 97
+    assert inv.check_summary(fm) == []
 
 
 def test_validate_page_aggregates_all_errors():

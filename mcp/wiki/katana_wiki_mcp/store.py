@@ -88,9 +88,19 @@ def _wiki_policy() -> DomainPolicy:
         if op.startswith("fs_") and op not in ("fs_batch", "fs_capabilities", "fs_resolve",
                                                   "fs_stat", "fs_list", "fs_glob", "fs_read"):
             content = args.get("content")
-            if content is not None:
+            path = str(args.get("path") or "").replace("\\", "/")
+            # 仓根元文件不是知识页：WIKI.md 是 schema 本身（刻意无 frontmatter），
+            # log.md 是治理链自己的操作日志。
+            if content is not None and path not in _inv.META_FILES:
+                # 入库标准（provenance 必须落 frontmatter sources）只适用于新建页。
+                # 编辑既有页沿用它等于追溯审查规则出台前的页——实测 799 页里仅 11 页
+                # （1%）能过，治理写路径对整个存量库不可用。既有页的 provenance 债
+                # 由 lint 报告并专门修，不该让改错字/清死链这类编辑被它挡住。
                 fm, body = parse_page(content)
-                errs = _inv.validate_page(fm, body, require_summary=True, require_sources=True)
+                errs = _inv.validate_page(
+                    fm, body, require_summary=True,
+                    require_sources=(op == "fs_create"),
+                )
                 if errs:
                     raise ValueError("; ".join(errs))
 
