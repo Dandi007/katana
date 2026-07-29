@@ -98,6 +98,56 @@ def test_require_clean_working_tree_rejects_tracked_dirty(git_repo):
     assert open(keep).read() == "dirty preimage"
 
 
+def test_require_clean_working_tree_rejects_ignored_untracked_payload(git_repo):
+    ignore = os.path.join(git_repo, ".gitignore")
+    with open(ignore, "w", encoding="utf-8") as output:
+        output.write("wf-deadbe/.env\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "ignore topic payload"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    os.makedirs(os.path.join(git_repo, "wf-deadbe"), exist_ok=True)
+    with open(os.path.join(git_repo, "wf-deadbe", ".env"), "w") as output:
+        output.write("must not be invisible")
+
+    with pytest.raises(DirtyWorkTreeError, match="ignored"):
+        require_clean_working_tree(git_repo)
+
+
+def test_require_clean_working_tree_allows_only_configured_runtime_subtree(git_repo):
+    ignore = os.path.join(git_repo, ".gitignore")
+    with open(ignore, "w", encoding="utf-8") as output:
+        output.write("/.katana/runtime/\nwf-deadbe/.env\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "ignore runtime state"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    runtime = os.path.join(git_repo, ".katana", "runtime")
+    os.makedirs(runtime, exist_ok=True)
+    with open(os.path.join(runtime, "ledger.sqlite"), "w") as output:
+        output.write("runtime")
+
+    require_clean_working_tree(
+        git_repo,
+        allowed_ignored_paths=[runtime],
+    )
+
+    os.makedirs(os.path.join(git_repo, "wf-deadbe"), exist_ok=True)
+    with open(os.path.join(git_repo, "wf-deadbe", ".env"), "w") as output:
+        output.write("topic payload")
+    with pytest.raises(DirtyWorkTreeError, match="ignored"):
+        require_clean_working_tree(
+            git_repo,
+            allowed_ignored_paths=[runtime],
+        )
+
+
 def test_fail_stop_preserves_tracked_change_and_unlisted_sentinel(git_repo):
     base_sha = require_clean_working_tree(git_repo)
     keep = os.path.join(git_repo, ".gitkeep")

@@ -31,6 +31,10 @@ class MutationLockError(Exception):
     """Raised when the per-repository governed mutation lock is unavailable."""
 
 
+class RuntimeStateConfigurationError(Exception):
+    """Raised when opt-in runtime state is tracked by or visible to Git."""
+
+
 @dataclass(frozen=True)
 class FileImage:
     """Exact regular-file image used for transaction attestation/preservation."""
@@ -73,11 +77,36 @@ def head_sha(repo_root: str) -> str:
     return ""
 
 
-def is_working_tree_clean(repo_root: str) -> bool:
+def require_exact_git_root(repo_root: str) -> str:
+    """Return the canonical Git toplevel or reject a missing/nested root."""
+
+    resolved = Path(repo_root).resolve()
+    if not resolved.is_dir():
+        raise ValueError(f"Git repository root does not exist: {resolved}")
+    result = _run(str(resolved), "rev-parse", "--show-toplevel")
+    if result.returncode != 0 or not result.stdout.strip():
+        raise ValueError(f"not an existing Git repository: {resolved}")
+    discovered = Path(result.stdout.strip()).resolve()
+    if discovered != resolved:
+        raise ValueError(
+            "configured repo_root must equal the exact Git toplevel: "
+            f"{resolved} != {discovered}"
+        )
+    return str(resolved)
+
+
+def is_working_tree_clean(
+    repo_root: str,
+    *,
+    allowed_ignored_paths: list[str] | None = None,
+) -> bool:
     try:
-        r = _run(repo_root, "status", "--porcelain")
-        return r.returncode == 0 and r.stdout.strip() == ""
-    except (subprocess.SubprocessError, OSError):
+        require_clean_working_tree(
+            repo_root,
+            allowed_ignored_paths=allowed_ignored_paths,
+        )
+        return True
+    except (DirtyWorkTreeError, subprocess.SubprocessError, OSError):
         return False
 
 
@@ -91,6 +120,184 @@ def cas_guard(repo_root: str, expected_base_sha: str | None) -> None:
         raise CASRejectionError(
             f"CAS mismatch: expected {expected_base_sha[:8]}..., got {current[:8]}..."
         )
+
+
+def commit_is_ancestor(
+    repo_root: str,
+    ancestor_sha: str,
+    descendant: str = "HEAD",
+) -> bool:
+    if not ancestor_sha:
+        return False
+    result = _run(
+        repo_root, "merge-base", "--is-ancestor", ancestor_sha, descendant,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    detail = result.stderr.strip() or "git merge-base failed"
+    raise RollbackSafetyError(
+        f"cannot verify commit ancestry for {ancestor_sha}: {detail}"
+    )
+
+
+def commit_parents(repo_root: str, commit_sha: str) -> list[str]:
+    result = _run(repo_root, "rev-list", "--parents", "-n", "1", commit_sha)
+    if result.returncode != 0 or not result.stdout.strip():
+        detail = result.stderr.strip() or "git rev-list failed"
+        raise RollbackSafetyError(
+            f"cannot read commit parents for {commit_sha}: {detail}"
+        )
+    return result.stdout.split()[1:]
+
+
+def commit_changed_paths(repo_root: str, commit_sha: str) -> list[str]:
+    result = _run(
+        repo_root,
+        "diff-tree",
+        "--root",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "-z",
+        commit_sha,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git diff-tree failed"
+        raise RollbackSafetyError(
+            f"cannot read changed paths for {commit_sha}: {detail}"
+        )
+    paths = [path for path in result.stdout.split("\0") if path]
+    return validate_transaction_paths(repo_root, paths)
+
+
+def commit_file_image(
+    repo_root: str,
+    commit_sha: str,
+    path: str,
+) -> FileImage:
+    """Read one exact regular-file image from a commit tree."""
+    normalized = _normalize_transaction_path(repo_root, path)
+    try:
+        tree = subprocess.run(
+            [
+                "git",
+                "-C",
+                repo_root,
+                "ls-tree",
+                "--full-tree",
+                "-z",
+                commit_sha,
+                "--",
+                f":(literal){normalized}",
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise RollbackSafetyError(
+            f"cannot read committed image for {normalized!r}: {exc}"
+        ) from exc
+    if tree.returncode != 0:
+        detail = tree.stderr.decode(errors="replace").strip()
+        raise RollbackSafetyError(
+            f"cannot read committed image for {normalized!r}: "
+            f"{detail or 'git ls-tree failed'}"
+        )
+    entries = [entry for entry in tree.stdout.split(b"\0") if entry]
+    if not entries:
+        return FileImage(False)
+    if len(entries) != 1 or b"\t" not in entries[0]:
+        raise RollbackSafetyError(
+            f"ambiguous committed image for {normalized!r}"
+        )
+    header, committed_path = entries[0].split(b"\t", 1)
+    fields = header.split()
+    if (
+        len(fields) != 3
+        or committed_path.decode(errors="surrogateescape") != normalized
+    ):
+        raise RollbackSafetyError(
+            f"malformed committed image for {normalized!r}"
+        )
+    mode, object_type, object_sha = fields
+    if object_type != b"blob" or mode not in {b"100644", b"100755"}:
+        raise RollbackSafetyError(
+            f"committed target must be a regular file: {normalized!r}"
+        )
+    try:
+        blob = subprocess.run(
+            [
+                "git",
+                "-C",
+                repo_root,
+                "cat-file",
+                "blob",
+                object_sha.decode("ascii"),
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise RollbackSafetyError(
+            f"cannot read committed blob for {normalized!r}: {exc}"
+        ) from exc
+    if blob.returncode != 0:
+        detail = blob.stderr.decode(errors="replace").strip()
+        raise RollbackSafetyError(
+            f"cannot read committed blob for {normalized!r}: "
+            f"{detail or 'git cat-file failed'}"
+        )
+    file_mode = 0o755 if mode == b"100755" else 0o644
+    return FileImage(True, blob.stdout, file_mode)
+
+
+def find_commit_with_trailer(
+    repo_root: str,
+    key: str,
+    value: str,
+) -> str | None:
+    needle = f"{key}: {value}"
+    result = _run(
+        repo_root,
+        "log",
+        "-n",
+        "1",
+        "--format=%H",
+        "--fixed-strings",
+        f"--grep={needle}",
+        "HEAD",
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git log failed"
+        raise RollbackSafetyError(
+            f"cannot search mutation receipt {needle!r}: {detail}"
+        )
+    return result.stdout.strip() or None
+
+
+def read_katana_commit_trailers(
+    repo_root: str,
+    commit_sha: str,
+) -> dict[str, str]:
+    result = _run(repo_root, "show", "-s", "--format=%B", commit_sha)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git show failed"
+        raise RollbackSafetyError(
+            f"cannot read mutation receipt for {commit_sha}: {detail}"
+        )
+    trailers: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if not line.startswith("Katana-") or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        if key in trailers:
+            raise RollbackSafetyError(
+                f"duplicate reserved trailer {key!r} in {commit_sha}"
+            )
+        trailers[key] = value.strip()
+    return trailers
 
 
 @contextmanager
@@ -137,7 +344,63 @@ def repository_mutation_lock(
             lock_file.close()
 
 
-def require_clean_working_tree(repo_root: str) -> str:
+def _normalize_ignored_allowances(
+    repo_root: str,
+    paths: list[str] | None,
+) -> list[str]:
+    root = Path(repo_root).resolve()
+    normalized: list[str] = []
+    for raw_path in paths or []:
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            relative = candidate.resolve(strict=False).relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise DirtyWorkTreeError(
+                f"ignored runtime allowance escapes repository: {raw_path!r}"
+            ) from exc
+        if (
+            relative in {Path("."), Path("")}
+            or not relative.parts
+            or relative.parts[0] == ".git"
+        ):
+            raise DirtyWorkTreeError(
+                f"invalid ignored runtime allowance: {raw_path!r}"
+            )
+        value = relative.as_posix().rstrip("/")
+        if value not in normalized:
+            normalized.append(value)
+    return normalized
+
+
+def _ignored_untracked_paths(repo_root: str) -> list[str]:
+    try:
+        result = _run(
+            repo_root,
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise DirtyWorkTreeError(
+            f"cannot enumerate ignored repository payload: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git ls-files failed"
+        raise DirtyWorkTreeError(
+            f"cannot enumerate ignored repository payload: {detail}"
+        )
+    return [path for path in result.stdout.split("\0") if path]
+
+
+def require_clean_working_tree(
+    repo_root: str,
+    *,
+    allowed_ignored_paths: list[str] | None = None,
+) -> str:
     """Fail closed unless tracked, staged, and untracked state is clean.
 
     Returns the base HEAD used by the transaction fail-stop guard.
@@ -163,6 +426,23 @@ def require_clean_working_tree(repo_root: str) -> str:
         raise DirtyWorkTreeError(
             "governed mutation rejected: repository has tracked, staged, "
             "or untracked changes"
+        )
+    allowances = _normalize_ignored_allowances(
+        repo_root,
+        allowed_ignored_paths,
+    )
+    unexpected_ignored = [
+        path
+        for path in _ignored_untracked_paths(repo_root)
+        if not any(
+            path == allowed or path.startswith(f"{allowed}/")
+            for allowed in allowances
+        )
+    ]
+    if unexpected_ignored:
+        raise DirtyWorkTreeError(
+            "governed mutation rejected: repository has ignored untracked "
+            f"payload outside runtime state: {unexpected_ignored[0]!r}"
         )
     return base_sha
 
@@ -240,6 +520,60 @@ def validate_transaction_paths(repo_root: str, paths: list[str]) -> list[str]:
         if path not in normalized:
             normalized.append(path)
     return normalized
+
+
+def validate_runtime_state_paths(repo_root: str, paths: list[str]) -> list[str]:
+    """Validate runtime-only paths and require them to be ignored and untracked.
+
+    Runtime state intentionally lives outside the Git transaction journal.  This
+    validator is separate from transaction-path validation so ordinary ignored
+    content can never be smuggled into a governed data mutation.
+    """
+    normalized = validate_transaction_paths(repo_root, paths)
+    for path in normalized:
+        ignored = _run(
+            repo_root, "check-ignore", "-q", "--no-index", "--", path,
+        )
+        if ignored.returncode == 1:
+            raise RuntimeStateConfigurationError(
+                f"runtime state path must be ignored by Git: {path!r}"
+            )
+        if ignored.returncode != 0:
+            detail = ignored.stderr.strip() or "git check-ignore failed"
+            raise RuntimeStateConfigurationError(
+                f"cannot verify runtime state path {path!r}: {detail}"
+            )
+
+        tracked = _run(repo_root, "ls-files", "--error-unmatch", "--", path)
+        if tracked.returncode == 0:
+            raise RuntimeStateConfigurationError(
+                f"runtime state path must not be tracked by Git: {path!r}"
+            )
+        if tracked.returncode != 1:
+            detail = tracked.stderr.strip() or "git ls-files failed"
+            raise RuntimeStateConfigurationError(
+                f"cannot verify runtime state path {path!r}: {detail}"
+            )
+    return normalized
+
+
+def validate_runtime_state_tree(repo_root: str, directory: str) -> str:
+    """Require an ignored runtime directory to contain no tracked descendants."""
+    probe = os.path.join(directory, ".path-probe")
+    normalized_probe = validate_runtime_state_paths(repo_root, [probe])[0]
+    normalized_directory = Path(normalized_probe).parent.as_posix()
+    tracked = _run(repo_root, "ls-files", "--", f"{normalized_directory}/")
+    if tracked.returncode != 0:
+        detail = tracked.stderr.strip() or "git ls-files failed"
+        raise RuntimeStateConfigurationError(
+            f"cannot verify runtime state tree {normalized_directory!r}: {detail}"
+        )
+    if tracked.stdout:
+        raise RuntimeStateConfigurationError(
+            "runtime state directory contains tracked files: "
+            f"{normalized_directory!r}"
+        )
+    return normalized_directory
 
 
 def _read_file_image(repo_root: str, path: str) -> FileImage:
@@ -369,6 +703,21 @@ class TransactionJournal:
                 + ", ".join(missing)
             )
         return {path: self._expected[path] for path in normalized}
+
+    def effective_paths(self, paths: list[str]) -> list[str]:
+        """Return allowlisted paths whose postimage differs from clean HEAD."""
+        normalized = validate_transaction_paths(self.repo_root, paths)
+        missing = [path for path in normalized if path not in self._expected]
+        if missing:
+            raise RollbackSafetyError(
+                "transaction paths missing explicit journal entries: "
+                + ", ".join(missing)
+            )
+        return [
+            path
+            for path in normalized
+            if self._expected[path] != self._preimages[path]
+        ]
 
     def verify_worktree(self) -> None:
         for path, expected in self._expected.items():

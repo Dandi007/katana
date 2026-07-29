@@ -1,33 +1,59 @@
-"""test_integration.py — work-folder MCP 全状态图集成回归 gate。
+"""真实 server shell + kernel + Git 的 flat Work Folder lifecycle 集成门。"""
 
-把「真机 e2e」（PR #53 验收时手跑的 live probe）固化成确定性自动测试：
-驱动真实的 @mcp.tool() 薄壳（server.wf_*）+ 真实 fs_git_probe + 真实 artifacts I/O，
-走完整生命周期 create → save → resume(MATCH/DRIFT/BROKEN) → list → search，
-**无 svc、无 LLM、无网络**（仅 wf_search 的 vault-search 调用打桩）。
-
-回归意义：任何改动若破坏「BROKEN→blocked / 三态分类 / artifact seed / changelog」，
-本测试即红。补上之前只有手跑 e2e、没有自动门的缺口。
-"""
 from __future__ import annotations
 
 import asyncio
+import datetime
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
 import katana_work_folder_mcp.server as server
-from katana_kb_mcp_shared import vault_search as vs
+from katana_work_folder_mcp import lifecycle, reindex
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
+def _init_repo(repo: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Work Folder Test"],
+        cwd=repo,
+        check=True,
+    )
+    (repo / ".gitkeep").write_text("", encoding="utf-8")
+    (repo / ".gitignore").write_text("/.katana/runtime/\n", encoding="utf-8")
+    (repo / "INDEX.md").write_text(reindex.render_index([]), encoding="utf-8")
+    controls = repo / ".katana"
+    controls.mkdir()
+    (controls / "tombstones.json").write_text(
+        '{"tombstones": []}\n',
+        encoding="utf-8",
+    )
+    (controls / "flat-layout.json").write_text(
+        '{"layout": "flat-id-v1", "schema_version": 1}\n',
+        encoding="utf-8",
+    )
+    (controls / "legacy-manifest-inventory.json").write_text(
+        '{"manifests":[],"schema_version":1}\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
+
+
 def _context_snapshot(resource_path: str, branch: str = "-") -> str:
-    """生成一个带「关键路径」表的 context.md 快照。"""
     return (
-        "# Context\n\n**Updated:** 2026-06-22 14:00\n\n"
+        "# Context\n\n**Updated:** 2026-07-29 16:00\n\n"
         "## 工作上下文\n- 集成测试\n\n"
         "## 关键路径\n"
         "| 资源 | 路径 / 地址 | 分支 / 版本 | 备注 |\n"
@@ -37,149 +63,171 @@ def _context_snapshot(resource_path: str, branch: str = "-") -> str:
     )
 
 
+def _assert_public(payload, repo: Path) -> None:
+    rendered = json.dumps(payload, ensure_ascii=False, default=str)
+    assert str(repo) not in rendered
+    forbidden = {
+        "path",
+        "folder",
+        "wf_abs",
+        "absolute_path",
+        "index_path",
+        "resource_id",
+        "virtual_path",
+    }
+
+    def walk(value):
+        if isinstance(value, dict):
+            assert forbidden.isdisjoint(value)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(payload)
+
+
 @pytest.fixture
-def configured(tmp_path):
-    """把 server 绑定到 tmp 下的 work-folder 根。"""
-    kb = tmp_path
-    wfroot = tmp_path / "工作记录"
-    wfroot.mkdir()
-    server.configure(str(wfroot), str(kb))
-    return wfroot
+def configured(tmp_path, monkeypatch):
+    _init_repo(tmp_path)
+    server.configure(str(tmp_path))
+    monkeypatch.setattr(
+        server,
+        "_now",
+        lambda: datetime.datetime(2026, 7, 29, 16, 0, 0),
+    )
+    return tmp_path
 
-
-# ---------------------------------------------------------------------------
-# create → save → resume(MATCH)
-# ---------------------------------------------------------------------------
 
 def test_lifecycle_create_save_resume_match(configured, tmp_path):
-    # create：seed progress + context
     created = _run(server.wf_create("集成测试 冒烟"))
-    assert created["created"] is True
-    folder = created["path"]
-    assert (Path(folder) / "progress.md").exists()
-    assert (Path(folder) / "context.md").exists()
+    folder_id = created["folder_id"]
+    folder = configured / folder_id
+    assert folder.parent == configured
+    assert (folder / "progress.md").is_file()
+    assert (folder / "context.md").is_file()
 
-    # save：生成 CLAUDE.md + AGENTS.md（相同），追加 changelog
-    saved = _run(server.wf_save(folder, summary="集成存档"))
+    saved = _run(server.wf_save(folder_id, summary="集成存档"))
     assert saved["saved"] is True
-    claude = Path(folder) / "CLAUDE.md"
-    agents = Path(folder) / "AGENTS.md"
-    assert claude.exists() and agents.exists()
-    assert claude.read_text(encoding="utf-8") == agents.read_text(encoding="utf-8")
-    assert "集成存档" in (Path(folder) / "progress.md").read_text(encoding="utf-8")
+    assert (folder / "CLAUDE.md").read_text(encoding="utf-8") == (
+        folder / "AGENTS.md"
+    ).read_text(encoding="utf-8")
+    assert "集成存档" in (folder / "progress.md").read_text(encoding="utf-8")
 
-    # resume MATCH：context 指向一个存在的非 git 目录 → 真实 fs_git_probe 判 MATCH
     plain = tmp_path / "exists-plain"
     plain.mkdir()
-    context_saved = _run(server.wf_save(
-        folder,
-        summary="更新关键路径",
-        context_snapshot=_context_snapshot(str(plain)),
-    ))
-    assert context_saved["saved"] is True
-    res = _run(server.wf_resume(folder))
-    assert res["ok"] is True
-    assert res["verification"]["overall"] == "MATCH"
-    assert res["blocked"] is False
-    # resume 追加了一行 resume changelog
-    assert "resume" in (Path(folder) / "progress.md").read_text(encoding="utf-8")
+    _run(
+        server.wf_save(
+            folder_id,
+            summary="更新关键路径",
+            context_snapshot=_context_snapshot(str(plain)),
+        )
+    )
+    resumed = _run(server.wf_resume(folder_id))
+    assert resumed["verification"]["overall"] == "MATCH"
+    assert resumed["blocked"] is False
+    assert "resume" in (folder / "progress.md").read_text(encoding="utf-8")
+    for result in (created, saved, resumed):
+        _assert_public(result, configured)
 
-
-# ---------------------------------------------------------------------------
-# resume(BROKEN) — 头号不变量：blocked=True 且走阻塞契约
-# ---------------------------------------------------------------------------
 
 def test_resume_broken_blocks(configured):
-    folder = _run(server.wf_create("broken 场景"))["path"]
-    context_saved = _run(server.wf_save(
-        folder,
-        summary="更新关键路径",
-        context_snapshot=_context_snapshot("/nonexistent/wf-mcp-integration-xyz"),
-    ))
-    assert context_saved["saved"] is True
-    res = _run(server.wf_resume(folder))
-    assert res["ok"] is True
-    assert res["verification"]["overall"] == "BROKEN"
-    assert res["blocked"] is True
-    # 返回的是阻塞契约，且报告点名缺失路径
-    from katana_work_folder_mcp import lifecycle
-    assert res["contract"] == lifecycle.RESUME_BLOCKED_CONTRACT
-    assert "/nonexistent/wf-mcp-integration-xyz" in res["resume_report"]
-
-
-# ---------------------------------------------------------------------------
-# resume(DRIFT) — 真实 git repo + dirty
-# ---------------------------------------------------------------------------
-
-def test_resume_drift_real_dirty_git(configured, tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    def git(*args):
-        subprocess.run(
-            ["git", "-c", "user.email=ci@ci", "-c", "user.name=ci",
-             "-C", str(repo), *args],
-            check=True, capture_output=True, text=True,
+    folder_id = _run(server.wf_create("broken 场景"))["folder_id"]
+    missing = "/nonexistent/wf-mcp-integration-xyz"
+    _run(
+        server.wf_save(
+            folder_id,
+            summary="更新关键路径",
+            context_snapshot=_context_snapshot(missing),
         )
+    )
 
-    git("init", "-q")
-    (repo / "f.txt").write_text("x", encoding="utf-8")
-    git("add", "f.txt")
-    git("commit", "-qm", "init")
-    # 制造 dirty：新增未跟踪文件 → fs_git_probe.dirty=True → DRIFT
-    (repo / "untracked.txt").write_text("y", encoding="utf-8")
+    result = _run(server.wf_resume(folder_id))
 
-    folder = _run(server.wf_create("drift 场景"))["path"]
-    context_saved = _run(server.wf_save(
-        folder,
-        summary="更新关键路径",
-        context_snapshot=_context_snapshot(str(repo)),
-    ))
-    assert context_saved["saved"] is True
-    res = _run(server.wf_resume(folder))
-    assert res["ok"] is True
-    assert res["verification"]["overall"] == "DRIFT"
-    assert res["blocked"] is False
+    assert result["ok"] is True
+    assert result["verification"]["overall"] == "BROKEN"
+    assert result["blocked"] is True
+    assert result["contract"] == lifecycle.RESUME_BLOCKED_CONTRACT
+    assert missing in result["resume_report"]
 
 
-# ---------------------------------------------------------------------------
-# missing folder → ok=False, blocked=True（fail-safe）
-# ---------------------------------------------------------------------------
+def test_resume_drift_real_dirty_git(configured, tmp_path_factory):
+    repo = tmp_path_factory.mktemp("probe-repo")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "tracked.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
+    (repo / "untracked.txt").write_text("dirty", encoding="utf-8")
 
-def test_resume_missing_folder_is_blocked(configured):
-    res = _run(server.wf_resume(str(configured / "不存在的目录")))
-    assert res["ok"] is False
-    assert res["blocked"] is True
-
-
-# ---------------------------------------------------------------------------
-# list + search
-# ---------------------------------------------------------------------------
-
-def test_list_returns_active_candidates(configured):
-    _run(server.wf_create("候选 一"))
-    _run(server.wf_create("候选 二"))
-    lst = _run(server.wf_list(limit=5))
-    assert len(lst["candidates"]) >= 2
-    # 每条带 path/status/mtime
-    for c in lst["candidates"]:
-        assert "path" in c and "status" in c and "mtime" in c
-
-
-def test_search_routes_through_vault_search(configured, monkeypatch):
-    captured = {}
-
-    def fake_search(query, **kwargs):
-        captured["query"] = query
-        captured["dir"] = kwargs.get("dir")
-        return vs.SearchResponse(
-            results=[vs.SearchResult(path="工作记录/x.md", score=0.9, title="X", snippet="...")],
-            mode="hybrid",
+    folder_id = _run(server.wf_create("drift 场景"))["folder_id"]
+    _run(
+        server.wf_save(
+            folder_id,
+            context_snapshot=_context_snapshot(str(repo)),
         )
+    )
 
-    monkeypatch.setattr(server.vault_search, "search", fake_search)
-    res = _run(server.wf_search("vault 搜索 service", top_k=3))
-    assert isinstance(res, list)
-    assert res[0]["path"] == "工作记录/x.md"
-    # scope 传到了 work-folder 子树
-    assert captured["dir"] == server._scope
+    result = _run(server.wf_resume(folder_id))
+
+    assert result["verification"]["overall"] == "DRIFT"
+    assert result["blocked"] is False
+
+
+def test_missing_and_noncanonical_folder_ids_fail_safe(configured):
+    missing = _run(server.wf_resume("wf-deadbe"))
+    invalid = _run(server.wf_resume("../escape"))
+
+    assert missing["ok"] is False and missing["blocked"] is True
+    assert invalid["ok"] is False and invalid["blocked"] is True
+    _assert_public(missing, configured)
+    _assert_public(invalid, configured)
+
+
+def test_list_search_and_reindex_are_locator_free(configured, monkeypatch):
+    first = _run(server.wf_create("候选一"))["folder_id"]
+    second = _run(server.wf_create("候选二"))["folder_id"]
+
+    listed = _run(server.wf_list(limit=5))
+    assert {item["folder_id"] for item in listed["candidates"]} >= {first, second}
+
+    monkeypatch.setattr(
+        server.vault_search,
+        "search",
+        lambda query, top_k: type(
+            "Response",
+            (),
+            {
+                "results": [
+                    type(
+                        "Hit",
+                        (),
+                        {
+                            "path": f"{first}/findings.md",
+                            "score": 0.9,
+                            "title": "X",
+                            "snippet": "...",
+                        },
+                    )()
+                ]
+            },
+        )(),
+    )
+    searched = _run(server.wf_search("候选", top_k=3))
+    assert searched == [
+        {
+            "folder_id": first,
+            "filename": "findings.md",
+            "score": 0.9,
+            "title": "X",
+            "snippet": "...",
+        }
+    ]
+
+    indexed = _run(server.wf_reindex())
+    assert indexed["indexed"] >= 2
+    assert (configured / "INDEX.md").is_file()
+    for result in (listed, searched, indexed):
+        _assert_public(result, configured)

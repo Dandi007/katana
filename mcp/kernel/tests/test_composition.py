@@ -68,6 +68,30 @@ def _setup_kernel_and_store(repo_root):
     return kernel, store
 
 
+def test_kernel_bind_rejects_nested_repo_root_without_git_init():
+    repo_root, tenant = _make_git_repo()
+    try:
+        nested = os.path.join(repo_root, tenant)
+        kernel = GovernedKernel()
+        with pytest.raises(ValueError, match="exact Git toplevel"):
+            kernel.bind(
+                "memory",
+                _memory_policy(),
+                GovernedVFS(nested),
+                ResourceIdLedger(
+                    os.path.join(nested, ".katana", "tombstones.json")
+                ),
+                TransactionManifest(
+                    os.path.join(nested, ".katana", "manifests")
+                ),
+                nested,
+            )
+        assert not os.path.exists(os.path.join(nested, ".git"))
+    finally:
+        import shutil
+        shutil.rmtree(repo_root, ignore_errors=True)
+
+
 # --- 1. CAS: stale expected_base_sha rejected (spec L27) ---
 
 def test_composition_cas_rejects_stale_sha():

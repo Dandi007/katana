@@ -1,3 +1,3 @@
-# Work Folder
+# Work Folder MCP
 
-跨 session / 多阶段 / brainstorm→plan→execute 的持续性工作，先在 `docs/work-records/YYYY/MM/DD/<topic-slug>/` 建或绑定 work folder（用户给定路径优先）；control 文件：`golden-order`(用户拍板，最高优先级) / `goal` / `spec` / `plan` / `progress` / `findings` / `context`。恢复时读 `progress`→`context` 接续。各 artifact 的格式、字段、读取优先级随 `work-folder:checkpoint` 调用载入（见其 `references/artifact-formats.md`），不在此常驻。
+Work Folder 只经 work-folder MCP 访问。`folder_id` 是 opaque token：只从 `wf_create`、`wf_search` 或 `wf_list` 的返回值取得并原样传给后续 tool；不得推导、拼接或解析为 client 路径，也不得用原生文件工具访问。生命周期用 `wf_create` / `wf_search` / `wf_list` / `wf_resume` / `wf_save`；文件按 `folder_id` + folder-relative `filename` 用 `fs_read` / `fs_stat` / `fs_list` / `fs_create` / `fs_write` / `fs_edit`。新文件用 `fs_create`；`fs_write` 只覆盖已存在文件，不会隐式创建。所有 mutation 由 MCP server 经治理事务自动 Git commit。`wf_resume` 返回 BROKEN 时必须停止，只报告阻塞并等待用户决策。

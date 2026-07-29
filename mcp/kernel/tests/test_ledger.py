@@ -2,8 +2,11 @@
 
 import os
 import tempfile
+from pathlib import Path
 
-from katana_kernel.ledger import ResourceIdLedger
+import pytest
+
+from katana_kernel.ledger import LedgerError, ResourceIdLedger
 
 
 def test_ledger_gen_id_format():
@@ -48,3 +51,37 @@ def test_ledger_persistence():
     ledger.tombstone(i)
     ledger2 = ResourceIdLedger(path)
     assert ledger2.is_tombstoned(i)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{not-json",
+        "[]",
+        '{"tombstones": "m-deadbe"}',
+        '{"tombstones": [1]}',
+        '{"tombstones": ["wrong-deadbe"]}',
+        '{"tombstones": ["m-deadbee"]}',
+    ],
+)
+def test_ledger_corrupt_or_invalid_payload_fails_closed(payload):
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "tombstones.json")
+    with open(path, "w", encoding="utf-8") as output:
+        output.write(payload)
+
+    with pytest.raises(LedgerError):
+        ResourceIdLedger(path)
+
+
+def test_rollback_tombstone_is_persisted():
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "tombstones.json")
+    ledger = ResourceIdLedger(path)
+    resource_id = "m-deadbe"
+    ledger.tombstone(resource_id)
+
+    ledger.rollback_tombstone(resource_id)
+
+    assert not ResourceIdLedger(path).is_tombstoned(resource_id)
+    assert not list(Path(d).glob("*.tmp-*"))

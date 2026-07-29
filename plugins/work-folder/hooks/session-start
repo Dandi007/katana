@@ -4,41 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Source shared config parser
-source "${SCRIPT_DIR}/katana-config.sh"
-
-# Read work-folder path from config (env > .katana > default)
-WF_PATH="$(katana_config_get "work_folder_path" "docs/work-records" "KATANA_WORK_FOLDER")"
-
-# Sanitize via a locale-independent denylist: reject path traversal and
-# shell-dangerous characters, while allowing alnum, / _ . - space and any
-# non-ASCII (e.g. CJK) path. An allowlist regex with a multibyte range
-# (`一-鿿`) is invalid under a C locale and would reject even ASCII paths in
-# headless/CI shells — `case` globbing is byte-based and locale-safe.
-case "$WF_PATH" in
-    *".."* | *'`'* | *'$'* | *';'* | *'&'* | *'|'* | *'<'* | *'>'* \
-    | *'('* | *')'* | *'{'* | *'}'* | *'['* | *']'* | *'*'* | *'?'* \
-    | *'!'* | *'~'* | *'"'* | *"'"* | *'\'* | *$'\n'* | *$'\t'*)
-        echo "Error: work_folder_path contains invalid characters or path traversal: $WF_PATH" >&2
-        exit 1
-        ;;
-esac
-
-# per-suite 开关：mcp 模式不灌 full work-folder rules，只注一行触发器（二选一）
-WF_INTERFACE="$(katana_config_get "work_folder_interface" "skill" "KATANA_WORK_FOLDER_INTERFACE")"
-
-if [ "$WF_INTERFACE" = "mcp" ]; then
-    content="本项目 work-folder 走 MCP（非 skill 模式）：跨 session 工作先调 wf_create 建新 / wf_resume 恢复（resume 时 server 实跑环境验证，返回 MATCH/DRIFT/BROKEN；BROKEN 必停、只报阻塞勿进入工作状态）；存档调 wf_save（server 强制追加 progress changelog、覆盖 context 快照、重生成 Resume Guide）；找历史工作记录用 wf_search，据返回的逻辑路径深挖须用 work-folder MCP 的 fs_read/fs_glob/fs_list。协议细节由各 tool 返回值下发。"
-else
-    # Legacy skill mode still substitutes the client-visible absolute path.
-    WF_ABS="$(katana_resolve_path "$WF_PATH")"
-    # Read the template and substitute the path
-    content=$(cat "${PLUGIN_ROOT}/rules/work-folder.md" 2>/dev/null || true)
-    [ -z "$content" ] && exit 0
-
-    # Replace the default path in the template with the configured (absolute) path
-    content="${content//docs\/work-records/${WF_ABS}}"
-fi
+# Work Folder 已是 MCP-only 接口。SessionStart 不读取 .katana、环境变量或
+# client-side 物理路径；只注入稳定的 opaque-ID 使用契约。
+content=$(cat "${PLUGIN_ROOT}/rules/work-folder.md" 2>/dev/null || true)
+[ -z "$content" ] && exit 0
 
 escape_for_json() {
     local s="$1"
