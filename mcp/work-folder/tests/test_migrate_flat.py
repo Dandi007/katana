@@ -202,6 +202,58 @@ def test_inventory_accepts_only_date_topic_anchors_and_classifies_controls(
     assert inventory["source_head"] == _git(repo, "rev-parse", "HEAD")
 
 
+def test_tracked_root_gitkeep_is_preserved_end_to_end(
+    flat_repo: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    repo, legacy_root = flat_repo
+    gitkeep = repo / ".gitkeep"
+    original = b"keep flat root tracked\n"
+    gitkeep.write_bytes(original)
+    _commit_all(repo, "add tracked root gitkeep")
+
+    inventory = build_inventory(repo, legacy_root)
+    root_control = next(
+        control
+        for control in inventory["controls"]
+        if control["repo_relative_path"] == ".gitkeep"
+    )
+
+    assert inventory["ok"] is True
+    assert root_control["classification"] == "root-control"
+    assert root_control["entries"] == [{
+        "relative_path": ".gitkeep",
+        "kind": "regular_file",
+        "sha256": hashlib.sha256(original).hexdigest(),
+        "size": len(original),
+        "git_tracked": True,
+    }]
+
+    plan = build_plan(inventory)
+    assert ".gitkeep" not in plan["expected_diff_paths"]
+    assert not any(
+        action.get("source_repo_path") == ".gitkeep"
+        for action in plan["control_actions"]
+    )
+
+    sentinel = _write_sentinel(tmp_path, plan)
+    result = apply_plan(
+        plan,
+        repo,
+        legacy_root,
+        expected_head=plan["source_head"],
+        expected_plan_hash=plan["plan_hash"],
+        maintenance_sentinel=sentinel,
+    )
+    verification = verify_plan(plan, repo, legacy_root)
+
+    assert result["verification"]["ok"] is True
+    assert verification["ok"] is True
+    assert gitkeep.read_bytes() == original
+    assert _git(repo, "ls-files", "--error-unmatch", ".gitkeep") == ".gitkeep"
+    assert ".gitkeep" not in verification["verified_diff_paths"]
+
+
 @pytest.mark.parametrize(
     ("relative_path", "error_code"),
     [

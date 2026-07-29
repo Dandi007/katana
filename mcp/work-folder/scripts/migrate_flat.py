@@ -58,6 +58,7 @@ REPO_ROOT_CONTROL_NAMES = {
     "AGENTS.md",
     "CLAUDE.md",
     ".gitignore",
+    ".gitkeep",
     ".katana",
     "MIGRATION_BASE.json",
 }
