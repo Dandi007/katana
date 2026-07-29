@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from katana_kernel.gitops import TransactionJournal
     from katana_kernel.policy import DomainPolicy
 
 
@@ -21,6 +22,17 @@ class GovernedVFS:
         if not self._root.is_dir():
             raise VFSError(f"VFS root is not a directory: {self._root}")
         self._policy = policy
+        self._transaction_journal: TransactionJournal | None = None
+
+    def begin_transaction(self, journal: TransactionJournal) -> None:
+        if self._transaction_journal is not None:
+            raise VFSError("VFS transaction already active")
+        self._transaction_journal = journal
+
+    def end_transaction(self, journal: TransactionJournal) -> None:
+        if self._transaction_journal is not journal:
+            raise VFSError("VFS transaction journal mismatch")
+        self._transaction_journal = None
 
     @property
     def root(self) -> str:
@@ -63,18 +75,32 @@ class GovernedVFS:
     def write(self, path: str, content: str, op: str = "write", args: dict | None = None):
         self._check_write(op, args)
         resolved = self._resolve(path)
+        if self._transaction_journal is not None:
+            self._transaction_journal.record_write(
+                path, content.encode("utf-8"),
+            )
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content, encoding="utf-8")
+        if self._transaction_journal is not None:
+            self._transaction_journal.confirm_write(
+                path, content.encode("utf-8"),
+            )
 
     def write_bytes(self, path: str, content: bytes, op: str = "write", args: dict | None = None):
         self._check_write(op, args)
         resolved = self._resolve(path)
+        if self._transaction_journal is not None:
+            self._transaction_journal.record_write(path, content)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_bytes(content)
+        if self._transaction_journal is not None:
+            self._transaction_journal.confirm_write(path, content)
 
     def delete(self, path: str, op: str = "delete", args: dict | None = None):
         self._check_write(op, args)
         resolved = self._resolve(path)
+        if self._transaction_journal is not None:
+            self._transaction_journal.record_delete(path)
         if resolved.is_file():
             resolved.unlink()
         elif resolved.is_dir():
@@ -98,6 +124,8 @@ class GovernedVFS:
         dst = self._resolve(new_path)
         if dst.exists():
             raise VFSError(f"rename target already exists: {new_path}")
+        if self._transaction_journal is not None:
+            self._transaction_journal.record_rename(old_path, new_path)
         dst.parent.mkdir(parents=True, exist_ok=True)
         src.rename(dst)
 

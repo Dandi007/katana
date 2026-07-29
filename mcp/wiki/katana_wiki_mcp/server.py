@@ -14,6 +14,7 @@ from katana_kernel import (
     DomainPolicy,
     GovernedKernel,
     GovernedVFS,
+    MutationBrokenError,
     ResourceIdLedger,
     TransactionManifest,
 )
@@ -25,6 +26,13 @@ from katana_wiki_mcp import pages as _pages
 from katana_wiki_mcp import query as _query
 from katana_wiki_mcp.store import WikiStore, _wiki_policy
 from katana_wiki_mcp.fs_tools import FSTools
+
+
+def _server_mutation(call) -> dict:
+    try:
+        return call()
+    except MutationBrokenError as exc:
+        return exc.as_error()
 
 mcp = FastMCP(
     "katana-wiki-mcp",
@@ -115,11 +123,13 @@ async def wiki_query(question: str, top_k: int = 10) -> dict:
         question: 问题文本。
         top_k: 候选上限，默认 10。
     """
-    return _query._do_query(
-        question, _scope, _wiki_root or ".", top_k,
-        search_fn=vault_search.search,
-        log_fn=_governed_append_log,
-        now_fn=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+    return _server_mutation(
+        lambda: _query._do_query(
+            question, _scope, _wiki_root or ".", top_k,
+            search_fn=vault_search.search,
+            log_fn=_governed_append_log,
+            now_fn=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        )
     )
 
 
@@ -137,7 +147,11 @@ async def wiki_ingest_apply(proposal: dict,
     Args: proposal 见 wiki_ingest_plan 返回的 proposal_schema。expected_base_sha 可选 CAS 校验。返回 applied/rejected/commit。"""
     if _store is None:
         raise RuntimeError("wiki store not initialized; call configure() first")
-    return _store.ingest_apply(proposal, expected_base_sha=expected_base_sha)
+    return _server_mutation(
+        lambda: _store.ingest_apply(
+            proposal, expected_base_sha=expected_base_sha,
+        )
+    )
 
 
 @mcp.tool()

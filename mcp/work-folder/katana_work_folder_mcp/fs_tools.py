@@ -19,9 +19,9 @@ from katana_kernel import (
     CASRejectionError,
     GovernedKernel,
     GovernedVFS,
+    MutationBrokenError,
     head_sha,
 )
-from katana_kernel.gitops import _restore_tree
 from katana_kernel.policy import PolicyViolationError
 from katana_kernel.vfs import VFSError
 from katana_work_folder_mcp.brief import (
@@ -50,6 +50,7 @@ _ERROR_CODES = {
     "RESOURCE_NOT_FOUND",
     "RESOURCE_EXISTS",
     "OPERATION_FAILED",
+    "BROKEN",
 }
 
 _EXCLUDE_DIRS = {".git", ".katana"}
@@ -91,6 +92,12 @@ def _make_error(
     if violations is not None:
         err["violations"] = violations
     return err
+
+
+def _make_operation_error(exc: Exception, **context: Any) -> dict:
+    if isinstance(exc, MutationBrokenError):
+        return exc.as_error(**context)
+    return _make_error("OPERATION_FAILED", str(exc), **context)
 
 
 def _content_hash(content: str) -> str:
@@ -833,6 +840,8 @@ class FSTools:
 
         elif op_name == "fs_edit":
             path = op_args.get("path", "")
+            old_string = op_args.get("old_string", "")
+            replace_all = op_args.get("replace_all", False)
             resource_id = op_args.get("resource_id")
             if resource_id is not None:
                 if self._binding.ledger.is_tombstoned(resource_id):
@@ -847,6 +856,27 @@ class FSTools:
                     return _make_error(
                         "RESOURCE_NOT_FOUND",
                         f"batch op {index}: file not found: {path}",
+                        virtual_path=path, current_commit=commit, retryable=False,
+                    )
+            except VFSError as e:
+                return _make_error(
+                    "INVALID_PATH", str(e),
+                    virtual_path=path, current_commit=commit, retryable=False,
+                )
+            try:
+                current_content = self._vfs.read_text(path)
+                match_count = current_content.count(old_string)
+                if not old_string or match_count == 0:
+                    return _make_error(
+                        "INVALID_CONTENT",
+                        f"batch op {index}: old_string not found in {path}",
+                        virtual_path=path, current_commit=commit, retryable=False,
+                    )
+                if match_count > 1 and not replace_all:
+                    return _make_error(
+                        "INVALID_CONTENT",
+                        f"batch op {index}: old_string occurs {match_count} times in {path}; "
+                        "set replace_all=true or provide more context",
                         virtual_path=path, current_commit=commit, retryable=False,
                     )
             except VFSError as e:
@@ -1509,9 +1539,8 @@ class FSTools:
                 virtual_path=path, current_commit=self._commit(), retryable=False,
             )
         except Exception as e:
-            _restore_tree(self._repo_root)
-            return _make_error(
-                "OPERATION_FAILED", str(e),
+            return _make_operation_error(
+                e,
                 virtual_path=path, current_commit=self._commit(), retryable=False,
             )
 
@@ -1672,9 +1701,8 @@ class FSTools:
                 virtual_path=path, current_commit=self._commit(), retryable=False,
             )
         except Exception as e:
-            _restore_tree(self._repo_root)
-            return _make_error(
-                "OPERATION_FAILED", str(e),
+            return _make_operation_error(
+                e,
                 virtual_path=path, current_commit=self._commit(), retryable=False,
             )
 
@@ -1856,9 +1884,8 @@ class FSTools:
                 current_commit=self._commit(), retryable=False,
             )
         except Exception as e:
-            _restore_tree(self._repo_root)
-            return _make_error(
-                "OPERATION_FAILED", str(e),
+            return _make_operation_error(
+                e,
                 resource_id=old_rid, virtual_path=path,
                 current_commit=self._commit(), retryable=False,
             )
@@ -2019,9 +2046,8 @@ class FSTools:
                 current_commit=self._commit(), retryable=False,
             )
         except Exception as e:
-            _restore_tree(self._repo_root)
-            return _make_error(
-                "OPERATION_FAILED", str(e),
+            return _make_operation_error(
+                e,
                 resource_id=source_rid, virtual_path=source,
                 current_commit=self._commit(), retryable=False,
             )
@@ -2209,9 +2235,8 @@ class FSTools:
                 current_commit=self._commit(), retryable=False,
             )
         except Exception as e:
-            _restore_tree(self._repo_root)
-            return _make_error(
-                "OPERATION_FAILED", str(e),
+            return _make_operation_error(
+                e,
                 resource_id=source_rid, virtual_path=source,
                 current_commit=self._commit(), retryable=False,
             )
@@ -2323,9 +2348,8 @@ class FSTools:
                 current_commit=self._commit(), retryable=False,
             )
         except Exception as e:
-            _restore_tree(self._repo_root)
-            return _make_error(
-                "OPERATION_FAILED", str(e),
+            return _make_operation_error(
+                e,
                 resource_id=rid, virtual_path=path,
                 current_commit=self._commit(), retryable=False,
             )
@@ -2588,27 +2612,23 @@ class FSTools:
                 current_commit=self._commit(), retryable=True,
             )
         except BatchOpError as e:
-            _restore_tree(self._repo_root)
             return _make_error(
                 e.code, str(e),
                 current_commit=self._commit(), retryable=False,
             )
         except PolicyViolationError as e:
-            _restore_tree(self._repo_root)
             return _make_error(
                 "POLICY_VIOLATION", str(e),
                 current_commit=self._commit(), retryable=False,
             )
         except ValueError as e:
-            _restore_tree(self._repo_root)
             return _make_error(
                 "INVALID_CONTENT", str(e),
                 current_commit=self._commit(), retryable=False,
             )
         except Exception as e:
-            _restore_tree(self._repo_root)
-            return _make_error(
-                "OPERATION_FAILED", str(e),
+            return _make_operation_error(
+                e,
                 current_commit=self._commit(), retryable=False,
             )
 

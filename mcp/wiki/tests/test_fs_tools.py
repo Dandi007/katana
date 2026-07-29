@@ -12,6 +12,7 @@ import subprocess
 import pytest
 from fastmcp import Client
 
+from katana_kernel import MutationBrokenError
 from katana_wiki_mcp import server as _server_mod
 from katana_wiki_mcp.fs_tools import FSTools, ID_RE
 
@@ -173,6 +174,41 @@ def test_fs_capabilities_via_mcp(srv):
     result = _call(mcp, "fs_capabilities")
     assert "capabilities" in result
     assert "fs_read" in result["capabilities"]["operations"]
+
+
+def test_fs_create_broken_is_machine_readable_and_never_success(
+    tools, monkeypatch,
+):
+    broken = MutationBrokenError(
+        "manual recovery required",
+        {"state": "BROKEN", "paths": ["broken.md"]},
+    )
+
+    def _raise_broken(*args, **kwargs):
+        raise broken
+
+    monkeypatch.setattr(tools._kernel, "mutate", _raise_broken)
+    result = tools.fs_create("broken.md", _page("broken"))
+
+    assert result["code"] == "BROKEN"
+    assert result["state"] == "BROKEN"
+    assert result["blocked"] is True
+    assert result["manual_recovery_required"] is True
+    assert "git" not in result
+
+
+def test_wiki_server_broken_envelope_is_not_success():
+    broken = MutationBrokenError(
+        "manual recovery required",
+        {"state": "BROKEN", "paths": ["broken.md"]},
+    )
+    result = _server_mod._server_mutation(
+        lambda: (_ for _ in ()).throw(broken)
+    )
+
+    assert result["code"] == result["state"] == "BROKEN"
+    assert result["blocked"] is True
+    assert "git" not in result
 
 
 # ── fs_resolve ───────────────────────────────────────────────────────────────
@@ -920,6 +956,55 @@ def test_fs_batch_expected_base_commit_success(tools):
         {"op": "fs_create", "args": {"path": "batch-commit-2.md", "content": _page("batch-commit-2")}},
     ], expected_base_commit=sha)
     assert result["node_type"] == "batch"
+
+
+def test_fs_batch_broken_direct_returns_machine_envelope(tools, monkeypatch):
+    broken = MutationBrokenError(
+        "manual recovery required",
+        {"state": "BROKEN", "paths": ["batch-broken.md"]},
+    )
+
+    def _raise_broken(*args, **kwargs):
+        raise broken
+
+    monkeypatch.setattr(tools._kernel, "mutate", _raise_broken)
+    result = tools.fs_batch([
+        {"op": "fs_create", "args": {
+            "path": "batch-broken.md",
+            "content": _page("batch-broken"),
+        }},
+    ])
+
+    assert result["code"] == result["state"] == "BROKEN"
+    assert result["blocked"] is True
+    assert result["manual_recovery_required"] is True
+    assert "git" not in result
+
+
+def test_fs_batch_broken_via_mcp_returns_machine_envelope(srv, monkeypatch):
+    mcp, _, tools = srv
+    broken = MutationBrokenError(
+        "manual recovery required",
+        {"state": "BROKEN", "paths": ["mcp-batch-broken.md"]},
+    )
+
+    def _raise_broken(*args, **kwargs):
+        raise broken
+
+    monkeypatch.setattr(tools._kernel, "mutate", _raise_broken)
+    result = _call(mcp, "fs_batch", {
+        "operations": [
+            {"op": "fs_create", "args": {
+                "path": "mcp-batch-broken.md",
+                "content": _page("mcp-batch-broken"),
+            }},
+        ],
+    })
+
+    assert result["code"] == result["state"] == "BROKEN"
+    assert result["blocked"] is True
+    assert result["manual_recovery_required"] is True
+    assert "git" not in result
 
 
 def test_fs_batch_edit(tools):

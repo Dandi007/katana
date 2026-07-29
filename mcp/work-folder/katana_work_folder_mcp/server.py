@@ -21,6 +21,7 @@ from katana_kb_mcp_shared import config, vault_search
 from katana_kernel import (
     GovernedKernel,
     GovernedVFS,
+    MutationBrokenError,
     ResourceIdLedger,
     TransactionManifest,
 )
@@ -42,6 +43,13 @@ _wf_root: str | None = None
 _kernel: GovernedKernel | None = None
 _store: WorkFolderStore | None = None
 _fs_tools: FSTools | None = None
+
+
+def _server_mutation(call) -> dict:
+    try:
+        return call()
+    except MutationBrokenError as exc:
+        return exc.as_error()
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +194,11 @@ async def wf_create(topic: str,
     """
     if _store is None:
         raise RuntimeError("work-folder store not initialized; call configure() first")
-    result = _store.create(topic, now_fn=_now, expected_base_sha=expected_base_sha)
+    result = _server_mutation(
+        lambda: _store.create(
+            topic, now_fn=_now, expected_base_sha=expected_base_sha,
+        )
+    )
     result = _patch_store_result(result, "path")
     # D3: 增返 folder_id（folder 的 _brief id），让 agent 可 by-id 寻址 fs_*，
     # 不依赖物理路径推导（双重嵌套 bug 的治本）。保留 path 字段做向后兼容。
@@ -245,15 +257,17 @@ async def wf_save(
         raise RuntimeError("work-folder store not initialized; call configure() first")
     abs_folder = _resolve_folder(folder)
     rel_folder = _rel_folder(abs_folder)
-    result = _store.save(
-        rel_folder,
-        now_fn=_now,
-        summary=summary,
-        context_snapshot=context_snapshot,
-        resume_fields=_safe_resume_fields(resume_fields),
-        golden_order_additions=golden_order_additions,
-        findings_addition=findings_addition,
-        expected_base_sha=expected_base_sha,
+    result = _server_mutation(
+        lambda: _store.save(
+            rel_folder,
+            now_fn=_now,
+            summary=summary,
+            context_snapshot=context_snapshot,
+            resume_fields=_safe_resume_fields(resume_fields),
+            golden_order_additions=golden_order_additions,
+            findings_addition=findings_addition,
+            expected_base_sha=expected_base_sha,
+        )
     )
     return _patch_store_result(result, "folder")
 
@@ -275,7 +289,11 @@ async def wf_resume(folder: str,
         raise RuntimeError("work-folder store not initialized; call configure() first")
     abs_folder = _resolve_folder(folder)
     rel_folder = _rel_folder(abs_folder)
-    result = _store.resume(rel_folder, now_fn=_now, expected_base_sha=expected_base_sha)
+    result = _server_mutation(
+        lambda: _store.resume(
+            rel_folder, now_fn=_now, expected_base_sha=expected_base_sha,
+        )
+    )
     return _patch_store_result(result, "folder")
 
 
@@ -293,7 +311,11 @@ async def wf_reindex(dry_run: bool = False,
     """
     if _store is None:
         raise RuntimeError("work-folder store not initialized; call configure() first")
-    result = _store.reindex(dry_run=dry_run, expected_base_sha=expected_base_sha)
+    result = _server_mutation(
+        lambda: _store.reindex(
+            dry_run=dry_run, expected_base_sha=expected_base_sha,
+        )
+    )
     return _patch_store_result(result, "index_path")
 
 
