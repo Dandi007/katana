@@ -93,6 +93,35 @@ def test_ingest_apply_rejects_invalid_with_zero_writes(wiki_repo):
     assert _head(wiki_repo) == head_before
 
 
+@pytest.mark.parametrize("character", ["\x00", "\n", "\t", "\x7f"])
+def test_ingest_apply_rejects_control_character_path_with_zero_writes(
+    wiki_repo, character
+):
+    head_before = _head(wiki_repo)
+    page = _valid_page()
+    path = f"坏{character}页.md"
+    page["path"] = path
+
+    res = _run(
+        server.wiki_ingest_apply(
+            {"new_pages": [page], "log_line": "## control-character path"}
+        )
+    )
+
+    assert res["applied"] is False
+    assert any(
+        "control characters" in error
+        for error in res["rejected"][path]
+    )
+    assert _head(wiki_repo) == head_before
+    assert not subprocess.run(
+        ["git", "-C", str(wiki_repo), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
 def test_ingest_apply_atomic_all_or_nothing(wiki_repo):
     """一好一坏混在一个 proposal：整体拒，好页也不落盘。"""
     head_before = _head(wiki_repo)

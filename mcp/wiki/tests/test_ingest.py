@@ -335,6 +335,33 @@ def test_apply_rejects_windows_paths(wiki, path):
     assert any("Windows" in error for error in out["rejected"][path])
 
 
+@pytest.mark.parametrize("character", ["\x00", "\n", "\t", "\x7f"])
+def test_canonical_path_rejects_control_characters_before_path_access(
+    wiki, monkeypatch, character
+):
+    class UnexpectedPathAccess:
+        def __init__(self, *_args, **_kwargs):
+            pytest.fail("control-character paths must be rejected before Path access")
+
+    monkeypatch.setattr(ingest, "Path", UnexpectedPathAccess)
+    path = f"Zettelkasten/坏{character}页.md"
+
+    canonical, error = ingest._canonical_path(str(wiki), path)
+
+    assert canonical is None
+    assert error is not None
+    assert "control characters" in error
+
+
+def test_canonical_path_preserves_legal_unicode(wiki):
+    path = "Zettelkasten/合法-é-😀.md"
+
+    canonical, error = ingest._canonical_path(str(wiki), path)
+
+    assert canonical == path
+    assert error is None
+
+
 @pytest.mark.parametrize(
     ("content", "expected"),
     [

@@ -104,6 +104,8 @@ def _canonical_path(wiki_root: str, raw_path: object) -> tuple[str | None, str |
     """Return a canonical POSIX relative path confined under wiki_root."""
     if not isinstance(raw_path, str) or not raw_path:
         return None, "path must be a non-empty string"
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in raw_path):
+        return None, "C0 control characters and DEL are not allowed in paths"
     if (
         "\\" in raw_path
         or raw_path.startswith("//")

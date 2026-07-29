@@ -733,6 +733,30 @@ def test_ingest_store_rejects_parent_traversal():
         shutil.rmtree(repo_root, ignore_errors=True)
 
 
+@pytest.mark.parametrize("character", ["\x00", "\n", "\t", "\x7f"])
+def test_ingest_store_rejects_control_character_path_with_zero_writes(character):
+    repo_root = _make_git_repo()
+    try:
+        _, store = _setup_kernel_and_store(repo_root)
+        proposal = _valid_proposal()
+        path = f"Zettelkasten/坏{character}页.md"
+        proposal["new_pages"][0]["path"] = path
+        head_before = head_sha(repo_root)
+
+        result = store.ingest_apply(proposal)
+
+        assert result["applied"] is False
+        assert any(
+            "control characters" in error
+            for error in result["rejected"][path]
+        )
+        assert head_sha(repo_root) == head_before
+        assert is_working_tree_clean(repo_root)
+    finally:
+        import shutil
+        shutil.rmtree(repo_root, ignore_errors=True)
+
+
 def test_ingest_store_rejects_symlink_path():
     repo_root = _make_git_repo()
     outside = tempfile.mkdtemp()
