@@ -18,6 +18,7 @@ import pytest
 
 import katana_wiki_mcp.server as server
 from katana_kb_mcp_shared import vault_search as vs
+from katana_kernel import CASRejectionError
 
 
 def _run(coro):
@@ -38,7 +39,9 @@ def wiki_repo(tmp_path):
     git("config", "user.name", "ci")
     # 既有页（接收反链）+ 初始 commit
     (wiki / "existing.md").write_text(
-        "---\n类型: 卡片\n---\n既有正文 [[某概念]]\n", encoding="utf-8")
+        "---\nid: w-a1b2c3\n创建日期: 2026-06-20 09:00\n"
+        "tags: [legacy]\n类型: 卡片\n---\n既有正文 [[某概念]]\n",
+        encoding="utf-8")
     git("add", "-A")
     git("commit", "-qm", "init")
 
@@ -62,7 +65,7 @@ def _valid_page(path: str = "新概念.md") -> dict:
             "摘要": "一个用于集成测试的概念页",
         },
         "body": "正文内容，关联 [[existing]]。\n",
-        "back_updates": [{"path": "existing.md", "title": "新概念"}],
+        "back_updates": [{"path": "existing.md", "title": Path(path).stem}],
     }
 
 
@@ -127,6 +130,94 @@ def test_ingest_apply_success_writes_backlinks_logs_commits(wiki_repo):
     # 真 git commit（HEAD 推进，sha 返回）
     assert res["commit"]
     assert _head(wiki_repo) != head_before
+
+
+def test_ingest_apply_update_preserves_id_path_backlinks_logs_and_commits(wiki_repo):
+    """existing page 必须显式走 updates，并在同一治理事务保留 ID/path。"""
+    (wiki_repo / "target.md").write_text(
+        "---\n创建日期: 2026-06-20 09:00\ntags: [legacy]\n"
+        "类型: 卡片\n---\n目标正文 [[某概念]]\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "-C", str(wiki_repo), "add", "target.md"],
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(wiki_repo), "commit", "-m", "seed target"],
+        check=True, capture_output=True, text=True,
+    )
+    head_before = _head(wiki_repo)
+    update = {
+        "path": "existing.md",
+        "frontmatter": {
+            "id": "w-a1b2c3",
+            "创建日期": "2026-06-22 10:00",
+            "tags": ["test"],
+            "类型": "卡片",
+            "sources": ["conversation 2026-07-29"],
+            "摘要": "已更新的既有概念",
+        },
+        "body": "更新正文，关联 [[target]]。\n",
+        "back_updates": [{"path": "target.md", "title": "existing"}],
+    }
+
+    res = _run(server.wiki_ingest_apply(
+        {"updates": [update],
+         "log_line": "## [2026-07-29 13:20] ingest | update-test"},
+        expected_base_sha=head_before,
+    ))
+
+    assert res["applied"] is True
+    assert res["created"] == []
+    assert res["updated"] == ["existing.md"]
+    existing = (wiki_repo / "existing.md").read_text(encoding="utf-8")
+    assert "id: w-a1b2c3" in existing
+    assert "更新正文" in existing
+    assert "[[existing]]" in (wiki_repo / "target.md").read_text(encoding="utf-8")
+    assert "update-test" in (wiki_repo / "log.md").read_text(encoding="utf-8")
+    assert _head(wiki_repo) != head_before
+
+
+def test_ingest_plan_base_sha_rejects_concurrent_change(wiki_repo, monkeypatch):
+    def empty_search(query, **kwargs):
+        return vs.SearchResponse(results=[], mode="hybrid")
+
+    monkeypatch.setattr(server.vault_search, "search", empty_search)
+    plan = _run(server.wiki_ingest_plan("更新 existing"))
+    assert plan["base_sha"] == _head(wiki_repo)
+    existing_before = (wiki_repo / "existing.md").read_text(encoding="utf-8")
+
+    (wiki_repo / "concurrent.md").write_text("concurrent\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(wiki_repo), "add", "concurrent.md"],
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(wiki_repo), "commit", "-m", "concurrent"],
+        check=True, capture_output=True, text=True,
+    )
+    update = {
+        "path": "existing.md",
+        "frontmatter": {
+            "id": "w-a1b2c3",
+            "创建日期": "2026-06-22 10:00",
+            "tags": ["test"],
+            "类型": "卡片",
+            "sources": ["conversation 2026-07-29"],
+            "摘要": "并发保护测试",
+        },
+        "body": "更新正文 [[concurrent]]。\n",
+        "back_updates": [],
+    }
+
+    with pytest.raises(CASRejectionError):
+        _run(server.wiki_ingest_apply(
+            {"updates": [update], "log_line": "## concurrent update"},
+            expected_base_sha=plan["base_sha"],
+        ))
+
+    assert (wiki_repo / "existing.md").read_text(encoding="utf-8") == existing_before
 
 
 # ---------------------------------------------------------------------------
