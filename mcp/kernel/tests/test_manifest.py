@@ -1,5 +1,6 @@
 """Unit tests for TransactionManifest."""
 
+import json
 import os
 import tempfile
 
@@ -68,3 +69,42 @@ def test_manifest_rollback_committed():
     m.rollback_committed([rec["manifest_id"]])
     assert not os.path.exists(os.path.join(m.manifests_dir, fname))
     assert os.path.exists(os.path.join(m.staging_dir, fname))
+
+
+def test_manifest_defaults_to_git_tracked():
+    d = tempfile.mkdtemp()
+    manifest = TransactionManifest(os.path.join(d, ".katana", "manifests"))
+
+    assert manifest.git_tracked is True
+
+
+def test_runtime_manifest_finalize_updates_git_result_atomically():
+    d = tempfile.mkdtemp()
+    manifest = TransactionManifest(
+        os.path.join(d, ".katana", "manifests"),
+        git_tracked=False,
+    )
+    record = manifest.record(
+        "work-folder",
+        "wf_append_progress",
+        {"id": "wf-abc123", "name": "test"},
+    )
+    manifest.commit_manifests([record["manifest_id"]])
+
+    finalized = manifest.finalize(
+        record["manifest_id"],
+        {"committed": True, "detail": "a" * 40},
+    )
+    manifest_path = os.path.join(
+        manifest.manifests_dir,
+        f"{record['manifest_id']}.json",
+    )
+
+    assert manifest.git_tracked is False
+    assert finalized["git"]["committed"] is True
+    assert json.loads(open(manifest_path, encoding="utf-8").read()) == finalized
+    assert not [
+        name
+        for name in os.listdir(manifest.staging_dir)
+        if name.endswith(".tmp")
+    ]

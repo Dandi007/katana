@@ -4,11 +4,20 @@ from katana_kernel.policy import DomainPolicy
 from katana_kernel.vfs import GovernedVFS
 from katana_kernel.ledger import ResourceIdLedger
 from katana_kernel.manifest import TransactionManifest
+from katana_kernel.idempotency import (
+    IdempotencyConflictError,
+    InvalidMutationTransitionError,
+    MutationClaim,
+    MutationRecord,
+    SQLiteMutationLedger,
+    canonical_request_hash,
+)
 from katana_kernel.gitops import (
     CASRejectionError,
     DirtyWorkTreeError,
     MutationLockError,
     RollbackSafetyError,
+    RuntimeStateConfigurationError,
     cas_guard,
     git_commit,
     head_sha,
@@ -21,12 +30,19 @@ __all__ = [
     "GovernedVFS",
     "ResourceIdLedger",
     "TransactionManifest",
+    "IdempotencyConflictError",
+    "InvalidMutationTransitionError",
+    "MutationClaim",
+    "MutationRecord",
+    "SQLiteMutationLedger",
+    "canonical_request_hash",
     "git_commit",
     "cas_guard",
     "CASRejectionError",
     "DirtyWorkTreeError",
     "MutationLockError",
     "RollbackSafetyError",
+    "RuntimeStateConfigurationError",
     "is_working_tree_clean",
     "head_sha",
     "GovernedKernel",
