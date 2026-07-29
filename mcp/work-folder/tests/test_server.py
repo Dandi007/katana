@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import katana_work_folder_mcp.server as server
+from katana_kernel import MutationBrokenError
 
 
 def _init_repo(root: Path) -> None:
@@ -142,3 +143,25 @@ def test_unconfigured_guards(monkeypatch):
         server._require_store()
     with pytest.raises(RuntimeError, match="configure"):
         server._require_fs_tools()
+
+
+def test_broken_mutation_drops_rollback_locator_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_repo_root", str(tmp_path))
+
+    result = server._server_mutation(
+        lambda: (_ for _ in ()).throw(
+            MutationBrokenError(
+                "manual recovery required",
+                {
+                    "state": "BROKEN",
+                    "paths": [
+                        str(tmp_path / "wf-abc123" / "progress.md"),
+                    ],
+                },
+            )
+        )
+    )
+
+    assert result["code"] == "BROKEN"
+    assert "rollback" not in result
+    assert str(tmp_path) not in json.dumps(result)

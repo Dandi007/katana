@@ -49,8 +49,10 @@ _DROP_PUBLIC_KEYS = {
     "manifest",
     "name",
     "path",
+    "paths",
     "request_fingerprint",
     "resource_id",
+    "rollback",
     "tombstoned_ids",
     "virtual_path",
 }

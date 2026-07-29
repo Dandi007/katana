@@ -153,6 +153,7 @@ def _append_error(
         "code": code,
         "message": message,
         "retryable": retryable,
+        "filename": "progress.md",
     }
     if folder_id is not None:
         result["folder_id"] = folder_id
@@ -903,12 +904,28 @@ class WorkFolderStore:
                     commit=head_sha(self._binding.repo_root) or "",
                 )
             except CASRejectionError:
+                replay_after_cas = self._append_replay_or_conflict(
+                    idempotency_key,
+                    request_fingerprint,
+                    folder_id=folder_id,
+                    source_session_id=source_session_id,
+                )
+                if replay_after_cas is not None:
+                    return replay_after_cas
                 return _append_error(
                     "BASE_COMMIT_CONFLICT",
                     "repository changed since expected base commit",
                     folder_id=folder_id,
                     source_session_id=source_session_id,
                     retryable=True,
+                    commit=head_sha(self._binding.repo_root) or "",
+                )
+            except (BriefError, ValueError):
+                return _append_error(
+                    "INVALID_CONTENT",
+                    "work folder changed to an invalid state during append",
+                    folder_id=folder_id,
+                    source_session_id=source_session_id,
                     commit=head_sha(self._binding.repo_root) or "",
                 )
 

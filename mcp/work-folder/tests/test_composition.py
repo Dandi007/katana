@@ -12,6 +12,7 @@ import pytest
 
 from katana_kernel import (
     CASRejectionError,
+    DomainPolicy,
     GovernedKernel,
     GovernedVFS,
     ResourceIdLedger,
@@ -74,9 +75,10 @@ def test_create_is_flat_and_brief_identity_matches(repo_store):
 
 
 def test_create_and_save_reject_stale_cas(repo_store):
-    _, _, store = repo_store
+    repo, _, store = repo_store
     with pytest.raises(CASRejectionError):
         store.create("topic", _fixed_now, expected_base_sha="a" * 40)
+    assert is_working_tree_clean(str(repo))
 
     created = store.create("topic", _fixed_now)
     with pytest.raises(CASRejectionError):
@@ -85,6 +87,7 @@ def test_create_and_save_reject_stale_cas(repo_store):
             _fixed_now,
             expected_base_sha="b" * 40,
         )
+    assert is_working_tree_clean(str(repo))
 
 
 def test_sequential_cas_uses_returned_git_sha(repo_store):
@@ -280,6 +283,26 @@ def test_duplicate_domain_binding_is_rejected(repo_store):
             GovernedVFS(str(repo)),
             binding.ledger,
             binding.manifest,
+            str(repo),
+        )
+
+
+def test_different_domain_cannot_bind_same_repo(repo_store):
+    repo, kernel, _ = repo_store
+    policy = DomainPolicy(domain="memory", allowed_ops={"create"}, invariants=[])
+    ledger = ResourceIdLedger(
+        str(repo / ".katana" / "memory-tombstones.json"),
+        prefix="m-",
+    )
+    manifest = TransactionManifest(str(repo / ".katana" / "memory-manifests"))
+
+    with pytest.raises(ValueError, match="already bound"):
+        kernel.bind(
+            "memory",
+            policy,
+            GovernedVFS(str(repo)),
+            ledger,
+            manifest,
             str(repo),
         )
 

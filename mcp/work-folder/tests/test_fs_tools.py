@@ -184,6 +184,7 @@ def test_read_returns_numbered_slice_and_raw_revision(env):
         ("../wf-abc123", "notes.md", "INVALID_PATH"),
         ("wf-abc123", "../escape.md", "INVALID_PATH"),
         ("wf-abc123", "/absolute.md", "INVALID_PATH"),
+        ("wf-abc123", ".git/config", "INVALID_PATH"),
         ("wf-abc123", ".katana/secret", "INVALID_PATH"),
         ("wf-abc123", "nested/.hidden", "INVALID_PATH"),
     ],
@@ -225,6 +226,24 @@ def test_tombstoned_folder_id_is_resource_replaced(env):
 
     assert result["code"] == "RESOURCE_REPLACED"
     assert result["folder_id"] == env.folder_id
+
+
+def test_discovery_not_found_variants_and_symlink_are_safe(env):
+    missing_resolve = env.tools.fs_resolve(env.folder_id, "missing.md")
+    missing_stat = env.tools.fs_stat(env.folder_id, "missing.md")
+    missing_list = env.tools.fs_list(env.folder_id, "missing")
+    target = env.repo / env.folder_id / "target.md"
+    target.write_text("target", encoding="utf-8")
+    link = env.repo / env.folder_id / "link.md"
+    link.symlink_to(target)
+    symlink = env.tools.fs_read(env.folder_id, "link.md")
+
+    assert missing_resolve["code"] == "RESOURCE_NOT_FOUND"
+    assert missing_stat["code"] == "RESOURCE_NOT_FOUND"
+    assert missing_list["code"] == "RESOURCE_NOT_FOUND"
+    assert symlink["code"] == "INVALID_PATH"
+    for result in (missing_resolve, missing_stat, missing_list, symlink):
+        _assert_safe(result, env.repo)
 
 
 # Single-file mutations ------------------------------------------------------
@@ -334,6 +353,7 @@ def test_matching_revision_allows_write(env):
 
     assert result["ok"] is True
     assert result["content"] == "v2"
+    assert result["content_revision"] == _sha("v2")
 
 
 def test_brief_id_is_immutable_but_semantic_update_is_allowed(env):
@@ -381,6 +401,43 @@ def test_progress_changelog_and_blocked_section_are_conserved(env):
     assert remove_blocked["code"] == "POLICY_VIOLATION"
 
 
+def test_edit_preserves_brief_and_append_only_documents(env):
+    brief_path = env.repo / env.folder_id / "_brief.md"
+    brief = brief_path.read_text(encoding="utf-8")
+    identity_edit = env.tools.fs_edit(
+        env.folder_id,
+        "_brief.md",
+        env.folder_id,
+        "wf-deadbe",
+    )
+
+    progress_path = env.repo / env.folder_id / "progress.md"
+    progress = progress_path.read_text(encoding="utf-8")
+    progress_append = env.tools.fs_edit(
+        env.folder_id,
+        "progress.md",
+        progress,
+        progress + "| 16:01 | edit | appended |\n",
+    )
+
+    env.store.save(
+        env.folder_id,
+        _now,
+        golden_order_additions="- original\n",
+    )
+    golden_append = env.tools.fs_edit(
+        env.folder_id,
+        "golden-order.md",
+        "- original\n",
+        "- original\n- appended\n",
+    )
+
+    assert brief_path.read_text(encoding="utf-8") == brief
+    assert identity_edit["code"] == "INVALID_CONTENT"
+    assert progress_append["ok"] is True
+    assert golden_append["ok"] is True
+
+
 def test_golden_order_is_append_only(env):
     env.store.save(
         env.folder_id,
@@ -423,6 +480,19 @@ def test_governed_document_sections_are_conserved(env, filename, heading):
     result = env.tools.fs_write(env.folder_id, filename, replacement)
 
     assert result["code"] == "POLICY_VIOLATION"
+
+
+def test_governed_documents_allow_updates_that_preserve_sections(env):
+    env.store.save(env.folder_id, _now)
+    for filename in ("context.md", "CLAUDE.md", "AGENTS.md"):
+        path = env.repo / env.folder_id / filename
+        old = path.read_text(encoding="utf-8")
+        result = env.tools.fs_write(
+            env.folder_id,
+            filename,
+            old + "\n补充上下文。\n",
+        )
+        assert result["ok"] is True
 
 
 @pytest.mark.parametrize("filename", ["_brief.md", "progress.md", "golden-order.md"])
@@ -520,6 +590,34 @@ def test_transfer_rejects_missing_existing_and_critical_files(env):
     assert exists["code"] == "RESOURCE_EXISTS"
     assert critical["code"] == "POLICY_VIOLATION"
     assert brief["code"] == "POLICY_VIOLATION"
+
+
+def test_transfer_rejects_source_and_destination_traversal(env):
+    dest_id = _add_folder(env)
+    env.tools.fs_create(env.folder_id, "source.md", "payload")
+
+    bad_source = env.tools.fs_copy(
+        env.folder_id,
+        "../source.md",
+        dest_id,
+        "copy.md",
+    )
+    bad_dest = env.tools.fs_rename(
+        env.folder_id,
+        "source.md",
+        dest_id,
+        "../rename.md",
+    )
+
+    assert bad_source["code"] == "INVALID_PATH"
+    assert bad_dest["code"] == "INVALID_PATH"
+    assert (env.repo / env.folder_id / "source.md").exists()
+
+
+def test_delete_missing_file_is_not_found(env):
+    result = env.tools.fs_delete(env.folder_id, "missing.md")
+
+    assert result["code"] == "RESOURCE_NOT_FOUND"
 
 
 # Batch ---------------------------------------------------------------------
@@ -728,6 +826,108 @@ def test_batch_enforces_critical_file_invariants(env):
     assert delete_progress["code"] == "POLICY_VIOLATION"
 
 
+def test_batch_rejects_traversal_large_content_and_critical_transfer(env):
+    dest_id = _add_folder(env)
+    traversal = env.tools.fs_batch(
+        [
+            _op(
+                "fs_create",
+                folder_id=env.folder_id,
+                filename="../escape.md",
+                content="x",
+            )
+        ]
+    )
+    too_large = env.tools.fs_batch(
+        [
+            _op(
+                "fs_create",
+                folder_id=env.folder_id,
+                filename="large.md",
+                content="x" * 1_000_001,
+            )
+        ]
+    )
+    critical_copy = env.tools.fs_batch(
+        [
+            _op(
+                "fs_copy",
+                source_folder_id=env.folder_id,
+                source_filename="progress.md",
+                dest_folder_id=dest_id,
+                dest_filename="copy.md",
+            )
+        ]
+    )
+    critical_rename = env.tools.fs_batch(
+        [
+            _op(
+                "fs_rename",
+                source_folder_id=env.folder_id,
+                source_filename="_brief.md",
+                dest_folder_id=dest_id,
+                dest_filename="brief.md",
+            )
+        ]
+    )
+
+    assert traversal["code"] == "INVALID_PATH"
+    assert too_large["code"] == "CONTENT_TOO_LARGE"
+    assert critical_copy["code"] == "POLICY_VIOLATION"
+    assert critical_rename["code"] == "POLICY_VIOLATION"
+    assert not (env.repo.parent / "escape.md").exists()
+
+
+def test_batch_allows_append_and_structure_preserving_updates(env):
+    env.store.save(
+        env.folder_id,
+        _now,
+        golden_order_additions="- original\n",
+    )
+    progress_path = env.repo / env.folder_id / "progress.md"
+    context_path = env.repo / env.folder_id / "context.md"
+    claude_path = env.repo / env.folder_id / "CLAUDE.md"
+    progress = progress_path.read_text(encoding="utf-8")
+    context = context_path.read_text(encoding="utf-8")
+    claude = claude_path.read_text(encoding="utf-8")
+
+    result = env.tools.fs_batch(
+        [
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="progress.md",
+                content=progress + "| 16:02 | batch | append |\n",
+            ),
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="golden-order.md",
+                content="- original\n- appended\n",
+            ),
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="context.md",
+                content=context + "\ncontext addition\n",
+            ),
+            _op(
+                "fs_write",
+                folder_id=env.folder_id,
+                filename="CLAUDE.md",
+                content=claude + "\nresume addition\n",
+            ),
+        ]
+    )
+
+    assert result["ok"] is True
+    assert len(result["batch_results"]) == 4
+    assert "batch | append" in progress_path.read_text(encoding="utf-8")
+    assert "appended" in (
+        env.repo / env.folder_id / "golden-order.md"
+    ).read_text(encoding="utf-8")
+
+
 # MCP schema and public envelopes -------------------------------------------
 
 
@@ -802,6 +1002,154 @@ def test_mcp_cross_folder_and_batch_fields(env):
             "filename": "batch.md",
         }
     ]
+
+
+def test_all_id_only_fs_tools_are_triggerable_through_mcp(env):
+    dest_id = _add_folder(env)
+    results = [
+        _mcp_call("fs_capabilities"),
+        _mcp_call("fs_resolve", {"folder_id": env.folder_id}),
+        _mcp_call(
+            "fs_stat",
+            {"folder_id": env.folder_id, "filename": "progress.md"},
+        ),
+        _mcp_call("fs_list", {"folder_id": env.folder_id}),
+    ]
+    created = _mcp_call(
+        "fs_create",
+        {
+            "folder_id": env.folder_id,
+            "filename": "all-tools.md",
+            "content": "v1",
+        },
+    )
+    results.append(created)
+    results.append(
+        _mcp_call(
+            "fs_read",
+            {"folder_id": env.folder_id, "filename": "all-tools.md"},
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_write",
+            {
+                "folder_id": env.folder_id,
+                "filename": "all-tools.md",
+                "content": "v2",
+                "expected_resource_revision": created["content_revision"],
+            },
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_edit",
+            {
+                "folder_id": env.folder_id,
+                "filename": "all-tools.md",
+                "old_string": "v2",
+                "new_string": "v3",
+            },
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_copy",
+            {
+                "source_folder_id": env.folder_id,
+                "source_filename": "all-tools.md",
+                "dest_folder_id": dest_id,
+                "dest_filename": "copied.md",
+            },
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_rename",
+            {
+                "source_folder_id": dest_id,
+                "source_filename": "copied.md",
+                "dest_folder_id": dest_id,
+                "dest_filename": "renamed.md",
+            },
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_delete",
+            {"folder_id": env.folder_id, "filename": "all-tools.md"},
+        )
+    )
+    results.append(
+        _mcp_call(
+            "fs_batch",
+            {
+                "operations": [
+                    _op(
+                        "fs_create",
+                        folder_id=dest_id,
+                        filename="batch-trigger.md",
+                        content="batch",
+                    )
+                ]
+            },
+        )
+    )
+
+    assert all(result["ok"] is True for result in results)
+    for result in results:
+        _assert_safe(result, env.repo)
+
+
+def test_mcp_errors_preserve_machine_codes_without_locator_leaks(env):
+    created = env.tools.fs_create(env.folder_id, "revision-mcp.md", "v1")
+    results = [
+        _mcp_call(
+            "fs_read",
+            {"folder_id": env.folder_id, "filename": "../escape.md"},
+        ),
+        _mcp_call(
+            "fs_create",
+            {
+                "folder_id": env.folder_id,
+                "filename": "cas-mcp.md",
+                "content": "x",
+                "expected_base_commit": "a" * 40,
+            },
+        ),
+        _mcp_call(
+            "fs_write",
+            {
+                "folder_id": env.folder_id,
+                "filename": "revision-mcp.md",
+                "content": "v2",
+                "expected_resource_revision": "sha256:" + "0" * 64,
+            },
+        ),
+        _mcp_call(
+            "fs_batch",
+            {
+                "operations": [
+                    _op(
+                        "fs_create",
+                        folder_id=env.folder_id,
+                        filename=".katana/escape.md",
+                        content="x",
+                    )
+                ]
+            },
+        ),
+    ]
+
+    assert [result["code"] for result in results] == [
+        "INVALID_PATH",
+        "BASE_COMMIT_CONFLICT",
+        "REVISION_CONFLICT",
+        "INVALID_PATH",
+    ]
+    assert created["ok"] is True
+    for result in results:
+        _assert_safe(result, env.repo)
 
 
 def test_mcp_schema_has_no_legacy_path_or_glob(env):
