@@ -205,10 +205,6 @@ def migrate(source: str, dest: str, dry_run: bool = False) -> dict:
             page_path = pages_dir / f"{page['title']}.md"
             page_path.write_text(_render_page(page["frontmatter"], page["body"]), encoding="utf-8")
 
-        subprocess.run(["git", "-C", str(dest_root), "init"], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(dest_root), "add", "."], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(dest_root), "commit", "-m", "migration: initial import from v1"], check=True, capture_output=True)
-
         report = {
             "pages_migrated": len(output_pages),
             "link_rewrites": link_rewrites,
@@ -217,6 +213,10 @@ def migrate(source: str, dest: str, dry_run: bool = False) -> dict:
         }
         with open(dest_root / "migration-report.json", "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
+
+        subprocess.run(["git", "-C", str(dest_root), "init"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(dest_root), "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(dest_root), "commit", "-m", "migration: initial import from v1"], check=True, capture_output=True)
 
         return {"success": True, "report": report, "pages": len(output_pages)}
 

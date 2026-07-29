@@ -65,9 +65,6 @@ class WikiStore:
                 self._search._mode = "keyword_only"
         self._search._keyword = _search.KeywordIndex()
         self._search._degraded_pages = set()
-        self._search._last_error = None
-        keyword_path = str(Path(self._data_root) / ".katana" / "index" / "keyword.json")
-        self._search._keyword.load(keyword_path)
         pages = _pages.scan_pages(self._data_root)
         for page in pages:
             if page["id"] and not page.get("_error"):
@@ -487,7 +484,11 @@ class WikiStore:
         store = self
 
         def _write(changed_paths):
-            title = page["title"]
+            current_page = _pages.find_page_by_ref(store._data_root, ref)
+            access_err = store._check_page_accessible(current_page, ref)
+            if access_err is not None:
+                raise StoreError(access_err)
+            title = current_page["title"]
             inlinks = _pages.compute_inlinks(store._data_root, title)
             if inlinks and not force:
                 raise StoreError({
@@ -519,8 +520,8 @@ class WikiStore:
                         store._search.remove_page(other_page["id"])
                         store._search.index_page(other_page["id"], other_page["title"], new_body)
 
-            store._search.remove_page(page["id"])
-            return {"id": page["id"], "deleted_title": title}
+            store._search.remove_page(current_page["id"])
+            return {"id": current_page["id"], "deleted_title": title}
 
         try:
             return self._mutate("wiki_delete", _write, f"wiki: delete {page['title']}")
