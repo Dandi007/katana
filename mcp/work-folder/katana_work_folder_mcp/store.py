@@ -10,8 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
+import threading
 from dataclasses import asdict
 
+from katana_kernel import CASRejectionError, head_sha
 from katana_kernel.kernel import GovernedKernel
 from katana_kernel.policy import DomainPolicy, PolicyViolationError
 from katana_work_folder_mcp import artifacts as _art
@@ -31,9 +34,22 @@ def _wf_policy() -> DomainPolicy:
         if op == "wf_create":
             if not args.get("topic"):
                 raise PolicyViolationError("topic is required for wf_create")
-        elif op in ("wf_save", "wf_resume", "wf_append_progress"):
+        elif op in ("wf_save", "wf_resume"):
             if not args.get("folder_id"):
                 raise PolicyViolationError("folder_id is required")
+        elif op == "wf_append_progress":
+            required = (
+                "folder_id",
+                "entry",
+                "source_session_id",
+                "idempotency_key",
+                "request_fingerprint",
+            )
+            if any(not args.get(key) for key in required):
+                raise PolicyViolationError(
+                    "folder_id, entry, source_session_id, idempotency_key and "
+                    "request_fingerprint are required"
+                )
         elif op == "fs_create":
             if not args.get("folder_id") or not args.get("filename"):
                 raise PolicyViolationError(
@@ -123,10 +139,109 @@ def _scan_brief_ids(vfs) -> set[str]:
     return ids
 
 
+def _append_error(
+    code: str,
+    message: str,
+    *,
+    folder_id: str | None = None,
+    source_session_id: str | None = None,
+    retryable: bool = False,
+    commit: str | None = None,
+) -> dict:
+    result = {
+        "ok": False,
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+    }
+    if folder_id is not None:
+        result["folder_id"] = folder_id
+    if source_session_id is not None:
+        result["source_session_id"] = source_session_id
+    if commit is not None:
+        result["commit"] = commit
+    return result
+
+
+def _append_fingerprint(
+    folder_id: str,
+    entry: str,
+    source_session_id: str,
+) -> str:
+    canonical = json.dumps(
+        {
+            "entry": entry,
+            "folder_id": folder_id,
+            "source_session_id": source_session_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _table_cell(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "<br>")
+    )
+
+
+def _render_index_snapshot(binding) -> tuple[str, int, int, list[str]]:
+    """从当前 VFS 状态机械生成 flat INDEX 内容。"""
+    entries: list[dict] = []
+    errors: list[str] = []
+    for brief_path in binding.vfs.ls(f"wf-*/{BRIEF_NAME}"):
+        folder_id = brief_path.split("/", 1)[0]
+        try:
+            parsed = parse_brief(binding.vfs.read_text(brief_path))
+            brief_id = parsed["frontmatter"].get("id")
+            if brief_id != folder_id:
+                errors.append(
+                    f"{folder_id}/{BRIEF_NAME}: id mismatch "
+                    f"({brief_id} != {folder_id})"
+                )
+                continue
+            entries.append(
+                {
+                    "folder_id": folder_id,
+                    "fm": parsed["frontmatter"],
+                    "goal": parsed["goal"],
+                }
+            )
+        except BriefError as exc:
+            errors.append(f"{brief_path}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - reindex skips corrupt peers
+            errors.append(f"{brief_path}: {exc}")
+
+    brief_folders = {entry["folder_id"] for entry in entries}
+    progress_folders = {
+        path.split("/", 1)[0]
+        for path in binding.vfs.ls("wf-*/progress.md")
+    }
+    skipped = len(progress_folders - brief_folders)
+    return _reindex.render_index(entries), len(entries), skipped, errors
+
+
+class _AppendReplay(Exception):
+    def __init__(self, result: dict):
+        super().__init__("append progress replay")
+        self.result = result
+
+
+class _AppendConflict(Exception):
+    pass
+
+
 class WorkFolderStore:
     def __init__(self, kernel: GovernedKernel):
         self._kernel = kernel
         self._binding = kernel.get_binding("work-folder")
+        self._append_lock = threading.RLock()
 
     def _call_mutate(self, op: str, args: dict, write_fn,
                      expected_base_sha: str | None, commit_msg: str) -> dict:
@@ -488,46 +603,328 @@ class WorkFolderStore:
         return self._call_mutate("wf_resume", args, _write,
                                  expected_base_sha, "work-folder: resume")
 
+    def _find_append_manifest(self, idempotency_key: str) -> dict | None:
+        for manifest in reversed(self._binding.manifest.list_manifests()):
+            if (
+                manifest.get("domain") == "work-folder"
+                and manifest.get("op") == "wf_append_progress"
+                and manifest.get("result", {}).get("idempotency_key")
+                == idempotency_key
+            ):
+                return manifest
+        return None
+
+    def _append_replay_result(self, manifest: dict) -> dict:
+        stored = manifest.get("result", {})
+        manifest_id = manifest.get("manifest_id", "")
+        manifest_name = f".katana/manifests/{manifest_id}.json"
+        probe = subprocess.run(
+            [
+                "git",
+                "-C",
+                self._binding.repo_root,
+                "log",
+                "--diff-filter=A",
+                "-1",
+                "--format=%H",
+                "--",
+                manifest_name,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        original_commit = (
+            probe.stdout.strip()
+            if probe.returncode == 0 and probe.stdout.strip()
+            else manifest.get("git", {}).get("detail", "")
+        )
+        git = dict(manifest.get("git", {}))
+        if original_commit:
+            git["detail"] = original_commit
+        return {
+            "ok": True,
+            "appended": True,
+            "replayed": True,
+            "folder_id": stored.get("folder_id", ""),
+            "filename": "progress.md",
+            "source_session_id": stored.get("source_session_id", ""),
+            "content_revision": stored.get("content_revision", ""),
+            "updated": stored.get("updated", ""),
+            "commit": original_commit,
+            "git": git,
+            "mutation_id": manifest_id,
+            "manifest": {"manifest_id": manifest_id},
+        }
+
+    def _append_replay_or_conflict(
+        self,
+        idempotency_key: str,
+        request_fingerprint: str,
+        *,
+        folder_id: str,
+        source_session_id: str,
+    ) -> dict | None:
+        manifest = self._find_append_manifest(idempotency_key)
+        if manifest is None:
+            return None
+        stored_fingerprint = manifest.get("result", {}).get(
+            "request_fingerprint"
+        )
+        if stored_fingerprint != request_fingerprint:
+            return _append_error(
+                "IDEMPOTENCY_CONFLICT",
+                "idempotency_key was already used for a different request",
+                folder_id=folder_id,
+                source_session_id=source_session_id,
+                commit=head_sha(self._binding.repo_root) or "",
+            )
+        return self._append_replay_result(manifest)
+
+    def append_progress(
+        self,
+        folder_id: str,
+        entry: str,
+        source_session_id: str,
+        idempotency_key: str,
+        *,
+        now_fn,
+        expected_base_sha: str | None = None,
+    ) -> dict:
+        """幂等追加 session progress，并原子 touch brief + rebuild INDEX。"""
+        commit = head_sha(self._binding.repo_root) or ""
+        if not isinstance(folder_id, str) or not re.fullmatch(
+            r"wf-[0-9a-f]{6}", folder_id
+        ):
+            return _append_error(
+                "INVALID_PATH",
+                "folder_id must match wf-<6 lowercase hex>",
+                folder_id=folder_id if isinstance(folder_id, str) else None,
+                source_session_id=(
+                    source_session_id
+                    if isinstance(source_session_id, str)
+                    else None
+                ),
+                commit=commit,
+            )
+        if not isinstance(entry, str) or not entry.strip():
+            return _append_error(
+                "INVALID_CONTENT",
+                "entry must be a non-empty string",
+                folder_id=folder_id,
+                source_session_id=(
+                    source_session_id
+                    if isinstance(source_session_id, str)
+                    else None
+                ),
+                commit=commit,
+            )
+        if len(entry.encode("utf-8")) > 1_000_000:
+            return _append_error(
+                "INVALID_CONTENT",
+                "entry exceeds 1000000 bytes",
+                folder_id=folder_id,
+                source_session_id=(
+                    source_session_id
+                    if isinstance(source_session_id, str)
+                    else None
+                ),
+                commit=commit,
+            )
+        if (
+            not isinstance(source_session_id, str)
+            or not source_session_id.strip()
+            or len(source_session_id) > 512
+        ):
+            return _append_error(
+                "INVALID_CONTENT",
+                "source_session_id must be a non-empty string up to 512 chars",
+                folder_id=folder_id,
+                commit=commit,
+            )
+        if (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key.strip()
+            or len(idempotency_key) > 256
+        ):
+            return _append_error(
+                "INVALID_CONTENT",
+                "idempotency_key must be a non-empty string up to 256 chars",
+                folder_id=folder_id,
+                source_session_id=source_session_id,
+                commit=commit,
+            )
+
+        request_fingerprint = _append_fingerprint(
+            folder_id,
+            entry,
+            source_session_id,
+        )
+        with self._append_lock:
+            replay = self._append_replay_or_conflict(
+                idempotency_key,
+                request_fingerprint,
+                folder_id=folder_id,
+                source_session_id=source_session_id,
+            )
+            if replay is not None:
+                return replay
+
+            try:
+                folder = self._folder_path(folder_id)
+            except FileNotFoundError:
+                return _append_error(
+                    "RESOURCE_NOT_FOUND",
+                    "work folder not found",
+                    folder_id=folder_id,
+                    source_session_id=source_session_id,
+                    commit=commit,
+                )
+            except (BriefError, ValueError):
+                return _append_error(
+                    "INVALID_CONTENT",
+                    "work folder identity is invalid",
+                    folder_id=folder_id,
+                    source_session_id=source_session_id,
+                    commit=commit,
+                )
+            progress_path = f"{folder}/progress.md"
+            if not self._binding.vfs.exists(progress_path):
+                return _append_error(
+                    "INVALID_CONTENT",
+                    "work folder is missing progress.md",
+                    folder_id=folder_id,
+                    source_session_id=source_session_id,
+                    commit=commit,
+                )
+
+            now = now_fn()
+            args = {
+                "folder_id": folder_id,
+                "entry": entry,
+                "source_session_id": source_session_id,
+                "idempotency_key": idempotency_key,
+                "request_fingerprint": request_fingerprint,
+                "now_hm": now.strftime("%H:%M:%S"),
+                "now_str": now.strftime("%Y-%m-%d %H:%M"),
+                "now_date": now.strftime("%Y-%m-%d"),
+            }
+
+            def _write(binding, args):
+                concurrent = self._append_replay_or_conflict(
+                    args["idempotency_key"],
+                    args["request_fingerprint"],
+                    folder_id=args["folder_id"],
+                    source_session_id=args["source_session_id"],
+                )
+                if concurrent is not None:
+                    if concurrent.get("ok"):
+                        raise _AppendReplay(concurrent)
+                    raise _AppendConflict(concurrent["message"])
+
+                folder = self._folder_path(args["folder_id"])
+                progress_path = f"{folder}/progress.md"
+                if not binding.vfs.exists(progress_path):
+                    raise ValueError("work folder is missing progress.md")
+
+                progress = binding.vfs.read_text(progress_path)
+                key_hash = hashlib.sha256(
+                    args["idempotency_key"].encode("utf-8")
+                ).hexdigest()[:8]
+                action = (
+                    f"session:{_table_cell(args['source_session_id'])}:"
+                    f"{key_hash}"
+                )
+                detail = _table_cell(args["entry"].strip())
+                row = _art.changelog_row(args["now_hm"], action, detail)
+                updated_progress = _art.insert_changelog_row(progress, row)
+                binding.vfs.write(progress_path, updated_progress)
+
+                brief_path = f"{folder}/{BRIEF_NAME}"
+                parsed = parse_brief(binding.vfs.read_text(brief_path))
+                fm = parsed["frontmatter"]
+                status = str(fm.get("status") or "active")
+                if status in ("paused", "archived"):
+                    status = "active"
+                updated_brief = render_brief(
+                    id=args["folder_id"],
+                    title=fm.get("title", ""),
+                    status=status,
+                    created=_as_iso_str(fm.get("created"))
+                    or args["now_date"],
+                    updated=args["now_date"],
+                    goal=parsed["goal"],
+                    summary=parsed["summary"],
+                    tags=fm.get("tags") or (),
+                    kind=fm.get("kind") or "",
+                    links=fm.get("links") or (),
+                )
+                binding.vfs.write(brief_path, updated_brief)
+
+                index_md, _, _, _ = _render_index_snapshot(binding)
+                binding.vfs.write("INDEX.md", index_md)
+                content_revision = "sha256:" + hashlib.sha256(
+                    updated_progress.encode("utf-8")
+                ).hexdigest()
+                return {
+                    "ok": True,
+                    "appended": True,
+                    "replayed": False,
+                    "folder_id": args["folder_id"],
+                    "id": args["folder_id"],
+                    "filename": "progress.md",
+                    "source_session_id": args["source_session_id"],
+                    "idempotency_key": args["idempotency_key"],
+                    "request_fingerprint": args["request_fingerprint"],
+                    "content_revision": content_revision,
+                    "updated": args["now_str"],
+                    "changed_paths": [
+                        progress_path,
+                        brief_path,
+                        "INDEX.md",
+                    ],
+                }
+
+            try:
+                result = self._call_mutate(
+                    "wf_append_progress",
+                    args,
+                    _write,
+                    expected_base_sha,
+                    "work-folder: append progress",
+                )
+            except _AppendReplay as replay_exc:
+                return replay_exc.result
+            except _AppendConflict as conflict_exc:
+                return _append_error(
+                    "IDEMPOTENCY_CONFLICT",
+                    str(conflict_exc),
+                    folder_id=folder_id,
+                    source_session_id=source_session_id,
+                    commit=head_sha(self._binding.repo_root) or "",
+                )
+            except CASRejectionError:
+                return _append_error(
+                    "BASE_COMMIT_CONFLICT",
+                    "repository changed since expected base commit",
+                    folder_id=folder_id,
+                    source_session_id=source_session_id,
+                    retryable=True,
+                    commit=head_sha(self._binding.repo_root) or "",
+                )
+
+            result["commit"] = result.get("git", {}).get("detail", "")
+            return result
+
     def reindex(self, dry_run: bool = False,
                 expected_base_sha: str | None = None) -> dict:
         args = {"dry_run": dry_run}
 
         def _write(binding, args):
             dry_run = args["dry_run"]
-            entries: list[dict] = []
-            errors: list[str] = []
-
-            for brief_path in binding.vfs.ls(f"wf-*/{BRIEF_NAME}"):
-                folder_id = brief_path.split("/", 1)[0]
-                try:
-                    r = parse_brief(binding.vfs.read_text(brief_path))
-                    brief_id = r["frontmatter"].get("id")
-                    if brief_id != folder_id:
-                        errors.append(
-                            f"{folder_id}/{BRIEF_NAME}: id mismatch "
-                            f"({brief_id} != {folder_id})"
-                        )
-                        continue
-                    entries.append({
-                        "folder_id": folder_id,
-                        "fm": r["frontmatter"],
-                        "goal": r["goal"],
-                    })
-                except BriefError as e:
-                    errors.append(f"{brief_path}: {e}")
-                except Exception as e:
-                    errors.append(f"{brief_path}: {e}")
-
-            brief_folders = {e["folder_id"] for e in entries}
-            progress_folders = {
-                path.split("/", 1)[0]
-                for path in binding.vfs.ls("wf-*/progress.md")
-            }
-            skipped = len(progress_folders - brief_folders)
-            md = _reindex.render_index(entries)
+            md, indexed, skipped, errors = _render_index_snapshot(binding)
 
             result: dict = {
-                "indexed": len(entries),
+                "indexed": indexed,
                 "skipped": skipped,
                 "errors": errors,
             }

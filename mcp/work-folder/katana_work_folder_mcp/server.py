@@ -44,10 +44,12 @@ _DROP_PUBLIC_KEYS = {
     "commit_msg",
     "folder",
     "id",
+    "idempotency_key",
     "index_path",
     "manifest",
     "name",
     "path",
+    "request_fingerprint",
     "resource_id",
     "tombstoned_ids",
     "virtual_path",
@@ -241,6 +243,27 @@ async def wf_resume(
     return _server_mutation(
         lambda: _require_store().resume(
             folder_id,
+            now_fn=_now,
+            expected_base_sha=expected_base_sha,
+        )
+    )
+
+
+@mcp.tool()
+async def wf_append_progress(
+    folder_id: str,
+    entry: str,
+    source_session_id: str,
+    idempotency_key: str,
+    expected_base_sha: str | None = None,
+) -> dict:
+    """幂等追加 session 进展，并原子更新 brief 与顶层 INDEX。"""
+    return _server_mutation(
+        lambda: _require_store().append_progress(
+            folder_id,
+            entry,
+            source_session_id,
+            idempotency_key,
             now_fn=_now,
             expected_base_sha=expected_base_sha,
         )
