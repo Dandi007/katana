@@ -17,6 +17,7 @@ from katana_remote import (
     FORBIDDEN,
 )
 from katana_work_folder_mcp import server as wf_server
+from katana_work_folder_mcp.reindex import render_index
 from starlette.testclient import TestClient
 
 
@@ -24,6 +25,32 @@ def _init_repo(tmp_path):
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text(
+        "/.katana/runtime/\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "INDEX.md").write_text(render_index([]), encoding="utf-8")
+    controls = tmp_path / ".katana"
+    controls.mkdir()
+    (controls / "flat-layout.json").write_text(
+        '{"layout":"flat-id-v1","schema_version":1}\n',
+        encoding="utf-8",
+    )
+    (controls / "tombstones.json").write_text(
+        '{"tombstones":[]}\n',
+        encoding="utf-8",
+    )
+    (controls / "legacy-manifest-inventory.json").write_text(
+        '{"manifests":[],"schema_version":1}\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "flat fixture"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
     return str(tmp_path)
 
 
@@ -82,6 +109,23 @@ def _mcp_call(client, token, session_id, tool_name, arguments=None):
     return r
 
 
+def _tool_result(response):
+    for line in response.text.splitlines():
+        if not line.startswith("data: "):
+            continue
+        envelope = json.loads(line[6:])
+        result = envelope.get("result", {})
+        for item in result.get("content", []):
+            if isinstance(item, dict) and item.get("type") == "text":
+                return json.loads(item["text"])
+    envelope = response.json()
+    result = envelope.get("result", {})
+    for item in result.get("content", []):
+        if isinstance(item, dict) and item.get("type") == "text":
+            return json.loads(item["text"])
+    raise AssertionError(f"tool response has no JSON text content: {response.text}")
+
+
 class TestWorkFolderRemote:
     def test_livez_no_auth(self, tmp_path):
         creds = CredentialRegistry()
@@ -107,3 +151,46 @@ class TestWorkFolderRemote:
             session_id = _mcp_session(client, "full-token")
             r = _mcp_call(client, "full-token", session_id, "fs_capabilities")
             assert r.status_code == 200, f"fs_capabilities failed: {r.status_code} {r.text[:200]}"
+
+    def test_idempotency_keys_are_namespaced_per_authenticated_principal(
+        self,
+        tmp_path,
+    ):
+        creds = CredentialRegistry()
+        scopes = {"read", "mutate", "query", "operate", "audit"}
+        creds.register("alice-token", "alice", "default", scopes=scopes)
+        creds.register("bob-token", "bob", "default", scopes=scopes)
+        app = _make_wf_app_with_auth(tmp_path, creds)
+
+        with TestClient(app) as client:
+            alice_session = _mcp_session(client, "alice-token")
+            bob_session = _mcp_session(client, "bob-token")
+            alice = _tool_result(
+                _mcp_call(
+                    client,
+                    "alice-token",
+                    alice_session,
+                    "wf_create",
+                    {
+                        "topic": "alice-topic",
+                        "idempotency_key": "shared-client-key",
+                    },
+                )
+            )
+            bob = _tool_result(
+                _mcp_call(
+                    client,
+                    "bob-token",
+                    bob_session,
+                    "wf_create",
+                    {
+                        "topic": "bob-topic",
+                        "idempotency_key": "shared-client-key",
+                    },
+                )
+            )
+
+        assert alice["created"] is True
+        assert bob["created"] is True
+        assert alice["folder_id"] != bob["folder_id"]
+        assert alice["mutation_id"] != bob["mutation_id"]

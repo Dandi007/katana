@@ -10,11 +10,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
 import threading
 from dataclasses import asdict
 
-from katana_kernel import CASRejectionError, head_sha
+from katana_kernel import CASRejectionError, IdempotencyConflictError, head_sha
 from katana_kernel.kernel import GovernedKernel
 from katana_kernel.policy import DomainPolicy, PolicyViolationError
 from katana_work_folder_mcp import artifacts as _art
@@ -228,29 +227,32 @@ def _render_index_snapshot(binding) -> tuple[str, int, int, list[str]]:
     return _reindex.render_index(entries), len(entries), skipped, errors
 
 
-class _AppendReplay(Exception):
-    def __init__(self, result: dict):
-        super().__init__("append progress replay")
-        self.result = result
-
-
-class _AppendConflict(Exception):
-    pass
-
-
 class WorkFolderStore:
     def __init__(self, kernel: GovernedKernel):
         self._kernel = kernel
         self._binding = kernel.get_binding("work-folder")
         self._append_lock = threading.RLock()
 
-    def _call_mutate(self, op: str, args: dict, write_fn,
-                     expected_base_sha: str | None, commit_msg: str) -> dict:
+    def _call_mutate(
+        self,
+        op: str,
+        args: dict,
+        write_fn,
+        expected_base_sha: str | None,
+        commit_msg: str,
+        *,
+        idempotency_key: str | None = None,
+        idempotency_payload: dict | None = None,
+    ) -> dict:
         return self._kernel.mutate(
             "work-folder", op, args,
             expected_base_sha=expected_base_sha,
             write_fn=write_fn,
             commit_msg=commit_msg,
+            idempotency_key=idempotency_key,
+            idempotency_payload=(
+                idempotency_payload if idempotency_key is not None else None
+            ),
         )
 
     def _folder_path(self, folder_id: str) -> str:
@@ -269,8 +271,13 @@ class WorkFolderStore:
             )
         return folder_id
 
-    def create(self, topic: str, now_fn,
-               expected_base_sha: str | None = None) -> dict:
+    def create(
+        self,
+        topic: str,
+        now_fn,
+        expected_base_sha: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
         now = now_fn()
         args = {
             "topic": topic,
@@ -310,6 +317,9 @@ class WorkFolderStore:
             )
             binding.vfs.write(f"{folder}/{BRIEF_NAME}", brief)
             changed.append(f"{folder}/{BRIEF_NAME}")
+            index_md, _, _, _ = _render_index_snapshot(binding)
+            binding.vfs.write("INDEX.md", index_md)
+            changed.append("INDEX.md")
 
             return {
                 "created": True,
@@ -320,8 +330,15 @@ class WorkFolderStore:
                 "changed_paths": changed,
             }
 
-        return self._call_mutate("wf_create", args, _write,
-                                 expected_base_sha, "work-folder: create")
+        return self._call_mutate(
+            "wf_create",
+            args,
+            _write,
+            expected_base_sha,
+            "work-folder: create",
+            idempotency_key=idempotency_key,
+            idempotency_payload={"topic": topic},
+        )
 
     def save(self, folder_id: str, now_fn,
              summary: str = "checkpoint",
@@ -329,7 +346,8 @@ class WorkFolderStore:
              resume_fields: dict | None = None,
              golden_order_additions: str | None = None,
              findings_addition: str | None = None,
-             expected_base_sha: str | None = None) -> dict:
+             expected_base_sha: str | None = None,
+             idempotency_key: str | None = None) -> dict:
         now = now_fn()
         folder_id = require_folder_id(folder_id)
         args = {
@@ -459,6 +477,11 @@ class WorkFolderStore:
             else:
                 raise ValueError(f"work-folder 缺少 {BRIEF_NAME}: {folder_id}")
 
+            index_md, _, _, _ = _render_index_snapshot(binding)
+            binding.vfs.write("INDEX.md", index_md)
+            if "INDEX.md" not in changed:
+                changed.append("INDEX.md")
+
             return {
                 "saved": True,
                 "folder_id": folder_id,
@@ -467,12 +490,41 @@ class WorkFolderStore:
                 "changed_paths": changed,
             }
 
-        return self._call_mutate("wf_save", args, _write,
-                                 expected_base_sha, "work-folder: save")
+        return self._call_mutate(
+            "wf_save",
+            args,
+            _write,
+            expected_base_sha,
+            "work-folder: save",
+            idempotency_key=idempotency_key,
+            idempotency_payload={
+                "folder_id": folder_id,
+                "summary": summary,
+                "context_snapshot": context_snapshot,
+                "resume_fields": resume_fields,
+                "golden_order_additions": golden_order_additions,
+                "findings_addition": findings_addition,
+            },
+        )
 
-    def resume(self, folder_id: str, now_fn,
-               probe_fn=None,
-               expected_base_sha: str | None = None) -> dict:
+    def resume(
+        self,
+        folder_id: str,
+        now_fn,
+        probe_fn=None,
+        expected_base_sha: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        replay_args = {"folder_id": folder_id}
+        replay = self._kernel.replay_idempotent(
+            "work-folder",
+            "wf_resume",
+            replay_args,
+            idempotency_key=idempotency_key,
+            idempotency_payload=replay_args,
+        )
+        if replay is not None:
+            return replay
         try:
             folder = self._folder_path(folder_id)
         except (BriefError, FileNotFoundError, ValueError) as exc:
@@ -573,6 +625,11 @@ class WorkFolderStore:
             else:
                 raise ValueError(f"work-folder 缺少 {BRIEF_NAME}: {folder_id}")
 
+            index_md, _, _, _ = _render_index_snapshot(binding)
+            binding.vfs.write("INDEX.md", index_md)
+            if "INDEX.md" not in changed:
+                changed.append("INDEX.md")
+
             level_icon = {"MATCH": "✅", "DRIFT": "⚠️", "BROKEN": "❌"}
             verdict_lines = "\n".join(
                 f"  {level_icon.get(v.level, '?')} {v.name} ({v.path}) — {v.detail}"
@@ -601,85 +658,15 @@ class WorkFolderStore:
                 "changed_paths": changed,
             }
 
-        return self._call_mutate("wf_resume", args, _write,
-                                 expected_base_sha, "work-folder: resume")
-
-    def _find_append_manifest(self, idempotency_key: str) -> dict | None:
-        for manifest in reversed(self._binding.manifest.list_manifests()):
-            if (
-                manifest.get("domain") == "work-folder"
-                and manifest.get("op") == "wf_append_progress"
-                and manifest.get("result", {}).get("idempotency_key")
-                == idempotency_key
-            ):
-                return manifest
-        return None
-
-    def _append_replay_result(self, manifest: dict) -> dict:
-        stored = manifest.get("result", {})
-        manifest_id = manifest.get("manifest_id", "")
-        manifest_name = f".katana/manifests/{manifest_id}.json"
-        probe = subprocess.run(
-            [
-                "git",
-                "-C",
-                self._binding.repo_root,
-                "log",
-                "--diff-filter=A",
-                "-1",
-                "--format=%H",
-                "--",
-                manifest_name,
-            ],
-            capture_output=True,
-            text=True,
+        return self._call_mutate(
+            "wf_resume",
+            args,
+            _write,
+            expected_base_sha,
+            "work-folder: resume",
+            idempotency_key=idempotency_key,
+            idempotency_payload=replay_args,
         )
-        original_commit = (
-            probe.stdout.strip()
-            if probe.returncode == 0 and probe.stdout.strip()
-            else manifest.get("git", {}).get("detail", "")
-        )
-        git = dict(manifest.get("git", {}))
-        if original_commit:
-            git["detail"] = original_commit
-        return {
-            "ok": True,
-            "appended": True,
-            "replayed": True,
-            "folder_id": stored.get("folder_id", ""),
-            "filename": "progress.md",
-            "source_session_id": stored.get("source_session_id", ""),
-            "content_revision": stored.get("content_revision", ""),
-            "updated": stored.get("updated", ""),
-            "commit": original_commit,
-            "git": git,
-            "mutation_id": manifest_id,
-            "manifest": {"manifest_id": manifest_id},
-        }
-
-    def _append_replay_or_conflict(
-        self,
-        idempotency_key: str,
-        request_fingerprint: str,
-        *,
-        folder_id: str,
-        source_session_id: str,
-    ) -> dict | None:
-        manifest = self._find_append_manifest(idempotency_key)
-        if manifest is None:
-            return None
-        stored_fingerprint = manifest.get("result", {}).get(
-            "request_fingerprint"
-        )
-        if stored_fingerprint != request_fingerprint:
-            return _append_error(
-                "IDEMPOTENCY_CONFLICT",
-                "idempotency_key was already used for a different request",
-                folder_id=folder_id,
-                source_session_id=source_session_id,
-                commit=head_sha(self._binding.repo_root) or "",
-            )
-        return self._append_replay_result(manifest)
 
     def append_progress(
         self,
@@ -760,14 +747,36 @@ class WorkFolderStore:
             entry,
             source_session_id,
         )
+        idempotency_payload = {
+            "folder_id": folder_id,
+            "entry": entry,
+            "source_session_id": source_session_id,
+        }
+        replay_args = {
+            **idempotency_payload,
+            "idempotency_key": idempotency_key,
+            "request_fingerprint": request_fingerprint,
+        }
         with self._append_lock:
-            replay = self._append_replay_or_conflict(
-                idempotency_key,
-                request_fingerprint,
-                folder_id=folder_id,
-                source_session_id=source_session_id,
-            )
+            try:
+                replay = self._kernel.replay_idempotent(
+                    "work-folder",
+                    "wf_append_progress",
+                    replay_args,
+                    idempotency_key=idempotency_key,
+                    idempotency_payload=idempotency_payload,
+                )
+            except IdempotencyConflictError:
+                return _append_error(
+                    "IDEMPOTENCY_CONFLICT",
+                    "idempotency_key was already used for a different request",
+                    folder_id=folder_id,
+                    source_session_id=source_session_id,
+                    commit=head_sha(self._binding.repo_root) or "",
+                )
             if replay is not None:
+                replay["replayed"] = True
+                replay["commit"] = replay.get("git", {}).get("detail", "")
                 return replay
 
             try:
@@ -809,18 +818,11 @@ class WorkFolderStore:
                 "now_str": now.strftime("%Y-%m-%d %H:%M"),
                 "now_date": now.strftime("%Y-%m-%d"),
             }
+            write_ran = False
 
             def _write(binding, args):
-                concurrent = self._append_replay_or_conflict(
-                    args["idempotency_key"],
-                    args["request_fingerprint"],
-                    folder_id=args["folder_id"],
-                    source_session_id=args["source_session_id"],
-                )
-                if concurrent is not None:
-                    if concurrent.get("ok"):
-                        raise _AppendReplay(concurrent)
-                    raise _AppendConflict(concurrent["message"])
+                nonlocal write_ran
+                write_ran = True
 
                 folder = self._folder_path(args["folder_id"])
                 progress_path = f"{folder}/progress.md"
@@ -892,26 +894,18 @@ class WorkFolderStore:
                     _write,
                     expected_base_sha,
                     "work-folder: append progress",
+                    idempotency_key=idempotency_key,
+                    idempotency_payload=idempotency_payload,
                 )
-            except _AppendReplay as replay_exc:
-                return replay_exc.result
-            except _AppendConflict as conflict_exc:
+            except IdempotencyConflictError:
                 return _append_error(
                     "IDEMPOTENCY_CONFLICT",
-                    str(conflict_exc),
+                    "idempotency_key was already used for a different request",
                     folder_id=folder_id,
                     source_session_id=source_session_id,
                     commit=head_sha(self._binding.repo_root) or "",
                 )
             except CASRejectionError:
-                replay_after_cas = self._append_replay_or_conflict(
-                    idempotency_key,
-                    request_fingerprint,
-                    folder_id=folder_id,
-                    source_session_id=source_session_id,
-                )
-                if replay_after_cas is not None:
-                    return replay_after_cas
                 return _append_error(
                     "BASE_COMMIT_CONFLICT",
                     "repository changed since expected base commit",
@@ -929,11 +923,16 @@ class WorkFolderStore:
                     commit=head_sha(self._binding.repo_root) or "",
                 )
 
+            result["replayed"] = not write_ran
             result["commit"] = result.get("git", {}).get("detail", "")
             return result
 
-    def reindex(self, dry_run: bool = False,
-                expected_base_sha: str | None = None) -> dict:
+    def reindex(
+        self,
+        dry_run: bool = False,
+        expected_base_sha: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
         args = {"dry_run": dry_run}
 
         def _write(binding, args):
@@ -958,5 +957,12 @@ class WorkFolderStore:
             # with an empty changed-path allowlist.
             return _write(self._binding, args)
 
-        return self._call_mutate("wf_reindex", args, _write,
-                                 expected_base_sha, "work-folder: reindex")
+        return self._call_mutate(
+            "wf_reindex",
+            args,
+            _write,
+            expected_base_sha,
+            "work-folder: reindex",
+            idempotency_key=idempotency_key,
+            idempotency_payload={"dry_run": False},
+        )

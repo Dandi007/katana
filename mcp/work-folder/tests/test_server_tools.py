@@ -15,8 +15,16 @@ class FakeStore:
     def __init__(self):
         self.calls = []
 
-    def create(self, topic, now_fn, expected_base_sha=None):
-        self.calls.append(("create", topic, now_fn(), expected_base_sha))
+    def create(
+        self,
+        topic,
+        now_fn,
+        expected_base_sha=None,
+        idempotency_key=None,
+    ):
+        self.calls.append(
+            ("create", topic, now_fn(), expected_base_sha, idempotency_key)
+        )
         return {
             "created": True,
             "folder_id": "wf-abc123",
@@ -36,6 +44,7 @@ class FakeStore:
         golden_order_additions=None,
         findings_addition=None,
         expected_base_sha=None,
+        idempotency_key=None,
     ):
         self.calls.append(
             (
@@ -47,6 +56,7 @@ class FakeStore:
                 golden_order_additions,
                 findings_addition,
                 expected_base_sha,
+                idempotency_key,
             )
         )
         return {
@@ -56,8 +66,17 @@ class FakeStore:
             "manifest": {"manifest_id": "tx-save"},
         }
 
-    def resume(self, folder_id, now_fn, probe_fn=None, expected_base_sha=None):
-        self.calls.append(("resume", folder_id, now_fn(), expected_base_sha))
+    def resume(
+        self,
+        folder_id,
+        now_fn,
+        probe_fn=None,
+        expected_base_sha=None,
+        idempotency_key=None,
+    ):
+        self.calls.append(
+            ("resume", folder_id, now_fn(), expected_base_sha, idempotency_key)
+        )
         return {
             "ok": True,
             "folder_id": folder_id,
@@ -65,8 +84,15 @@ class FakeStore:
             "manifest": {"manifest_id": "tx-resume"},
         }
 
-    def reindex(self, dry_run=False, expected_base_sha=None):
-        self.calls.append(("reindex", dry_run, expected_base_sha))
+    def reindex(
+        self,
+        dry_run=False,
+        expected_base_sha=None,
+        idempotency_key=None,
+    ):
+        self.calls.append(
+            ("reindex", dry_run, expected_base_sha, idempotency_key)
+        )
         return {
             "indexed": 3,
             "skipped": 0,
@@ -137,6 +163,7 @@ def test_registered_tools_have_id_only_surface():
         "fs_stat",
         "fs_list",
         "fs_read",
+        "fs_read_bytes",
         "fs_create",
         "fs_write",
         "fs_edit",
@@ -161,24 +188,59 @@ def test_lifecycle_tools_route_opaque_id_and_redact_internal_fields(monkeypatch)
     monkeypatch.setattr(server, "_store", store)
     monkeypatch.setattr(server, "_now", lambda: fixed_now)
 
-    created = _run(server.wf_create("topic", expected_base_sha="1" * 40))
+    created = _run(
+        server.wf_create(
+            "topic",
+            expected_base_sha="1" * 40,
+            idempotency_key="create-key",
+        )
+    )
     saved = _run(
         server.wf_save(
             "wf-abc123",
             summary="checkpoint",
             resume_fields={"goal": "goal", "wf_abs": "/secret"},
             expected_base_sha="2" * 40,
+            idempotency_key="save-key",
         )
     )
-    resumed = _run(server.wf_resume("wf-abc123", expected_base_sha="3" * 40))
-    indexed = _run(server.wf_reindex(expected_base_sha="4" * 40))
+    resumed = _run(
+        server.wf_resume(
+            "wf-abc123",
+            expected_base_sha="3" * 40,
+            idempotency_key="resume-key",
+        )
+    )
+    indexed = _run(
+        server.wf_reindex(
+            expected_base_sha="4" * 40,
+            idempotency_key="reindex-key",
+        )
+    )
 
-    assert store.calls[0] == ("create", "topic", fixed_now, "1" * 40)
+    assert store.calls[0] == (
+        "create",
+        "topic",
+        fixed_now,
+        "1" * 40,
+        "create-key",
+    )
     assert store.calls[1][0:3] == ("save", "wf-abc123", "checkpoint")
     assert store.calls[1][4] == {"goal": "goal"}
-    assert store.calls[1][-1] == "2" * 40
-    assert store.calls[2] == ("resume", "wf-abc123", fixed_now, "3" * 40)
-    assert store.calls[3] == ("reindex", False, "4" * 40)
+    assert store.calls[1][-2:] == ("2" * 40, "save-key")
+    assert store.calls[2] == (
+        "resume",
+        "wf-abc123",
+        fixed_now,
+        "3" * 40,
+        "resume-key",
+    )
+    assert store.calls[3] == (
+        "reindex",
+        False,
+        "4" * 40,
+        "reindex-key",
+    )
 
     assert created["folder_id"] == "wf-abc123"
     assert created["mutation_id"] == "tx-create"

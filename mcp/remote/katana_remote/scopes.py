@@ -24,7 +24,7 @@ SCOPE_ALL = "*"
 ALL_SCOPES = {SCOPE_READ, SCOPE_QUERY, SCOPE_MUTATE, SCOPE_COMMAND, SCOPE_OPERATE, SCOPE_AUDIT}
 
 _READ_OPS = {
-    "fs_resolve", "fs_stat", "fs_list", "fs_read",
+    "fs_resolve", "fs_stat", "fs_list", "fs_read", "fs_read_bytes",
     "memory_index", "memory_get", "memory_read",
     "wiki_list_docs", "wiki_lint_mechanical",
     "wf_list",
@@ -46,7 +46,7 @@ _MUTATE_OPS = {
     "fs_create", "fs_write", "fs_edit", "fs_copy", "fs_rename", "fs_delete", "fs_batch",
     "memory_create", "memory_update", "memory_delete", "memory_edit",
     "wiki_ingest_plan", "wiki_ingest_apply",
-    "wf_create", "wf_save", "wf_resume", "wf_reindex",
+    "wf_create", "wf_save", "wf_resume", "wf_append_progress", "wf_reindex",
 }
 
 _COMMAND_OPS: set[str] = set()

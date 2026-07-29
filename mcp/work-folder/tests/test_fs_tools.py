@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import inspect
 import json
@@ -19,6 +20,7 @@ from katana_kernel import (
     GovernedVFS,
     MutationBrokenError,
     ResourceIdLedger,
+    SQLiteMutationLedger,
     TransactionManifest,
     head_sha,
 )
@@ -54,7 +56,8 @@ def _init_repo(repo: Path) -> None:
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Work Folder Test"], cwd=repo, check=True)
     (repo / ".gitkeep").write_text("", encoding="utf-8")
-    subprocess.run(["git", "add", ".gitkeep"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("/.katana/runtime/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitkeep", ".gitignore"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
 
 
@@ -91,8 +94,21 @@ def env(tmp_path, monkeypatch):
         str(tmp_path / ".katana" / "tombstones.json"),
         prefix="wf-",
     )
-    manifest = TransactionManifest(str(tmp_path / ".katana" / "manifests"))
-    kernel.bind("work-folder", _wf_policy(), vfs, ledger, manifest, str(tmp_path))
+    runtime = tmp_path / ".katana" / "runtime"
+    manifest = TransactionManifest(
+        str(runtime / "manifests"),
+        git_tracked=False,
+    )
+    mutation_ledger = SQLiteMutationLedger(str(runtime / "mutations.sqlite"))
+    kernel.bind(
+        "work-folder",
+        _wf_policy(),
+        vfs,
+        ledger,
+        manifest,
+        str(tmp_path),
+        mutation_ledger=mutation_ledger,
+    )
     store = WorkFolderStore(kernel)
     tools = FSTools(kernel, str(tmp_path))
     folder_id = store.create("primary", _now)["folder_id"]
@@ -186,7 +202,6 @@ def test_read_returns_numbered_slice_and_raw_revision(env):
         ("wf-abc123", "/absolute.md", "INVALID_PATH"),
         ("wf-abc123", ".git/config", "INVALID_PATH"),
         ("wf-abc123", ".katana/secret", "INVALID_PATH"),
-        ("wf-abc123", "nested/.hidden", "INVALID_PATH"),
     ],
 )
 def test_discovery_rejects_missing_or_unsafe_locator(env, folder_id, filename, code):
@@ -217,6 +232,86 @@ def test_folder_with_missing_or_mismatched_brief_is_invalid(env):
 
     assert no_brief["code"] == "INVALID_CONTENT"
     assert mismatch["code"] == "INVALID_CONTENT"
+
+
+def test_tracked_dotfiles_are_listable_readable_and_copyable(env):
+    folder = env.repo / env.folder_id
+    tracked = {
+        ".gitignore": "*.tmp\n",
+        ".dockerignore": ".cache\n",
+        ".gitmodules": "[submodule \"x\"]\n",
+        ".vscode/settings.json": "{}\n",
+        ".github/workflows/test.yml": "name: test\n",
+    }
+    for filename, content in tracked.items():
+        target = folder / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "-f", "--", *[
+            f"{env.folder_id}/{filename}" for filename in tracked
+        ]],
+        cwd=env.repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-qm", "tracked dotfiles"],
+        cwd=env.repo,
+        check=True,
+    )
+
+    root = env.tools.fs_list(env.folder_id)
+    vscode = env.tools.fs_list(env.folder_id, ".vscode")
+    read = env.tools.fs_read(env.folder_id, ".gitignore")
+    copied = env.tools.fs_copy(
+        env.folder_id,
+        ".github/workflows/test.yml",
+        env.folder_id,
+        "workflow-copy.yml",
+        idempotency_key="copy-dotfile",
+    )
+
+    assert {".gitignore", ".dockerignore", ".gitmodules", ".vscode", ".github"} <= {
+        entry["filename"] for entry in root["entries"]
+    }
+    assert [entry["filename"] for entry in vscode["entries"]] == [
+        ".vscode/settings.json"
+    ]
+    assert "*.tmp" in read["content"]
+    assert copied["ok"] is True
+    assert "name: test" in copied["content"]
+    assert env.tools.fs_read(env.folder_id, ".git/config")["code"] == "INVALID_PATH"
+    assert env.tools.fs_read(env.folder_id, ".katana/state")["code"] == "INVALID_PATH"
+
+
+def test_binary_files_have_governed_base64_read_contract(env):
+    payload = b"\x89PNG\r\n\x1a\n\x00\xffbinary"
+    target = env.repo / env.folder_id / "evidence.png"
+    target.write_bytes(payload)
+    subprocess.run(["git", "add", "."], cwd=env.repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "binary evidence"],
+        cwd=env.repo,
+        check=True,
+    )
+
+    stat = env.tools.fs_stat(env.folder_id, "evidence.png")
+    listed = env.tools.fs_list(env.folder_id)
+    text = env.tools.fs_read(env.folder_id, "evidence.png")
+    binary = env.tools.fs_read_bytes(
+        env.folder_id,
+        "evidence.png",
+        offset=2,
+        limit=5,
+    )
+
+    assert stat["size"] == len(payload)
+    assert "evidence.png" in {entry["filename"] for entry in listed["entries"]}
+    assert text["code"] == "BINARY_CONTENT"
+    assert base64.b64decode(binary["content_base64"]) == payload[2:7]
+    assert binary["encoding"] == "base64"
+    assert binary["next_offset"] == 7
+    assert binary["eof"] is False
 
 
 def test_tombstoned_folder_id_is_resource_replaced(env):
@@ -264,6 +359,31 @@ def test_create_write_edit_delete_roundtrip(env):
         _assert_safe(result, env.repo)
     assert edited["content"] == "gamma\n"
     assert not (env.repo / env.folder_id / "notes.md").exists()
+
+
+def test_idempotent_file_mutation_returns_ledger_uuid_and_commit_receipt(env):
+    result = env.tools.fs_create(
+        env.folder_id,
+        "ledger-id.md",
+        "content\n",
+        idempotency_key="file-ledger-id",
+    )
+
+    assert result["ok"] is True
+    mutation_id = result["mutation_id"]
+    binding = env.kernel.get_binding("work-folder")
+    record = binding.mutation_ledger.get(mutation_id)
+    commit_message = subprocess.run(
+        ["git", "show", "-s", "--format=%B", result["commit"]],
+        cwd=env.repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    assert record.state == "COMMITTED"
+    assert record.commit_sha == result["commit"]
+    assert f"Katana-Mutation-Id: {mutation_id}" in commit_message
 
 
 def test_create_rejects_duplicate_empty_too_large_and_lifecycle_files(env):
@@ -339,6 +459,46 @@ def test_revision_cas_and_idempotency_conflicts_are_machine_readable(env):
     assert stale_base["code"] == "BASE_COMMIT_CONFLICT"
     assert stale_base["retryable"] is True
     assert replay["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_exact_idempotent_replay_uses_sqlite_not_legacy_manifests(env):
+    legacy = env.repo / ".katana" / "legacy-manifests"
+    legacy.mkdir()
+    (legacy / "old.json").write_text(
+        json.dumps(
+            {
+                "domain": "work-folder",
+                "op": "fs_create",
+                "result": {"idempotency_key": "legacy-same-key"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=env.repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "archive legacy manifest"],
+        cwd=env.repo,
+        check=True,
+    )
+
+    first = env.tools.fs_create(
+        env.folder_id,
+        "ledger.md",
+        "stable",
+        idempotency_key="legacy-same-key",
+    )
+    first_head = head_sha(str(env.repo))
+    replay = env.tools.fs_create(
+        env.folder_id,
+        "ledger.md",
+        "stable",
+        expected_base_commit="a" * 40,
+        idempotency_key="legacy-same-key",
+    )
+
+    assert first["ok"] is True
+    assert replay == first
+    assert head_sha(str(env.repo)) == first_head
 
 
 def test_matching_revision_allows_write(env):

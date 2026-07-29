@@ -16,6 +16,7 @@ from katana_kernel import (
     GovernedKernel,
     GovernedVFS,
     ResourceIdLedger,
+    SQLiteMutationLedger,
     TransactionManifest,
     head_sha,
     is_working_tree_clean,
@@ -35,7 +36,15 @@ def _init_repo(repo: Path) -> None:
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Work Folder Test"], cwd=repo, check=True)
     (repo / ".gitkeep").write_text("", encoding="utf-8")
-    subprocess.run(["git", "add", ".gitkeep"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text(
+        "/.katana/runtime/\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "add", ".gitkeep", ".gitignore"],
+        cwd=repo,
+        check=True,
+    )
     subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
 
 
@@ -46,9 +55,28 @@ def _bind(repo: Path):
         str(repo / ".katana" / "tombstones.json"),
         prefix="wf-",
     )
-    manifest = TransactionManifest(str(repo / ".katana" / "manifests"))
-    kernel.bind("work-folder", _wf_policy(), vfs, ledger, manifest, str(repo))
+    runtime = repo / ".katana" / "runtime"
+    manifest = TransactionManifest(
+        str(runtime / "manifests"),
+        git_tracked=False,
+    )
+    kernel.bind(
+        "work-folder",
+        _wf_policy(),
+        vfs,
+        ledger,
+        manifest,
+        str(repo),
+        mutation_ledger=SQLiteMutationLedger(runtime / "mutations.sqlite"),
+    )
     return kernel, WorkFolderStore(kernel)
+
+
+def _is_clean(repo: Path) -> bool:
+    return is_working_tree_clean(
+        str(repo),
+        allowed_ignored_paths=[str(repo / ".katana/runtime")],
+    )
 
 
 @pytest.fixture
@@ -78,7 +106,7 @@ def test_create_and_save_reject_stale_cas(repo_store):
     repo, _, store = repo_store
     with pytest.raises(CASRejectionError):
         store.create("topic", _fixed_now, expected_base_sha="a" * 40)
-    assert is_working_tree_clean(str(repo))
+    assert _is_clean(repo)
 
     created = store.create("topic", _fixed_now)
     with pytest.raises(CASRejectionError):
@@ -87,7 +115,7 @@ def test_create_and_save_reject_stale_cas(repo_store):
             _fixed_now,
             expected_base_sha="b" * 40,
         )
-    assert is_working_tree_clean(str(repo))
+    assert _is_clean(repo)
 
 
 def test_sequential_cas_uses_returned_git_sha(repo_store):
@@ -104,37 +132,36 @@ def test_sequential_cas_uses_returned_git_sha(repo_store):
 
     assert sha1 != saved["git"]["detail"]
     assert saved["git"]["detail"] == head_sha(str(repo))
-    assert is_working_tree_clean(str(repo))
+    assert _is_clean(repo)
 
 
-def test_manifest_is_committed_and_populates_git_field(repo_store):
+def test_runtime_manifest_is_untracked_and_populates_git_field(repo_store):
     repo, _, store = repo_store
     result = store.create("topic", _fixed_now)
     manifest_id = result["manifest"]["manifest_id"]
-    manifest_files = subprocess.run(
+    tracked_files = subprocess.run(
         ["git", "ls-tree", "-r", "HEAD", "--name-only"],
         cwd=repo,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.splitlines()
+    assert not any(
+        path
+        for path in tracked_files
+        if path.startswith(".katana/manifests/")
+        or path.startswith(".katana/runtime/")
+    )
     manifest_path = next(
         path
-        for path in manifest_files
-        if path.startswith(".katana/manifests/") and manifest_id in path
+        for path in (repo / ".katana/runtime/manifests").glob("*.json")
+        if manifest_id in path.name
     )
-    content = subprocess.run(
-        ["git", "show", f"HEAD:{manifest_path}"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    manifest = json.loads(content)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["git"]["committed"] is True
     assert len(manifest["git"]["detail"]) == 40
-    assert is_working_tree_clean(str(repo))
+    assert _is_clean(repo)
 
 
 def test_save_resume_reindex_leave_clean_tree_and_use_folder_id(repo_store):
@@ -155,7 +182,7 @@ def test_save_resume_reindex_leave_clean_tree_and_use_folder_id(repo_store):
     assert indexed["indexed"] == 1
     assert "index_path" not in indexed
     assert (repo / "INDEX.md").is_file()
-    assert is_working_tree_clean(str(repo))
+    assert _is_clean(repo)
 
 
 def test_save_is_append_only_for_golden_order_and_changelog(repo_store):
@@ -210,11 +237,12 @@ def test_reindex_dry_run_is_read_only(repo_store):
     repo, _, store = repo_store
     store.create("topic", _fixed_now)
     sha_before = head_sha(str(repo))
+    index_before = (repo / "INDEX.md").read_bytes()
 
     result = store.reindex(dry_run=True)
 
     assert "# Work Folder INDEX" in result["preview"]
-    assert not (repo / "INDEX.md").exists()
+    assert (repo / "INDEX.md").read_bytes() == index_before
     assert head_sha(str(repo)) == sha_before
 
 
@@ -237,7 +265,7 @@ def test_resume_broken_blocks_through_governed_store(repo_store):
     assert result["blocked"] is True
     assert result["contract"] == lifecycle.RESUME_BLOCKED_CONTRACT
     assert missing in result["resume_report"]
-    assert is_working_tree_clean(str(repo))
+    assert _is_clean(repo)
 
 
 def test_resume_missing_folder_is_fail_safe_without_commit(repo_store):

@@ -100,16 +100,16 @@ def test_render_index_handles_empty():
     assert "Work Folder INDEX" in render_index([])
 
 
-def test_reindex_writes_index_without_returning_physical_path(tmp_path):
+def test_reindex_write_mode_is_retired_without_writing(tmp_path):
     _seed(tmp_path, "wf-000001", title="Foo", updated="2026-02-11")
     _seed(tmp_path, "wf-000002", title="Bar", updated="2026-06-30")
 
-    result = reindex(str(tmp_path))
+    import pytest
 
-    assert result == {"indexed": 2, "skipped": 0, "errors": []}
-    content = (tmp_path / "INDEX.md").read_text(encoding="utf-8")
-    assert content.find("Bar") < content.find("Foo")
-    assert str(tmp_path) not in str(result)
+    with pytest.raises(RuntimeError, match="wf_reindex"):
+        reindex(str(tmp_path), dry_run=False)
+
+    assert not (tmp_path / "INDEX.md").exists()
 
 
 def test_reindex_dry_run_returns_preview_without_writing(tmp_path):
@@ -131,7 +131,7 @@ def test_reindex_counts_flat_progress_folder_without_brief_as_skipped(tmp_path):
     invalid_name.mkdir()
     (invalid_name / "progress.md").write_text("# Progress", encoding="utf-8")
 
-    result = reindex(str(tmp_path))
+    result = reindex(str(tmp_path), dry_run=True)
 
     assert result["indexed"] == 1
     assert result["skipped"] == 1

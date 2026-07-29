@@ -17,6 +17,7 @@ from katana_kernel import (
     GovernedKernel,
     GovernedVFS,
     ResourceIdLedger,
+    SQLiteMutationLedger,
     TransactionManifest,
     head_sha,
 )
@@ -49,7 +50,8 @@ def _init_repo(repo: Path) -> None:
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Work Folder Test"], cwd=repo, check=True)
     (repo / ".gitkeep").write_text("", encoding="utf-8")
-    subprocess.run(["git", "add", ".gitkeep"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("/.katana/runtime/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitkeep", ".gitignore"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
 
 
@@ -78,8 +80,21 @@ def env(tmp_path, monkeypatch):
         str(tmp_path / ".katana" / "tombstones.json"),
         prefix="wf-",
     )
-    manifest = TransactionManifest(str(tmp_path / ".katana" / "manifests"))
-    kernel.bind("work-folder", _wf_policy(), vfs, ledger, manifest, str(tmp_path))
+    runtime = tmp_path / ".katana" / "runtime"
+    manifest = TransactionManifest(
+        str(runtime / "manifests"),
+        git_tracked=False,
+    )
+    mutation_ledger = SQLiteMutationLedger(str(runtime / "mutations.sqlite"))
+    kernel.bind(
+        "work-folder",
+        _wf_policy(),
+        vfs,
+        ledger,
+        manifest,
+        str(tmp_path),
+        mutation_ledger=mutation_ledger,
+    )
     store = WorkFolderStore(kernel)
     tools = FSTools(kernel, str(tmp_path))
     folder_id = store.create("append progress", _at(29))["folder_id"]
@@ -153,7 +168,7 @@ def test_append_updates_progress_brief_and_index_in_one_commit(env):
     assert str(brief["frontmatter"]["updated"]) == "2026-07-30"
     assert env.folder_id in index
     assert {f"{env.folder_id}/progress.md", f"{env.folder_id}/_brief.md", "INDEX.md"} <= set(changed)
-    assert sum(path.startswith(".katana/manifests/") for path in changed) == 1
+    assert not any(path.startswith(".katana/") for path in changed)
 
 
 def test_append_reactivates_paused_brief(env):
@@ -183,7 +198,7 @@ def test_exact_replay_returns_original_result_without_new_commit(env):
     assert second["ok"] is True
     assert second["appended"] is True
     assert second["replayed"] is True
-    assert second["mutation_id"] == first["manifest"]["manifest_id"]
+    assert second["mutation_id"] == first["mutation_id"]
     assert second["commit"] == first["git"]["detail"]
     assert head_sha(str(env.repo)) == sha_after_first
     assert progress.count("完成 flat-storage 实现") == 1
@@ -305,6 +320,7 @@ def test_missing_progress_is_rejected_without_partial_updates(env):
     subprocess.run(["git", "add", "."], cwd=env.repo, check=True)
     subprocess.run(["git", "commit", "-qm", "remove progress"], cwd=env.repo, check=True)
     brief_before = (env.repo / env.folder_id / "_brief.md").read_text(encoding="utf-8")
+    index_before = (env.repo / "INDEX.md").read_text(encoding="utf-8")
 
     result = _append(env)
 
@@ -313,7 +329,7 @@ def test_missing_progress_is_rejected_without_partial_updates(env):
     assert (env.repo / env.folder_id / "_brief.md").read_text(
         encoding="utf-8"
     ) == brief_before
-    assert not (env.repo / "INDEX.md").exists()
+    assert (env.repo / "INDEX.md").read_text(encoding="utf-8") == index_before
 
 
 def test_multiline_and_table_delimiters_are_escaped_in_changelog(env):

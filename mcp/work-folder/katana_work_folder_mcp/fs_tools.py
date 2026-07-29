@@ -7,6 +7,7 @@ O(1)：``wf-ID/_brief.md`` 必须存在且 ``brief.id == folder_id``。
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import re
 from typing import Any
@@ -15,6 +16,7 @@ from katana_kernel import (
     CASRejectionError,
     GovernedKernel,
     GovernedVFS,
+    IdempotencyConflictError,
     MutationBrokenError,
     head_sha,
 )
@@ -36,6 +38,7 @@ _CRITICAL_FILES = {"progress.md", "golden-order.md"}
 _GOVERNED_FILES = {"context.md", "CLAUDE.md", "AGENTS.md"}
 _ERROR_CODES = {
     "BASE_COMMIT_CONFLICT",
+    "BINARY_CONTENT",
     "BROKEN",
     "CONTENT_TOO_LARGE",
     "IDEMPOTENCY_CONFLICT",
@@ -58,6 +61,10 @@ class BatchOpError(Exception):
 
 def _content_hash(content: str) -> str:
     return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _bytes_hash(content: bytes) -> str:
+    return "sha256:" + hashlib.sha256(content).hexdigest()
 
 
 def _make_error(
@@ -93,6 +100,9 @@ def _make_error(
 
 
 def _mutation_id(result: dict) -> str | None:
+    value = result.get("mutation_id")
+    if value:
+        return str(value)
     manifest = result.get("manifest")
     if isinstance(manifest, dict):
         value = manifest.get("manifest_id")
@@ -145,6 +155,32 @@ def _make_success(
 
 def _basename(filename: str) -> str:
     return filename.rsplit("/", 1)[-1]
+
+
+def _file_mutation_result(
+    folder_id: str,
+    filename: str,
+    content: str,
+    changed_paths: list[str],
+) -> dict:
+    return {
+        "folder_id": folder_id,
+        "filename": filename,
+        "node_type": "file",
+        "size": len(content.encode("utf-8")),
+        "content": content,
+        "content_revision": _content_hash(content),
+        "changed_paths": changed_paths,
+    }
+
+
+def _refresh_index(binding) -> str:
+    # Local import avoids the store -> fs_tools server composition cycle.
+    from katana_work_folder_mcp.store import _render_index_snapshot
+
+    index_md, _, _, _ = _render_index_snapshot(binding)
+    binding.vfs.write("INDEX.md", index_md)
+    return "INDEX.md"
 
 
 def _extract_changelog_section(content: str) -> tuple[str, str]:
@@ -237,8 +273,8 @@ class FSTools:
         parts = filename.split("/")
         if any(part in ("", ".", "..") for part in parts):
             return "filename must not contain empty, '.' or '..' segments"
-        if any(part.startswith(".") or part in _EXCLUDE_PARTS for part in parts):
-            return "filename must not target hidden or governed metadata"
+        if any(part in _EXCLUDE_PARTS for part in parts):
+            return "filename must not target reserved governed metadata"
         return None
 
     def _resolve(
@@ -269,6 +305,9 @@ class FSTools:
         write_fn,
         expected_base_commit: str | None,
         commit_msg: str,
+        *,
+        idempotency_key: str | None = None,
+        idempotency_payload: dict | None = None,
     ) -> dict:
         return self._kernel.mutate(
             "work-folder",
@@ -277,6 +316,10 @@ class FSTools:
             expected_base_sha=expected_base_commit,
             write_fn=write_fn,
             commit_msg=commit_msg,
+            idempotency_key=idempotency_key,
+            idempotency_payload=(
+                idempotency_payload if idempotency_key is not None else None
+            ),
         )
 
     def _mutation_error(
@@ -296,6 +339,14 @@ class FSTools:
                 expected_revision=expected_base_commit,
                 current_commit=self._commit(),
                 retryable=True,
+            )
+        if isinstance(exc, IdempotencyConflictError):
+            return _make_error(
+                "IDEMPOTENCY_CONFLICT",
+                "idempotency key was already used for a different request",
+                folder_id=folder_id,
+                filename=filename,
+                current_commit=self._commit(),
             )
         if isinstance(exc, MutationBrokenError):
             return _make_error(
@@ -384,15 +435,31 @@ class FSTools:
     def _check_idempotency(self, idempotency_key: str | None) -> dict | None:
         if idempotency_key is None:
             return None
-        for manifest in self._binding.manifest.list_manifests():
-            result = manifest.get("result", {})
-            if result.get("idempotency_key") == idempotency_key:
-                return _make_error(
-                    "IDEMPOTENCY_CONFLICT",
-                    "idempotency key was already used",
-                    current_commit=self._commit(),
-                )
+        if (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key.strip()
+            or len(idempotency_key) > 256
+        ):
+            return _make_error(
+                "INVALID_CONTENT",
+                "idempotency_key must be a non-empty string up to 256 chars",
+                current_commit=self._commit(),
+            )
         return None
+
+    def _replay(
+        self,
+        op: str,
+        args: dict,
+        idempotency_key: str | None,
+    ) -> dict | None:
+        return self._kernel.replay_idempotent(
+            "work-folder",
+            op,
+            args,
+            idempotency_key=idempotency_key,
+            idempotency_payload=args,
+        )
 
     def _validate_brief(self, folder_id: str, content: str) -> str | None:
         try:
@@ -476,13 +543,13 @@ class FSTools:
 
     def _entry(self, folder_id: str, internal_name: str) -> dict:
         filename = internal_name[len(folder_id) + 1 :]
-        content = self._vfs.read_text(internal_name)
+        content = self._vfs.read_bytes(internal_name)
         stat = self._vfs.stat(internal_name)
         return {
             "filename": filename,
             "node_type": "file",
             "size": stat["size"],
-            "content_revision": _content_hash(content),
+            "content_revision": _bytes_hash(content),
         }
 
     def _list_entries(self, folder_id: str, internal_dir: str) -> list[dict]:
@@ -493,12 +560,17 @@ class FSTools:
         公共结果仍只包含 folder-relative filename，不暴露 repo locator。
         """
         prefix = internal_dir.rstrip("/") + "/"
-        descendants = self._vfs.ls(f"{internal_dir}/**/*")
+        descendants = self._vfs.ls(
+            f"{internal_dir}/**/*",
+            include_hidden=True,
+        )
         entries: dict[str, dict] = {}
         for internal_name in descendants:
             if not internal_name.startswith(prefix):
                 continue
             remainder = internal_name[len(prefix) :]
+            if any(part in _EXCLUDE_PARTS for part in remainder.split("/")):
+                continue
             first, separator, _ = remainder.partition("/")
             child_internal = prefix + first
             filename = child_internal[len(folder_id) + 1 :]
@@ -519,16 +591,25 @@ class FSTools:
         *,
         mutation_result: dict | None = None,
     ) -> dict:
-        internal_name = f"{folder_id}/{filename}"
-        stat = self._vfs.stat(internal_name)
+        snapshot = mutation_result or {}
+        snapshot_content = snapshot.get("content", content)
+        snapshot_size = snapshot.get(
+            "size",
+            len(snapshot_content.encode("utf-8")),
+        )
+        snapshot_revision = snapshot.get(
+            "content_revision",
+            _content_hash(snapshot_content),
+        )
+        mutation_commit = (snapshot.get("git") or {}).get("detail")
         return _make_success(
             folder_id=folder_id,
             filename=filename,
             node_type="file",
-            size=stat["size"],
-            content=content,
-            content_revision=_content_hash(content),
-            commit=self._commit(),
+            size=snapshot_size,
+            content=snapshot_content,
+            content_revision=snapshot_revision,
+            commit=mutation_commit or self._commit(),
             git=mutation_result.get("git") if mutation_result else None,
             mutation_id=_mutation_id(mutation_result or {}),
         )
@@ -545,6 +626,7 @@ class FSTools:
                     "fs_stat",
                     "fs_list",
                     "fs_read",
+                    "fs_read_bytes",
                     "fs_create",
                     "fs_write",
                     "fs_edit",
@@ -575,7 +657,8 @@ class FSTools:
                     filename=filename,
                     current_commit=self._commit(),
                 )
-            content = self._vfs.read_text(internal_name)
+            content = self._vfs.read_bytes(internal_name)
+            stat = self._vfs.stat(internal_name)
         except VFSError:
             return _make_error(
                 "INVALID_PATH",
@@ -584,7 +667,14 @@ class FSTools:
                 filename=filename,
                 current_commit=self._commit(),
             )
-        return self._file_success(folder_id, filename, content)
+        return _make_success(
+            folder_id=folder_id,
+            filename=filename,
+            node_type="file",
+            size=stat["size"],
+            content_revision=_bytes_hash(content),
+            commit=self._commit(),
+        )
 
     def fs_stat(self, folder_id: str, filename: str) -> dict:
         internal_name, error = self._resolve(folder_id, filename)
@@ -599,7 +689,7 @@ class FSTools:
                     node_type="directory",
                     commit=self._commit(),
                 )
-            content = self._vfs.read_text(internal_name)
+            content = self._vfs.read_bytes(internal_name)
         except VFSError:
             return _make_error(
                 "RESOURCE_NOT_FOUND",
@@ -613,7 +703,7 @@ class FSTools:
             filename=filename,
             node_type="file",
             size=stat["size"],
-            content_revision=_content_hash(content),
+            content_revision=_bytes_hash(content),
             commit=self._commit(),
         )
 
@@ -668,6 +758,14 @@ class FSTools:
                 )
             raw = self._vfs.read_text(internal_name)
             stat = self._vfs.stat(internal_name)
+        except UnicodeDecodeError:
+            return _make_error(
+                "BINARY_CONTENT",
+                "file is binary; use fs_read_bytes",
+                folder_id=folder_id,
+                filename=filename,
+                current_commit=self._commit(),
+            )
         except VFSError:
             return _make_error(
                 "INVALID_PATH",
@@ -694,6 +792,71 @@ class FSTools:
             commit=self._commit(),
         )
 
+    def fs_read_bytes(
+        self,
+        folder_id: str,
+        filename: str,
+        offset: int = 0,
+        limit: int = 262_144,
+    ) -> dict:
+        internal_name, error = self._resolve(folder_id, filename)
+        if error:
+            return error
+        if (
+            type(offset) is not int
+            or type(limit) is not int
+            or offset < 0
+            or limit <= 0
+            or limit > 1_000_000
+        ):
+            return _make_error(
+                "INVALID_CONTENT",
+                "offset must be >= 0 and limit must be 1..1000000 bytes",
+                folder_id=folder_id,
+                filename=filename,
+                current_commit=self._commit(),
+            )
+        try:
+            if not self._vfs.exists(internal_name) or not self._vfs.is_file(
+                internal_name
+            ):
+                return _make_error(
+                    "RESOURCE_NOT_FOUND",
+                    "file not found",
+                    folder_id=folder_id,
+                    filename=filename,
+                    current_commit=self._commit(),
+                )
+            raw = self._vfs.read_bytes(internal_name)
+        except VFSError:
+            return _make_error(
+                "INVALID_PATH",
+                "unable to read file",
+                folder_id=folder_id,
+                filename=filename,
+                current_commit=self._commit(),
+            )
+        chunk = raw[offset : offset + limit]
+        next_offset = offset + len(chunk)
+        result = _make_success(
+            folder_id=folder_id,
+            filename=filename,
+            node_type="file",
+            size=len(raw),
+            content_revision=_bytes_hash(raw),
+            commit=self._commit(),
+        )
+        result.update(
+            {
+                "encoding": "base64",
+                "content_base64": base64.b64encode(chunk).decode("ascii"),
+                "offset": offset,
+                "next_offset": next_offset,
+                "eof": next_offset >= len(raw),
+            }
+        )
+        return result
+
     # -- Mutations ---------------------------------------------------------
 
     def fs_create(
@@ -704,6 +867,25 @@ class FSTools:
         expected_base_commit: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict:
+        args = {"folder_id": folder_id, "filename": filename, "content": content}
+        if idem_error := self._check_idempotency(idempotency_key):
+            return idem_error
+        try:
+            replay = self._replay("fs_create", args, idempotency_key)
+        except Exception as exc:
+            return self._mutation_error(
+                exc,
+                folder_id=folder_id,
+                filename=filename,
+                expected_base_commit=expected_base_commit,
+            )
+        if replay is not None:
+            return self._file_success(
+                folder_id,
+                filename,
+                content,
+                mutation_result=replay,
+            )
         internal_name, error = self._resolve(folder_id, filename)
         if error:
             return error
@@ -717,8 +899,6 @@ class FSTools:
             )
         if size_error := self._check_size(folder_id, filename, content):
             return size_error
-        if idem_error := self._check_idempotency(idempotency_key):
-            return idem_error
         try:
             if self._vfs.exists(internal_name):
                 return _make_error(
@@ -739,12 +919,13 @@ class FSTools:
 
         def write(binding, args):
             binding.vfs.write(internal_name, content, op="fs_create", args=args)
-            result = {"changed_paths": [internal_name]}
-            if idempotency_key:
-                result["idempotency_key"] = idempotency_key
-            return result
+            return _file_mutation_result(
+                folder_id,
+                filename,
+                content,
+                [internal_name],
+            )
 
-        args = {"folder_id": folder_id, "filename": filename, "content": content}
         try:
             mutation = self._call_mutate(
                 "fs_create",
@@ -752,6 +933,8 @@ class FSTools:
                 write,
                 expected_base_commit,
                 f"chore(wf): create {folder_id}:{filename}",
+                idempotency_key=idempotency_key,
+                idempotency_payload=args,
             )
         except Exception as exc:
             return self._mutation_error(
@@ -776,13 +959,35 @@ class FSTools:
         expected_resource_revision: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict:
+        args = {
+            "folder_id": folder_id,
+            "filename": filename,
+            "content": content,
+            "expected_resource_revision": expected_resource_revision,
+        }
+        if idem_error := self._check_idempotency(idempotency_key):
+            return idem_error
+        try:
+            replay = self._replay("fs_write", args, idempotency_key)
+        except Exception as exc:
+            return self._mutation_error(
+                exc,
+                folder_id=folder_id,
+                filename=filename,
+                expected_base_commit=expected_base_commit,
+            )
+        if replay is not None:
+            return self._file_success(
+                folder_id,
+                filename,
+                content,
+                mutation_result=replay,
+            )
         internal_name, error = self._resolve(folder_id, filename)
         if error:
             return error
         if size_error := self._check_size(folder_id, filename, content):
             return size_error
-        if idem_error := self._check_idempotency(idempotency_key):
-            return idem_error
         if revision_error := self._check_revision(
             folder_id,
             filename,
@@ -828,12 +1033,16 @@ class FSTools:
 
         def write(binding, args):
             binding.vfs.write(internal_name, content, op="fs_write", args=args)
-            result = {"changed_paths": [internal_name]}
-            if idempotency_key:
-                result["idempotency_key"] = idempotency_key
-            return result
+            changed_paths = [internal_name]
+            if filename == BRIEF_NAME:
+                changed_paths.append(_refresh_index(binding))
+            return _file_mutation_result(
+                folder_id,
+                filename,
+                content,
+                changed_paths,
+            )
 
-        args = {"folder_id": folder_id, "filename": filename, "content": content}
         try:
             mutation = self._call_mutate(
                 "fs_write",
@@ -841,6 +1050,8 @@ class FSTools:
                 write,
                 expected_base_commit,
                 f"chore(wf): write {folder_id}:{filename}",
+                idempotency_key=idempotency_key,
+                idempotency_payload=args,
             )
         except Exception as exc:
             return self._mutation_error(
@@ -867,6 +1078,32 @@ class FSTools:
         expected_resource_revision: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict:
+        args = {
+            "folder_id": folder_id,
+            "filename": filename,
+            "old_string": old_string,
+            "new_string": new_string,
+            "replace_all": replace_all,
+            "expected_resource_revision": expected_resource_revision,
+        }
+        if idem_error := self._check_idempotency(idempotency_key):
+            return idem_error
+        try:
+            replay = self._replay("fs_edit", args, idempotency_key)
+        except Exception as exc:
+            return self._mutation_error(
+                exc,
+                folder_id=folder_id,
+                filename=filename,
+                expected_base_commit=expected_base_commit,
+            )
+        if replay is not None:
+            return self._file_success(
+                folder_id,
+                filename,
+                new_string,
+                mutation_result=replay,
+            )
         internal_name, error = self._resolve(folder_id, filename)
         if error:
             return error
@@ -878,8 +1115,6 @@ class FSTools:
                 filename=filename,
                 current_commit=self._commit(),
             )
-        if idem_error := self._check_idempotency(idempotency_key):
-            return idem_error
         if revision_error := self._check_revision(
             folder_id,
             filename,
@@ -945,18 +1180,16 @@ class FSTools:
 
         def write(binding, args):
             binding.vfs.write(internal_name, content, op="fs_edit", args=args)
-            result = {"changed_paths": [internal_name]}
-            if idempotency_key:
-                result["idempotency_key"] = idempotency_key
-            return result
+            changed_paths = [internal_name]
+            if filename == BRIEF_NAME:
+                changed_paths.append(_refresh_index(binding))
+            return _file_mutation_result(
+                folder_id,
+                filename,
+                content,
+                changed_paths,
+            )
 
-        args = {
-            "folder_id": folder_id,
-            "filename": filename,
-            "old_string": old_string,
-            "new_string": new_string,
-            "content": content,
-        }
         try:
             mutation = self._call_mutate(
                 "fs_edit",
@@ -964,6 +1197,8 @@ class FSTools:
                 write,
                 expected_base_commit,
                 f"chore(wf): edit {folder_id}:{filename}",
+                idempotency_key=idempotency_key,
+                idempotency_payload=args,
             )
         except Exception as exc:
             return self._mutation_error(
@@ -1040,6 +1275,30 @@ class FSTools:
         expected_base_commit: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict:
+        args = {
+            "source_folder_id": source_folder_id,
+            "source_filename": source_filename,
+            "dest_folder_id": dest_folder_id,
+            "dest_filename": dest_filename,
+        }
+        if idem_error := self._check_idempotency(idempotency_key):
+            return idem_error
+        try:
+            replay = self._replay("fs_copy", args, idempotency_key)
+        except Exception as exc:
+            return self._mutation_error(
+                exc,
+                folder_id=source_folder_id,
+                filename=source_filename,
+                expected_base_commit=expected_base_commit,
+            )
+        if replay is not None:
+            return self._file_success(
+                dest_folder_id,
+                dest_filename,
+                "",
+                mutation_result=replay,
+            )
         source, dest, error = self._resolve_transfer(
             source_folder_id,
             source_filename,
@@ -1048,23 +1307,17 @@ class FSTools:
         )
         if error:
             return error
-        if idem_error := self._check_idempotency(idempotency_key):
-            return idem_error
         content = self._vfs.read_text(source)
 
         def write(binding, args):
             binding.vfs.write(dest, content, op="fs_copy", args=args)
-            result = {"changed_paths": [dest]}
-            if idempotency_key:
-                result["idempotency_key"] = idempotency_key
-            return result
+            return _file_mutation_result(
+                dest_folder_id,
+                dest_filename,
+                content,
+                [dest],
+            )
 
-        args = {
-            "source_folder_id": source_folder_id,
-            "source_filename": source_filename,
-            "dest_folder_id": dest_folder_id,
-            "dest_filename": dest_filename,
-        }
         try:
             mutation = self._call_mutate(
                 "fs_copy",
@@ -1075,6 +1328,8 @@ class FSTools:
                     f"chore(wf): copy {source_folder_id}:{source_filename} -> "
                     f"{dest_folder_id}:{dest_filename}"
                 ),
+                idempotency_key=idempotency_key,
+                idempotency_payload=args,
             )
         except Exception as exc:
             return self._mutation_error(
@@ -1099,6 +1354,30 @@ class FSTools:
         expected_base_commit: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict:
+        args = {
+            "source_folder_id": source_folder_id,
+            "source_filename": source_filename,
+            "dest_folder_id": dest_folder_id,
+            "dest_filename": dest_filename,
+        }
+        if idem_error := self._check_idempotency(idempotency_key):
+            return idem_error
+        try:
+            replay = self._replay("fs_rename", args, idempotency_key)
+        except Exception as exc:
+            return self._mutation_error(
+                exc,
+                folder_id=source_folder_id,
+                filename=source_filename,
+                expected_base_commit=expected_base_commit,
+            )
+        if replay is not None:
+            return self._file_success(
+                dest_folder_id,
+                dest_filename,
+                "",
+                mutation_result=replay,
+            )
         source, dest, error = self._resolve_transfer(
             source_folder_id,
             source_filename,
@@ -1107,24 +1386,18 @@ class FSTools:
         )
         if error:
             return error
-        if idem_error := self._check_idempotency(idempotency_key):
-            return idem_error
         content = self._vfs.read_text(source)
 
         def write(binding, args):
             binding.vfs.write(dest, content, op="fs_rename", args=args)
             binding.vfs.delete(source, op="fs_rename", args=args)
-            result = {"changed_paths": [source, dest]}
-            if idempotency_key:
-                result["idempotency_key"] = idempotency_key
-            return result
+            return _file_mutation_result(
+                dest_folder_id,
+                dest_filename,
+                content,
+                [source, dest],
+            )
 
-        args = {
-            "source_folder_id": source_folder_id,
-            "source_filename": source_filename,
-            "dest_folder_id": dest_folder_id,
-            "dest_filename": dest_filename,
-        }
         try:
             mutation = self._call_mutate(
                 "fs_rename",
@@ -1135,6 +1408,8 @@ class FSTools:
                     f"chore(wf): rename {source_folder_id}:{source_filename} -> "
                     f"{dest_folder_id}:{dest_filename}"
                 ),
+                idempotency_key=idempotency_key,
+                idempotency_payload=args,
             )
         except Exception as exc:
             return self._mutation_error(
@@ -1157,6 +1432,27 @@ class FSTools:
         expected_base_commit: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict:
+        args = {"folder_id": folder_id, "filename": filename}
+        if idem_error := self._check_idempotency(idempotency_key):
+            return idem_error
+        try:
+            replay = self._replay("fs_delete", args, idempotency_key)
+        except Exception as exc:
+            return self._mutation_error(
+                exc,
+                folder_id=folder_id,
+                filename=filename,
+                expected_base_commit=expected_base_commit,
+            )
+        if replay is not None:
+            return _make_success(
+                folder_id=replay.get("folder_id", folder_id),
+                filename=replay.get("filename", filename),
+                node_type="file",
+                commit=(replay.get("git") or {}).get("detail") or self._commit(),
+                git=replay.get("git"),
+                mutation_id=_mutation_id(replay),
+            )
         internal_name, error = self._resolve(folder_id, filename)
         if error:
             return error
@@ -1168,8 +1464,6 @@ class FSTools:
                 filename=filename,
                 current_commit=self._commit(),
             )
-        if idem_error := self._check_idempotency(idempotency_key):
-            return idem_error
         try:
             if not self._vfs.exists(internal_name) or not self._vfs.is_file(internal_name):
                 return _make_error(
@@ -1189,20 +1483,23 @@ class FSTools:
             )
 
         def write(binding, args):
-            binding.vfs.delete(internal_name, op="delete", args=args)
-            result = {"changed_paths": [internal_name]}
-            if idempotency_key:
-                result["idempotency_key"] = idempotency_key
-            return result
+            binding.vfs.delete(internal_name, op="fs_delete", args=args)
+            return {
+                "folder_id": folder_id,
+                "filename": filename,
+                "node_type": "file",
+                "changed_paths": [internal_name],
+            }
 
-        args = {"folder_id": folder_id, "filename": filename}
         try:
             mutation = self._call_mutate(
-                "delete",
+                "fs_delete",
                 args,
                 write,
                 expected_base_commit,
                 f"chore(wf): delete {folder_id}:{filename}",
+                idempotency_key=idempotency_key,
+                idempotency_payload=args,
             )
         except Exception as exc:
             return self._mutation_error(
@@ -1215,7 +1512,7 @@ class FSTools:
             folder_id=folder_id,
             filename=filename,
             node_type="file",
-            commit=self._commit(),
+            commit=(mutation.get("git") or {}).get("detail") or self._commit(),
             git=mutation.get("git"),
             mutation_id=_mutation_id(mutation),
         )
@@ -1361,8 +1658,26 @@ class FSTools:
                 "batch operations list is empty",
                 current_commit=self._commit(),
             )
+        args = {"operations": operations}
         if idem_error := self._check_idempotency(idempotency_key):
             return idem_error
+        try:
+            replay = self._replay("fs_batch", args, idempotency_key)
+        except Exception as exc:
+            return self._mutation_error(
+                exc,
+                folder_id=None,
+                filename=None,
+                expected_base_commit=expected_base_commit,
+            )
+        if replay is not None:
+            return _make_success(
+                node_type="batch",
+                commit=(replay.get("git") or {}).get("detail") or self._commit(),
+                batch_results=replay.get("batch_results", []),
+                git=replay.get("git"),
+                mutation_id=_mutation_id(replay),
+            )
         try:
             prepared = [
                 self._prepare_batch_op(spec, index)
@@ -1442,21 +1757,27 @@ class FSTools:
                         "folder_id": op_args["folder_id"],
                         "filename": op_args["filename"],
                     })
+            if any(
+                item["op"] in {"fs_write", "fs_edit"}
+                and item["args"].get("filename") == BRIEF_NAME
+                for item in prepared
+            ):
+                changed.append(_refresh_index(binding))
             result = {
                 "changed_paths": changed,
                 "batch_results": safe_results,
             }
-            if idempotency_key:
-                result["idempotency_key"] = idempotency_key
             return result
 
         try:
             mutation = self._call_mutate(
                 "fs_batch",
-                {"operations": operations},
+                args,
                 write,
                 expected_base_commit,
                 "chore(wf): batch",
+                idempotency_key=idempotency_key,
+                idempotency_payload=args,
             )
         except Exception as exc:
             return self._mutation_error(
@@ -1467,7 +1788,7 @@ class FSTools:
             )
         return _make_success(
             node_type="batch",
-            commit=self._commit(),
+            commit=(mutation.get("git") or {}).get("detail") or self._commit(),
             batch_results=mutation.get("batch_results", []),
             git=mutation.get("git"),
             mutation_id=_mutation_id(mutation),

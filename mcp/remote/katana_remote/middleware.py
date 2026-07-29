@@ -5,6 +5,7 @@ Design §5.1 / §7.1 / §7.2 / §7.5 / §7.3
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Callable
 
@@ -78,6 +79,53 @@ def _extract_resource_count(body: dict | None) -> int:
                 if isinstance(ops, list):
                     return len(ops)
     return 0
+
+
+def _namespace_idempotency_key(
+    body: dict | None,
+    *,
+    domain: str,
+    tenant: str,
+    principal_id: str,
+) -> bool:
+    """Bind remote idempotency to the authenticated caller namespace."""
+
+    if not isinstance(body, dict) or not str(body.get("method", "")).startswith(
+        "tools/call"
+    ):
+        return False
+    params = body.get("params")
+    if not isinstance(params, dict):
+        return False
+    arguments = params.get("arguments")
+    if not isinstance(arguments, dict):
+        return False
+    raw_key = arguments.get("idempotency_key")
+    if (
+        not isinstance(raw_key, str)
+        or not raw_key.strip()
+        or len(raw_key) > 256
+    ):
+        return False
+    material = "\0".join(
+        ("katana-remote-idempotency-v1", domain, tenant, principal_id, raw_key)
+    ).encode("utf-8")
+    arguments["idempotency_key"] = (
+        "remote-v1:" + hashlib.sha256(material).hexdigest()
+    )
+    return True
+
+
+def _scope_with_content_length(scope: dict, length: int) -> dict:
+    updated = dict(scope)
+    headers = [
+        (name, value)
+        for name, value in scope.get("headers", [])
+        if name.lower() != b"content-length"
+    ]
+    headers.append((b"content-length", str(length).encode("ascii")))
+    updated["headers"] = headers
+    return updated
 
 
 def _build_error_response(status_code: int, code: str, message: str,
@@ -337,7 +385,7 @@ class AuthMiddleware:
             "fs_create", "fs_write", "fs_edit", "fs_copy", "fs_rename", "fs_delete",
             "fs_batch", "memory_create", "memory_update", "memory_delete", "memory_edit",
             "wiki_ingest_plan", "wiki_ingest_apply",
-            "wf_create", "wf_save", "wf_resume", "wf_reindex",
+            "wf_create", "wf_save", "wf_resume", "wf_append_progress", "wf_reindex",
         }
         is_batch = operation == "fs_batch"
         is_recursive = _extract_is_recursive(body_obj)
@@ -357,6 +405,19 @@ class AuthMiddleware:
                 retryable=True)
             await response(scope, receive, send)
             return
+
+        if _namespace_idempotency_key(
+            body_obj,
+            domain=self._domain,
+            tenant=principal.tenant,
+            principal_id=principal.principal_id,
+        ):
+            body = json.dumps(
+                body_obj,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            scope = _scope_with_content_length(scope, len(body))
 
         _sent = False
         original_receive = receive

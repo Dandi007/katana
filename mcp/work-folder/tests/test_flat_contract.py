@@ -37,7 +37,23 @@ def _init_repo(repo: Path) -> None:
         check=True,
     )
     (repo / ".gitkeep").write_text("", encoding="utf-8")
-    subprocess.run(["git", "add", ".gitkeep"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("/.katana/runtime/\n", encoding="utf-8")
+    (repo / "INDEX.md").write_text(reindex.render_index([]), encoding="utf-8")
+    controls = repo / ".katana"
+    controls.mkdir()
+    (controls / "tombstones.json").write_text(
+        '{"tombstones": []}\n',
+        encoding="utf-8",
+    )
+    (controls / "flat-layout.json").write_text(
+        '{"layout": "flat-id-v1", "schema_version": 1}\n',
+        encoding="utf-8",
+    )
+    (controls / "legacy-manifest-inventory.json").write_text(
+        '{"manifests":[],"schema_version":1}\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(
         ["git", "commit", "-m", "init"],
         cwd=repo,

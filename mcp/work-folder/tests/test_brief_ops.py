@@ -1,166 +1,57 @@
-"""Flat ``wf-ID`` brief seed/touch tests."""
+"""Legacy physical-path brief writers fail closed after the flat cutover."""
 
 from pathlib import Path
 
 import pytest
 
-from katana_work_folder_mcp.brief import BRIEF_NAME, parse_brief
-from katana_work_folder_mcp.brief_ops import main, seed_brief, touch_brief
+from katana_work_folder_mcp.brief_ops import (
+    DirectMutationRetiredError,
+    main,
+    seed_brief,
+    touch_brief,
+)
 
 
-def _folder(tmp_path: Path, folder_id: str = "wf-abc123") -> Path:
-    folder = tmp_path / folder_id
+def _folder(tmp_path: Path) -> Path:
+    folder = tmp_path / "wf-abc123"
     folder.mkdir()
     return folder
 
 
-def test_seed_brief_uses_explicit_folder_id(tmp_path):
+def test_seed_brief_is_retired_without_writing(tmp_path: Path) -> None:
     folder = _folder(tmp_path)
-    assert seed_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        title="Demo",
-        goal="Goal",
-        now="2026-07-01",
-    )
-    parsed = parse_brief((folder / BRIEF_NAME).read_text(encoding="utf-8"))
-    assert parsed["frontmatter"]["id"] == "wf-abc123"
-    assert parsed["frontmatter"]["created"] == "2026-07-01"
-    assert parsed["goal"] == "Goal"
 
-
-def test_seed_brief_rejects_noncanonical_id(tmp_path):
-    folder = _folder(tmp_path, "legacy-name")
-    with pytest.raises(ValueError, match="invalid folder_id"):
+    with pytest.raises(DirectMutationRetiredError, match="MCP"):
         seed_brief(
             str(folder),
-            folder_id="legacy-name",
+            folder_id="wf-abc123",
             title="Demo",
             goal="Goal",
             now="2026-07-01",
         )
 
+    assert list(folder.iterdir()) == []
 
-def test_seed_brief_is_idempotent(tmp_path):
+
+def test_touch_brief_is_retired_without_writing(tmp_path: Path) -> None:
     folder = _folder(tmp_path)
-    seed_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        title="First",
-        goal="g1",
-        now="2026-07-01",
-    )
-    assert not seed_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        title="Second",
-        goal="g2",
-        now="2026-07-02",
-    )
-    parsed = parse_brief((folder / BRIEF_NAME).read_text(encoding="utf-8"))
-    assert parsed["frontmatter"]["title"] == "First"
-    assert parsed["goal"] == "g1"
+    brief = folder / "_brief.md"
+    brief.write_text("unchanged\n", encoding="utf-8")
 
-
-def test_touch_updates_and_reactivates(tmp_path):
-    folder = _folder(tmp_path)
-    seed_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        title="T",
-        goal="g",
-        status="paused",
-        now="2026-07-01",
-    )
-    assert touch_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        now="2026-07-05",
-    )
-    parsed = parse_brief((folder / BRIEF_NAME).read_text(encoding="utf-8"))
-    assert parsed["frontmatter"]["updated"] == "2026-07-05"
-    assert parsed["frontmatter"]["status"] == "active"
-
-
-def test_touch_preserves_completed_status(tmp_path):
-    folder = _folder(tmp_path)
-    seed_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        title="T",
-        goal="g",
-        status="completed",
-        now="2026-07-01",
-    )
-    touch_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        now="2026-07-05",
-    )
-    parsed = parse_brief((folder / BRIEF_NAME).read_text(encoding="utf-8"))
-    assert parsed["frontmatter"]["status"] == "completed"
-
-
-def test_touch_seeds_with_explicit_identity(tmp_path):
-    folder = _folder(tmp_path)
-    assert touch_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        now="2026-07-05",
-        seed_title="Title",
-        seed_goal="Goal",
-    )
-    parsed = parse_brief((folder / BRIEF_NAME).read_text(encoding="utf-8"))
-    assert parsed["frontmatter"]["id"] == "wf-abc123"
-
-
-def test_touch_missing_without_seed_is_noop(tmp_path):
-    folder = _folder(tmp_path)
-    assert not touch_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        now="2026-07-05",
-    )
-
-
-def test_touch_rejects_brief_directory_mismatch(tmp_path):
-    folder = _folder(tmp_path)
-    seed_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        title="T",
-        goal="g",
-        now="2026-07-01",
-    )
-    with pytest.raises(ValueError, match="does not match"):
+    with pytest.raises(DirectMutationRetiredError, match="folder_id"):
         touch_brief(
             str(folder),
-            folder_id="wf-ffffff",
+            folder_id="wf-abc123",
             now="2026-07-05",
         )
 
+    assert brief.read_text(encoding="utf-8") == "unchanged\n"
 
-def test_touch_corrupt_brief_is_noop(tmp_path):
+
+def test_retired_cli_returns_usage_error_without_mutation(
+    tmp_path: Path,
+) -> None:
     folder = _folder(tmp_path)
-    (folder / BRIEF_NAME).write_text("not frontmatter", encoding="utf-8")
-    assert not touch_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        now="2026-07-05",
-    )
 
-
-def test_cli_uses_flat_folder_basename_as_id(tmp_path):
-    folder = _folder(tmp_path)
-    seed_brief(
-        str(folder),
-        folder_id="wf-abc123",
-        title="T",
-        goal="g",
-        status="paused",
-        now="2026-07-01",
-    )
-    assert main([str(folder), "--date", "2026-07-09"]) == 0
-    parsed = parse_brief((folder / BRIEF_NAME).read_text(encoding="utf-8"))
-    assert parsed["frontmatter"]["updated"] == "2026-07-09"
-    assert parsed["frontmatter"]["status"] == "active"
+    assert main([str(folder)]) == 2
+    assert list(folder.iterdir()) == []

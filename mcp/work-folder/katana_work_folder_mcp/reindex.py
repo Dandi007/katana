@@ -84,7 +84,7 @@ def render_index(entries: list[dict]) -> str:
     lines = [
         "# Work Folder INDEX",
         "",
-        f"> 共 {len(sorted_entries)} 个 work folder，按 updated 倒序。由 wf-reindex 自动生成，勿手改。",
+        f"> 共 {len(sorted_entries)} 个 work folder，按 updated 倒序。由 wf_reindex 自动生成，勿手改。",
         "",
         "| updated | status | id | title | goal |",
         "|---|---|---|---|---|",
@@ -101,12 +101,17 @@ def render_index(entries: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def reindex(root: str, dry_run: bool = False) -> dict:
+def reindex(root: str, dry_run: bool = True) -> dict:
     """扫 root 生成 INDEX.md。返回 {indexed, skipped, errors, preview?}。
 
-    - dry_run=True：不写文件，preview 字段含将生成的 INDEX 内容。
+    - 仅支持 ``dry_run=True``：返回 preview，不写文件。
+    - write mode 已退役；生产重建必须调用 governed ``wf_reindex``。
     - skipped：root 下无 _brief.md 的 folder 数（统计用，需扫目录）。
     """
+    if not dry_run:
+        raise RuntimeError(
+            "direct INDEX.md mutation is retired; use governed wf_reindex"
+        )
     root_p = Path(root)
     entries, errors = collect_briefs(str(root_p), return_errors=True)
 
@@ -125,41 +130,37 @@ def reindex(root: str, dry_run: bool = False) -> dict:
         skipped += 1
 
     md = render_index(entries)
-    index_path = root_p / INDEX_NAME
 
     result = {
         "indexed": len(entries),
         "skipped": skipped,
         "errors": errors,
     }
-    if dry_run:
-        result["preview"] = md
-    else:
-        index_path.write_text(md, encoding="utf-8")
+    result["preview"] = md
     return result
 
 
 def main(argv=None) -> int:
-    """CLI: wf-reindex <root> [--dry-run]"""
+    """Read-only compatibility CLI; write mode fails closed."""
     args = argv if argv is not None else sys.argv[1:]
     if not args:
-        print("usage: wf-reindex <root> [--dry-run]")
+        print("usage: wf-reindex <root> --dry-run")
         return 2
     dry = "--dry-run" in args
     root = next((a for a in args if not a.startswith("--")), None)
     if not root:
-        print("usage: wf-reindex <root> [--dry-run]")
+        print("usage: wf-reindex <root> --dry-run")
+        return 2
+    if not dry:
+        print("write mode retired; use governed wf_reindex")
         return 2
     r = reindex(root, dry_run=dry)
     print(f"[reindex] indexed={r['indexed']} skipped={r['skipped']} errors={len(r['errors'])}")
     if r["errors"]:
         for e in r["errors"][:20]:
             print(f"  ! {e}")
-    if dry:
-        print("--- preview ---")
-        print(r["preview"])
-    else:
-        print(f"[reindex] wrote {INDEX_NAME}")
+    print("--- preview ---")
+    print(r["preview"])
     return 0
 
 

@@ -8,8 +8,10 @@ tool 只接受 opaque ``folder_id`` 与 folder-relative filename，不返回物�
 from __future__ import annotations
 
 import datetime
+import hashlib
+import json
 import os
-import subprocess
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastmcp import FastMCP
@@ -18,13 +20,20 @@ from katana_kb_mcp_shared import config, vault_search
 from katana_kernel import (
     GovernedKernel,
     GovernedVFS,
+    IdempotencyConflictError,
     MutationBrokenError,
     ResourceIdLedger,
+    SQLiteMutationLedger,
     TransactionManifest,
+    require_exact_git_root,
 )
 from katana_work_folder_mcp import lifecycle as _lifecycle
 from katana_work_folder_mcp.fs_tools import FSTools, ID_RE
-from katana_work_folder_mcp.store import WorkFolderStore, _wf_policy
+from katana_work_folder_mcp.store import (
+    WorkFolderStore,
+    _render_index_snapshot,
+    _wf_policy,
+)
 
 mcp = FastMCP(
     "katana-work-folder-mcp",
@@ -38,6 +47,21 @@ _repo_root: str | None = None
 _kernel: GovernedKernel | None = None
 _store: WorkFolderStore | None = None
 _fs_tools: FSTools | None = None
+
+_LAYOUT_CANARY = ".katana/flat-layout.json"
+_ALLOWED_ROOT_FILES = {
+    ".gitignore",
+    ".gitkeep",
+    "INDEX.md",
+}
+_ALLOWED_KATANA_ENTRIES = {
+    "control-archive",
+    "flat-layout.json",
+    "legacy-manifest-inventory.json",
+    "legacy-manifests",
+    "runtime",
+    "tombstones.json",
+}
 
 _DROP_PUBLIC_KEYS = {
     "changed_paths",
@@ -110,33 +134,225 @@ def _public_payload(value: Any) -> Any:
 def _server_mutation(call) -> dict:
     try:
         return _public_payload(call())
+    except IdempotencyConflictError as exc:
+        return {
+            "ok": False,
+            "code": "IDEMPOTENCY_CONFLICT",
+            "message": str(exc),
+            "retryable": False,
+        }
     except MutationBrokenError as exc:
         return _public_payload(exc.as_error())
 
 
 def _require_git_root(repo_root: str) -> str:
     """验证 repo_root 已是 exact Git root；绝不隐式初始化。"""
-    root = os.path.realpath(repo_root)
-    if not os.path.isdir(root):
-        raise ValueError("work-folder repo root does not exist")
-    probe = subprocess.run(
-        ["git", "-C", root, "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
+    try:
+        return require_exact_git_root(repo_root)
+    except ValueError as exc:
+        raise ValueError(f"invalid work-folder Git repository root: {exc}") from exc
+
+
+def _reject_nested_git_metadata(repo: Path) -> None:
+    for child in repo.iterdir():
+        if child.name == ".git":
+            continue
+        if child.is_symlink() or not child.is_dir():
+            continue
+        for candidate in child.rglob(".git"):
+            relative = candidate.relative_to(repo).as_posix()
+            raise ValueError(
+                f"flat topology rejects nested Git metadata: {relative}"
+            )
+
+
+def _validate_flat_topology(root: str) -> None:
+    """Reject every pre-cutover or ambiguous repository topology."""
+    repo = Path(root)
+    _reject_nested_git_metadata(repo)
+    canary = repo / _LAYOUT_CANARY
+    try:
+        canary_payload = json.loads(canary.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("flat-layout migration canary is missing or invalid") from exc
+    if canary_payload != {"layout": "flat-id-v1", "schema_version": 1}:
+        raise ValueError("flat-layout migration canary has an unsupported schema")
+
+    tombstones = repo / ".katana" / "tombstones.json"
+    if tombstones.is_symlink() or not tombstones.is_file():
+        raise ValueError("flat repository requires a regular tombstone ledger")
+    legacy_manifests = repo / ".katana" / "manifests"
+    if legacy_manifests.exists() or legacy_manifests.is_symlink():
+        raise ValueError(
+            "legacy manifest directory must be archived before server startup"
+        )
+
+    for entry in repo.iterdir():
+        if entry.is_symlink():
+            raise ValueError(f"flat topology rejects symlink: {entry.name}")
+        if entry.is_file():
+            if entry.name not in _ALLOWED_ROOT_FILES:
+                raise ValueError(
+                    f"flat topology contains unknown root payload: {entry.name}"
+                )
+            continue
+        if not entry.is_dir():
+            raise ValueError(
+                f"flat topology contains special root payload: {entry.name}"
+            )
+        if entry.name in {".git", ".katana"}:
+            continue
+        if not ID_RE.fullmatch(entry.name):
+            raise ValueError(
+                f"legacy or ambiguous work-folder topology remains: {entry.name}"
+            )
+        brief = entry / "_brief.md"
+        if brief.is_symlink() or not brief.is_file():
+            raise ValueError(
+                f"flat work folder is missing a regular _brief.md: {entry.name}"
+            )
+        for descendant in entry.rglob("*"):
+            relative_parts = descendant.relative_to(entry).parts
+            if any(part in {".git", ".katana"} for part in relative_parts):
+                relative = descendant.relative_to(repo).as_posix()
+                raise ValueError(
+                    f"flat topology contains reserved topic metadata: {relative}"
+                )
+            if descendant.is_symlink():
+                relative = descendant.relative_to(repo).as_posix()
+                raise ValueError(f"flat topology rejects symlink: {relative}")
+
+    katana = repo / ".katana"
+    for entry in katana.iterdir():
+        if entry.name not in _ALLOWED_KATANA_ENTRIES:
+            raise ValueError(
+                f"flat topology contains unknown .katana control: {entry.name}"
+            )
+        if entry.is_symlink():
+            raise ValueError(
+                f"flat topology rejects .katana symlink: {entry.name}"
+            )
+        if entry.is_dir():
+            for descendant in entry.rglob("*"):
+                if descendant.is_symlink():
+                    relative = descendant.relative_to(repo).as_posix()
+                    raise ValueError(
+                        f"flat topology rejects .katana symlink: {relative}"
+                    )
+
+    _validate_legacy_manifest_inventory(repo)
+
+
+def _safe_repo_relative(value: object) -> bool:
+    if not isinstance(value, str) or not value or "\\" in value:
+        return False
+    path = PurePosixPath(value)
+    return (
+        not path.is_absolute()
+        and path.as_posix() == value
+        and all(part not in {"", ".", ".."} for part in path.parts)
     )
-    if probe.returncode != 0:
-        raise ValueError("work-folder repo root must be an existing Git repository")
-    discovered = os.path.realpath(probe.stdout.strip())
-    if discovered != root:
-        raise ValueError("configured directory must be the Git repository root")
-    return root
+
+
+def _validate_legacy_manifest_inventory(repo: Path) -> None:
+    """Prove every pre-cutover manifest is archived and inventoried."""
+
+    inventory_path = repo / ".katana/legacy-manifest-inventory.json"
+    try:
+        payload = json.loads(inventory_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "legacy manifest inventory is missing or invalid"
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or not isinstance(payload.get("manifests"), list)
+    ):
+        raise ValueError("legacy manifest inventory has an unsupported schema")
+
+    expected: dict[str, dict] = {}
+    for record in payload["manifests"]:
+        if not isinstance(record, dict):
+            raise ValueError("legacy manifest inventory entry is invalid")
+        source = record.get("source_repo_path")
+        archive = record.get("archive_repo_path")
+        digest = record.get("sha256")
+        size = record.get("size")
+        if (
+            not _safe_repo_relative(source)
+            or not _safe_repo_relative(archive)
+            or not archive.startswith(".katana/legacy-manifests/")
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+            or type(size) is not int
+            or size < 0
+            or type(record.get("git_tracked")) is not bool
+            or archive in expected
+        ):
+            raise ValueError("legacy manifest inventory entry is invalid")
+        expected[archive] = record
+
+    archive_root = repo / ".katana/legacy-manifests"
+    actual: set[str] = set()
+    if archive_root.exists():
+        if archive_root.is_symlink() or not archive_root.is_dir():
+            raise ValueError("legacy manifest archive must be a real directory")
+        for item in archive_root.rglob("*"):
+            relative = item.relative_to(repo).as_posix()
+            if item.is_symlink() or (not item.is_dir() and not item.is_file()):
+                raise ValueError(
+                    f"legacy manifest archive contains unsafe payload: {relative}"
+                )
+            if item.is_file():
+                actual.add(relative)
+    if actual != set(expected):
+        raise ValueError(
+            "legacy manifest inventory does not match archived files"
+        )
+    for archive, record in expected.items():
+        content = (repo / archive).read_bytes()
+        if (
+            len(content) != record["size"]
+            or hashlib.sha256(content).hexdigest() != record["sha256"]
+        ):
+            raise ValueError(
+                f"legacy manifest archive hash mismatch: {archive}"
+            )
+
+
+def _validate_flat_index(kernel: GovernedKernel, root: str) -> None:
+    binding = kernel.get_binding("work-folder")
+    rendered, indexed, skipped, errors = _render_index_snapshot(binding)
+    index_path = Path(root) / "INDEX.md"
+    try:
+        current = index_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError("flat repository INDEX.md is missing or unreadable") from exc
+    live_ids = {
+        entry.name
+        for entry in Path(root).iterdir()
+        if entry.is_dir() and ID_RE.fullmatch(entry.name)
+    }
+    overlap = sorted(live_ids & binding.ledger.tombstones)
+    if overlap:
+        raise ValueError(
+            f"live folder IDs overlap tombstones: {', '.join(overlap)}"
+        )
+    if errors or skipped or indexed != len(live_ids):
+        raise ValueError(
+            "flat repository INDEX inputs are incomplete or invalid"
+        )
+    if current != rendered:
+        raise ValueError("flat repository INDEX.md is stale")
 
 
 def configure(repo_root: str) -> None:
     """将 MCP 绑定到单一 existing Git data root。"""
     global _repo_root, _kernel, _store, _fs_tools
     root = _require_git_root(repo_root)
-    _repo_root = root
+    _validate_flat_topology(root)
 
     kernel = GovernedKernel()
     vfs = GovernedVFS(root)
@@ -144,8 +360,27 @@ def configure(repo_root: str) -> None:
         os.path.join(root, ".katana", "tombstones.json"),
         prefix="wf-",
     )
-    manifest = TransactionManifest(os.path.join(root, ".katana", "manifests"))
-    kernel.bind("work-folder", _wf_policy(), vfs, ledger, manifest, root)
+    runtime_root = os.path.join(root, ".katana", "runtime")
+    manifest = TransactionManifest(
+        os.path.join(runtime_root, "manifests"),
+        git_tracked=False,
+    )
+    mutation_ledger = SQLiteMutationLedger(
+        os.path.join(runtime_root, "mutations.sqlite"),
+    )
+    kernel.bind(
+        "work-folder",
+        _wf_policy(),
+        vfs,
+        ledger,
+        manifest,
+        root,
+        mutation_ledger=mutation_ledger,
+    )
+    _validate_flat_index(kernel, root)
+    kernel.reconcile("work-folder")
+
+    _repo_root = root
     _kernel = kernel
     _store = WorkFolderStore(kernel)
     _fs_tools = FSTools(kernel, root)
@@ -192,6 +427,7 @@ async def wf_search(query: str, top_k: int = 10) -> list[dict]:
 async def wf_create(
     topic: str,
     expected_base_sha: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict:
     """在 data root 直接创建新的 ``wf-ID/`` folder。"""
     return _server_mutation(
@@ -199,6 +435,7 @@ async def wf_create(
             topic,
             now_fn=_now,
             expected_base_sha=expected_base_sha,
+            idempotency_key=idempotency_key,
         )
     )
 
@@ -220,6 +457,7 @@ async def wf_save(
     golden_order_additions: str | None = None,
     findings_addition: str | None = None,
     expected_base_sha: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict:
     """用 opaque folder ID 保存 checkpoint。"""
     return _server_mutation(
@@ -232,6 +470,7 @@ async def wf_save(
             golden_order_additions=golden_order_additions,
             findings_addition=findings_addition,
             expected_base_sha=expected_base_sha,
+            idempotency_key=idempotency_key,
         )
     )
 
@@ -240,6 +479,7 @@ async def wf_save(
 async def wf_resume(
     folder_id: str,
     expected_base_sha: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict:
     """用 opaque folder ID 恢复并验证工作状态。"""
     return _server_mutation(
@@ -247,6 +487,7 @@ async def wf_resume(
             folder_id,
             now_fn=_now,
             expected_base_sha=expected_base_sha,
+            idempotency_key=idempotency_key,
         )
     )
 
@@ -276,12 +517,14 @@ async def wf_append_progress(
 async def wf_reindex(
     dry_run: bool = False,
     expected_base_sha: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict:
     """重建无 locator 列的顶层 INDEX.md。"""
     return _server_mutation(
         lambda: _require_store().reindex(
             dry_run=dry_run,
             expected_base_sha=expected_base_sha,
+            idempotency_key=idempotency_key,
         )
     )
 
@@ -315,6 +558,23 @@ async def fs_read(
 ) -> dict:
     return _public_payload(
         _require_fs_tools().fs_read(
+            folder_id,
+            filename,
+            offset=offset,
+            limit=limit,
+        )
+    )
+
+
+@mcp.tool()
+async def fs_read_bytes(
+    folder_id: str,
+    filename: str,
+    offset: int = 0,
+    limit: int = 262_144,
+) -> dict:
+    return _public_payload(
+        _require_fs_tools().fs_read_bytes(
             folder_id,
             filename,
             offset=offset,

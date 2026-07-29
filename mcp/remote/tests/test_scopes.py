@@ -101,7 +101,7 @@ def test_fs_glob_requires_query_scope():
 
 def test_all_operations_covered():
     for op in [
-        "fs_resolve", "fs_stat", "fs_list", "fs_read",
+        "fs_resolve", "fs_stat", "fs_list", "fs_read", "fs_read_bytes",
         "memory_index", "memory_get", "memory_read",
         "wiki_list_docs", "wiki_lint_mechanical",
         "wf_list", "fs_capabilities",
@@ -120,7 +120,7 @@ def test_all_operations_covered():
         "fs_create", "fs_write", "fs_edit", "fs_copy", "fs_rename", "fs_delete", "fs_batch",
         "memory_create", "memory_update", "memory_delete", "memory_edit",
         "wiki_ingest_plan", "wiki_ingest_apply",
-        "wf_create", "wf_save", "wf_resume", "wf_reindex",
+        "wf_create", "wf_save", "wf_resume", "wf_append_progress", "wf_reindex",
     ]:
         scope = scope_required_for_operation(op)
         assert scope == SCOPE_MUTATE, f"{op} should require mutate, got {scope}"
