@@ -20,14 +20,21 @@ META_FILES = frozenset({"WIKI.md", "log.md"})
 DEFAULT_SUMMARY_MAX_LEN = 100
 
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 def check_frontmatter(fm: dict) -> list[str]:
     errors: list[str] = []
 
     if "创建日期" not in fm:
         errors.append("缺必填 frontmatter: 创建日期")
+    elif not isinstance(fm["创建日期"], str) or not _DATE_RE.match(fm["创建日期"]):
+        errors.append("创建日期 须为 YYYY-MM-DD 格式")
 
     if "tags" not in fm or not isinstance(fm.get("tags"), list):
         errors.append("缺必填 frontmatter: tags（须 YAML list）")
+    elif len(fm["tags"]) == 0:
+        errors.append("tags 须为非空 list")
 
     page_type = fm.get("类型")
     if "类型" not in fm:

@@ -118,15 +118,33 @@ class WikiStore:
 
     def _mutate(self, tool: str, write_fn, commit_msg: str) -> dict:
         with self._lock:
+            saved_keyword = {k: set(v) for k, v in self._search._keyword._index.items()}
+            saved_lance_ids: set[str] = set()
+            if self._search._table is not None:
+                try:
+                    saved_lance_ids = {r["id"] for r in self._search._table.to_list()}
+                except Exception:
+                    pass
+
             changed_paths: list[str] = []
             try:
                 write_result = write_fn(changed_paths)
             except Exception:
                 self._git_quiet("checkout", "--", ".")
                 self._git_quiet("clean", "-fd", "pages/")
+                self._search._keyword._index = saved_keyword
+                if self._search._table is not None:
+                    try:
+                        current_ids = {r["id"] for r in self._search._table.to_list()}
+                        for pid in current_ids - saved_lance_ids:
+                            self._search._table.delete(f"id = '{pid}'")
+                        for pid in saved_lance_ids - current_ids:
+                            page = _pages.find_page_by_id(self._search._data_root, pid)
+                            if page and page.get("id") and not page.get("_error"):
+                                self._search._embed_page(pid, f"{page['title']}\n{page['body']}")
+                    except Exception:
+                        pass
                 raise
-            keyword_path = str(Path(self._data_root) / ".katana" / "index" / "keyword.json")
-            self._search._keyword.save(keyword_path)
             manifest_path = self._write_manifest(tool, changed_paths, write_result)
             all_paths = list(changed_paths) + [manifest_path]
             commit_sha = self._commit(commit_msg, all_paths)
@@ -454,6 +472,8 @@ class WikiStore:
 
             all_pages = _pages.scan_pages(store._data_root)
             for other_page in all_pages:
+                if other_page.get("_error"):
+                    continue
                 if other_page["id"] == current_page["id"]:
                     continue
                 new_body = _pages.rewrite_wikilinks(other_page["body"], old_title, new_title)
@@ -511,6 +531,8 @@ class WikiStore:
             if inlink_action == "remove_links" and inlinks:
                 all_pages = _pages.scan_pages(store._data_root)
                 for other_page in all_pages:
+                    if other_page.get("_error"):
+                        continue
                     new_body = _pages.remove_wikilinks_for_title(other_page["body"], title)
                     if new_body != other_page["body"]:
                         other_path = _pages.title_to_path(other_page["title"])
