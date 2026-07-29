@@ -6,175 +6,152 @@ description: 在 context 满或需要切换 session 前，把当前工作状态�
 # Checkpoint — Session ↔ Work Folder 搬运
 
 两个模式：
-- Save（默认）：session 结束前，把关键记忆持久化到 work folder
-- Resume：新 session 开始时，从 work folder 加载状态、验证环境、建立上下文
 
-## 配置
+- Save（默认）：session 结束前，把关键记忆持久化到 Work Folder
+- Resume：新 session 开始时，加载状态、验证环境并继续工作
 
-Work folder 的逻辑路径由 work-folder MCP 解析；不要把服务端物理根暴露给 client。配置优先级：
+## MCP 寻址与持久化契约
 
-| 优先级 | 配置方式 | 示例 |
-|--------|---------|------|
-| 1 | 环境变量 `KATANA_WORK_FOLDER` | `export KATANA_WORK_FOLDER=智元工作/工作记录` |
-| 2 | 项目根目录 `.katana` 文件 | `work_folder_path=智元工作/工作记录` |
-| 3 | 默认值 | `docs/work-records` |
-
-如果项目 `.katana` 文件或环境变量指定了路径，以那个为准，忽略默认值。确定、创建、检索和恢复目录分别使用 `wf_search` / `wf_create` / `wf_resume`，不要在 client 文件系统探测该路径。
+1. `folder_id` 是 opaque token（例如 `wf-a1b2c3`）。只从 `wf_create`、`wf_search`、`wf_list` 或 `wf_resume` 的返回值取得并原样传递；不得根据日期、标题、slug 或目录猜测，也不得拼接、解析成物理路径。
+2. 文件寻址只使用 `folder_id` + folder-relative `filename`，例如 `folder_id=wf-a1b2c3, filename=progress.md`。绝不向 MCP 传绝对路径、逻辑目录或 `<folder>/<file>` locator。
+3. 生命周期只用 `wf_create` / `wf_search` / `wf_list` / `wf_resume` / `wf_save`；文件发现和读写只用 `fs_stat` / `fs_list` / `fs_read` / `fs_create` / `fs_write` / `fs_edit`。需要发现文件时先 `fs_list`，再按返回的 `filename` 精确读取。
+4. `fs_create` 只创建不存在的普通文件；目标已存在会失败。`fs_write` 只覆盖已存在文件，绝不隐式 create；局部修改已存在文件用 `fs_edit`。生命周期管理的 identity/control 文件优先交给 `wf_create` / `wf_save` / `wf_resume`，不要自行创建。
+5. 每个 mutation 都由 MCP server 经 CAS、policy、manifest 和 Git commit 持久化。client 不对 Work Folder 数据运行原生 Git 命令，也不另做 commit；以 tool 返回的 `git.committed=true`、`git.detail`、`mutation_id`（file tool 还会返回 `commit`）为持久化证据。
 
 ## 核心原则
 
-1. **checkpoint 是搬运层，不是定义层**——artifact 的语义、格式、优先级定义见 `references/artifact-formats.md`（本 skill 调用时载入；session 常驻只留一句话锚点）；checkpoint 只负责把 session 状态 dump 进 work folder、或从 work folder 加载回 session
-2. **协同已有 artifact**——如果 work folder 已有 spec.md / plan.md 等文件，不覆盖、不冲突，只追加/更新
-3. **Resume 必须验证**——加载状态后不能盲目继续，必须检查环境是否与存档一致
+1. **checkpoint 是搬运层，不是定义层**——artifact 的语义、格式和读取优先级见 `references/artifact-formats.md`；Save 负责把 session 状态交给 MCP，Resume 负责把 MCP 状态加载回 session。
+2. **协同已有 artifact**——spec.md / plan.md / goal.md 只读引用，不覆盖、不补建；只更新 checkpoint 职责内的状态。
+3. **Resume 必须验证**——以 `wf_resume` 返回的 server-side 环境验证为准；BROKEN 必须停止。
 
 ---
 
 # Save 模式
 
-## 流程
+## Step 1: 确定 `folder_id`
 
-### Step 1: 确定 Work Folder
+1. 回顾当前 session，识别工作主题。
+2. 上下文已有可信 `folder_id` 时原样复用。
+3. 不确定时调用 `wf_search`；若只需最近 active 候选可调用 `wf_list`。
+4. 没有合适候选时调用 `wf_create(topic=...)`，使用返回的 `folder_id`。若是否新建会改变用户意图，先询问用户。
 
-1. 回顾当前 session 上下文，识别正在做的工作主题
-2. 已知 active work folder 的逻辑路径时直接使用；不确定时调用 `wf_search` 查找候选
-3. 如果找到了 → 使用返回的逻辑路径
-4. 如果没找到 → 问用户：提供已有逻辑路径，或根据当前工作调用 `wf_create` 自动创建
+不要在 client 文件系统中搜索或验证 Work Folder，也不要接受物理路径作为替代 identity。
 
-### Step 2: 按 work-folder 约定 dump 各 artifact
+## Step 2: 读取当前状态并整理 payload
 
-按 work-folder 约定中定义的 artifact 语义和格式，逐个处理。读取用 work-folder MCP `fs_read`，创建/覆盖用 `fs_write`，局部追加或修改用 `fs_edit`；完成整次 checkpoint 后调用 `wf_save` 让 server 统一维护 changelog、context 快照和 Resume Guide：
+先载入 `references/artifact-formats.md`。需要现有内容时，以同一个 opaque `folder_id` 调用 `fs_read(filename=...)`：
 
-| Artifact | checkpoint 操作 |
-|----------|----------------|
-| `_brief.md` | **MCP 自动维护**——`wf_create` seed、`wf_save`/`wf_resume` 刷新 `updated` + 拉回 active；手写场景才需手动补。顶层 `INDEX.md` 由 `wf_reindex` 聚合，非单次 checkpoint 职责 |
-| spec.md / plan.md / goal.md | 只读引用；已有不动，无则不创建（不在 checkpoint 职责内）|
-| golden-order.md | **必须维护**——回顾本次 session，把尚未落地的用户输入/纠正/选择追加进去 |
-| progress.md | **必须更新**——更新状态、追加 Changelog |
-| findings.md | **有内容则更新**——追加本次 session 的关键决策、经验、问题 |
-| context.md | **必须更新**——覆盖写入环境快照（快照，不是日志）|
-| CLAUDE.md / AGENTS.md | **必须生成**——Resume Guide，供新 session 快速恢复上下文 |
+| Artifact | Save 操作 |
+|----------|-----------|
+| `_brief.md` | MCP lifecycle 自动维护 identity、updated/status 与 INDEX；checkpoint 不手写 |
+| spec.md / plan.md / goal.md | 只读引用；存在时用 `fs_read`，缺失时跳过 |
+| progress.md | `wf_create` 已 seed。需要更新 Current/Next/Blocked 时先 `fs_read`，再对已存在文件用 `fs_write` 或 `fs_edit`；checkpoint changelog 由 `wf_save` 追加 |
+| golden-order.md | 收集本次尚未落盘的用户拍板/纠正/选择，作为 `golden_order_additions` 传给 `wf_save` |
+| findings.md | 有可复用发现时整理为 `findings_addition` 传给 `wf_save` |
+| context.md | 整理完整快照，作为 `context_snapshot` 传给 `wf_save` |
+| CLAUDE.md / AGENTS.md | `wf_save` 根据 `resume_fields` 生成；checkpoint 不直接创建或覆盖 |
 
-每个 artifact 的具体格式和字段定义见 `references/artifact-formats.md`（与本 skill 同目录，调用时载入）。checkpoint 不重复定义这些格式。文件不存在时用 `fs_write` 主动创建，不要因为"当前还没有"就跳过。不要用原生文件工具访问 work folder。
+如果确实需要创建一个 lifecycle 之外的普通补充文件：
 
-### Step 3: 输出 Checkpoint 摘要
+1. 用 `fs_stat(folder_id, filename)` 确认不存在。
+2. 不存在时用 `fs_create`。
+3. 已存在时用 `fs_write`（整篇覆盖）或 `fs_edit`（精确局部修改）。
+4. `fs_write` 返回 `RESOURCE_NOT_FOUND` 时改用 `fs_create`，不得假设 write 已落盘。
 
-```
+## Step 3: 调用 `wf_save`
+
+调用一次 `wf_save`，至少传：
+
+- `folder_id`
+- 能准确描述本次状态的 `summary`
+- 完整 `context_snapshot`
+- Goal / Phase / Status / Key Context 等 `resume_fields`
+- 有内容时的 `golden_order_additions`、`findings_addition`
+- 可用时传 `expected_base_sha`；为同一逻辑请求生成并稳定复用 `idempotency_key`
+
+`wf_save` 负责以一个受治理 mutation 追加 progress changelog、写入 context、维护 additions、重生成 Resume Guide、刷新 brief/INDEX 并 Git commit。若 tool 返回错误，不得宣称 checkpoint 完成；报告 error code、是否可重试和当前 commit。
+
+## Step 4: 输出 Checkpoint 摘要
+
+```text
 [Checkpoint 完成]
-Work folder: <路径>
-更新文件: <列出实际更新/创建了哪些文件>
+Work folder ID: <folder_id>
+更新文件: <tool 返回的 written filenames>
+Commit: <tool 返回的 git.detail（或 commit）>
+Mutation: <tool 返回的 mutation_id>
 
 恢复方式：
   1. claude --resume <session-id>（如果知道）
-  2. 或新 session 中阅读 <work-folder>/CLAUDE.md 恢复上下文
+  2. 或在新 session 中用 wf_resume(folder_id=<folder_id>) 恢复
 ```
 
 ---
 
 # Resume 模式
 
-从已有 work folder 恢复工作状态到新 session。不是简单地读文件——要**加载、验证、对齐**，确保新 session 能安全接续。
+## Step R1: 确定 `folder_id`
 
-## 流程
+1. 用户给了 `folder_id` → 原样调用 `wf_resume`。
+2. 用户没给 → 用 `wf_search` 或 `wf_list` 查候选，最多列 3 个 `folder_id` + title/goal 让用户选择。
+3. 不接受路径、slug 或标题充当 `folder_id`。
 
-### Step R1: 确定 Work Folder
+## Step R2: 调用 `wf_resume`
 
-1. 用户给了逻辑路径 → 用那个调用 `wf_resume`
-2. 用户没给 → 用 `wf_search` 查最近且 status 非 completed 的候选，最多列 3 个让用户选择，再调用 `wf_resume`
+以 opaque `folder_id` 调用 `wf_resume`。优先使用返回的 `loaded`、`verification`、`blocked`、`resume_report` 和 `contract`；该调用已追加 resume changelog、刷新 brief/INDEX 并由 server Git commit，不要再重复追加记录。
 
-由 `wf_resume` 验证 folder 与运行环境；返回 BROKEN 时立即报错退出。
+## Step R3: 补读 Artifact
 
-### Step R2: 加载 Artifact
+只有返回的恢复上下文不足时，才按优先级用 `fs_read(folder_id, filename)` 精确补读：
 
-优先使用 `wf_resume` 返回的恢复上下文；需补读时按优先级用 work-folder MCP `fs_read` 读取标准 artifact：
+| 顺序 | filename | 目的 |
+|------|----------|------|
+| 1 | `CLAUDE.md` / `AGENTS.md` | Goal / Status / Resume Steps |
+| 2 | `progress.md` | Completed / Current / Next / Blocked |
+| 3 | `context.md` | 关键路径、分支、环境 |
+| 4 | `findings.md` | 决策、经验、已知问题 |
+| 5 | `golden-order.md` | 用户拍板、纠正、选择 |
+| 6 | `spec.md` | 设计目标和验收标准（若存在） |
+| 7 | `plan.md` | 执行计划和阶段（若存在） |
 
-| 顺序 | 文件 | 目的 |
-|------|------|------|
-| 1 | `CLAUDE.md` / `AGENTS.md` | 快速概览 Goal / Status / Resume Steps |
-| 2 | `progress.md` | 了解 Completed / Current / Next / Blocked |
-| 3 | `context.md` | 了解关键路径、分支、环境信息 |
-| 4 | `findings.md` | 了解关键决策、经验、已知问题 |
-| 5 | `golden-order.md` | 了解用户拍板/纠正/选择的历史 |
-| 6 | `spec.md` | 了解设计目标和验收标准（如果存在） |
-| 7 | `plan.md` | 了解执行计划和阶段（如果存在） |
+`RESOURCE_NOT_FOUND` 表示该可选 artifact 不存在，可跳过；其它错误按 tool envelope 处理。不要用 glob 或原生文件工具补读。
 
-`fs_read` 返回文件不存在时直接跳过，不报错。
-
-### Step R3: 验证环境
-
-**这是 resume 的核心步骤——不验证就不能继续。**
-
-以 `wf_resume` 的 server-side 环境验证结果为准，并结合 context.md 逐项确认：
-
-- **文件/目录存在性**：context.md 中每个关键路径是否存在；git repo 的分支、未提交变更
-- **Git 状态**：是否 clean、最近 commit、分支一致性
-- **远程服务可达性**（如适用）：简单连通性检查
-- **依赖/工具版本**（如适用）：版本一致性
-
-**验证结果分三级**：
+## Step R4: 遵守验证结论
 
 | 级别 | 含义 | 动作 |
 |------|------|------|
-| ✅ MATCH | 环境与存档一致 | 可以直接继续 |
-| ⚠️ DRIFT | 环境有变化但不阻塞 | 报告差异，更新 context.md，继续 |
-| ❌ BROKEN | 关键依赖不可用 | 报告问题，标记为 Blocked，等用户决策 |
+| ✅ MATCH | 环境与存档一致 | 直接从 Current/Next 接续 |
+| ⚠️ DRIFT | 环境变化但不阻塞 | 报告差异；需要时通过 `wf_save(context_snapshot=...)` 更新快照后继续 |
+| ❌ BROKEN | 关键依赖不可用 | 只输出阻塞报告并等待用户决策 |
 
-### Step R4: 输出 Resume 报告
+不允许用 client-side 猜测覆盖 `wf_resume` 的 server verdict。
 
-```
+## Step R5: 输出 Resume 报告并继续
+
+```text
 [Resume 完成]
-Work folder: <路径>
-上次 checkpoint: <CLAUDE.md 中的 Updated 时间>
+Work folder ID: <folder_id>
+Commit: <tool 返回的 git.detail（或 commit）>
 
-📋 目标: <Goal>
-📍 状态: <Phase> / <Status>
-
-🔍 环境验证:
-  ✅ <路径/资源> — 一致
-  ⚠️ <路径/资源> — 漂移：<描述差异>
-  ❌ <路径/资源> — 不可用：<原因>
-
-📌 当前任务:
-  - <progress.md 的 Current 内容>
-
-⏭️ 下一步:
-  - <progress.md 的 Next 内容>
-
-🚧 阻塞项:
-  - <Blocked 内容，或"无">
-
-💡 关键经验（来自上次 session）:
-  - <findings.md 中最近一次 checkpoint 的要点，最多 3 条>
+目标: <Goal>
+状态: <Phase> / <Status>
+环境验证: <MATCH / DRIFT / BROKEN + 明细>
+当前任务: <Current>
+下一步: <Next>
+阻塞项: <Blocked 或“无”>
+关键经验: <最近要点，最多 3 条>
 ```
 
-### Step R5: 更新 progress.md
-
-追加 changelog 记录本次 resume：
-
-```markdown
-| HH:MM | resume | 从 checkpoint 恢复；环境验证: N✅ N⚠️ N❌ |
-```
-
-如果有 DRIFT 或 BROKEN，同时用 `fs_edit` 更新 Blocked section；恢复记录由 `wf_resume` 维护。
-
-### Step R6: 进入工作状态
-
-Resume 完成后，LLM 应该：
-
-1. **已充分了解上下文**——不需要再问"你想做什么"
-2. **知道当前在哪个阶段**——直接从 Current/Next 继续
-3. **如果有 BROKEN 项**——停止进入工作状态，只输出阻塞报告并等待用户决策
-
-不要等用户再次下达指令。如果环境验证全部 MATCH，直接提出："上次进行到 X，现在继续做 Y，可以吗？"
+MATCH / DRIFT 时直接从 Current/Next 继续，不再问“你想做什么”。BROKEN 时不得执行 Current/Next。
 
 ---
 
 # 共享约束
 
-- **MCP 边界**：work folder 生命周期只用 `wf_create`/`wf_search`/`wf_resume`/`wf_save`；control 文件只用 work-folder MCP `fs_read`/`fs_write`/`fs_edit`/`fs_glob`
-- **幂等**：Save 多次调用覆盖 CLAUDE.md / AGENTS.md / context.md，追加 progress.md changelog 和 findings.md section
-- **不做 git commit**：用户自己决定何时 commit
-- **不做 /clear**：checkpoint 只存档，不执行 session 切换
-- **Save best-effort**：Save 模式尽量不中断；单个 artifact 更新失败时记录失败原因并继续保存其它 artifact
-- **Resume 遇 BROKEN 必须停下**：Resume 模式若 Step R3 出现 ❌ BROKEN，只输出阻塞报告并等待用户决策，不得继续执行 Current/Next
-- **不越权**：不创建/修改 spec.md 和 plan.md（那是 brainstorming / writing-plans 的职责）
-- **Resume 必须验证**：加载后必须跑 Step R3 验证，不允许跳过直接开工
+- **MCP-only**：Work Folder 的 identity、发现、读写和生命周期操作全部经 work-folder MCP。
+- **opaque ID**：始终分开传 `folder_id` 与 `filename`；不得形成或泄露 client locator。
+- **Create ≠ Write**：新普通文件 `fs_create`，已有文件 `fs_write` / `fs_edit`；`fs_write` 不会创建。
+- **Server Git persistence**：mutation 成功即由 server Git commit；client 不提交 Work Folder 数据。
+- **不做 `/clear`**：checkpoint 只存档，不执行 session 切换。
+- **不越权**：不创建或修改 spec.md / plan.md。
+- **错误不可伪装成功**：以 lifecycle success 字段或 file tool 的 `ok=true`、error envelope、`git.detail` / `commit`、`mutation_id` 为准。
+- **BROKEN 必停**：只报告阻塞并等待用户决策。

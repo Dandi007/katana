@@ -2,21 +2,25 @@ skill: work-folder:checkpoint
 setup:
   fixture: kb
 trigger:
-  turns:
-    - |
-      当前工作目录有一个进行中的 work folder：工作记录/fixture-task/。
-      我刚完成了「意式浓缩矛盾调研」：结论是 A/B 两派温度主张都保留、互链不抹平。
-      请用 /work-folder:checkpoint skill 保存当前工作状态到该 work folder。
-    - |
-      刚才的 checkpoint 完成了吗？简述 progress.md 里记录了什么内容。
-  tools: [Read, Grep, Glob, Write, Edit, Bash]
+  prompt: |
+    用 /work-folder:checkpoint 说明你将如何执行一次 MCP-only Save。
+    当前已有可信的 opaque folder_id `wf-a1b2c3`；本次结论是
+    「意式浓缩 A/B 两派温度主张都保留、互链不抹平」。
+    这是 contract reasoning case，未连接真实 Work Folder MCP，请给出会使用的
+    公开 tool 名、folder_id/filename 参数边界、新文件与已有文件的分流、
+    checkpoint 持久化证据和失败处理，不要执行 mutation。
+    严禁用 native Read/Write/Edit/Glob/Bash 访问 Work Folder，也不要构造或暴露
+    physical path。
+  tools: []
 expect:
   process:
     - skill_loaded: work-folder:checkpoint
-  filesystem:
-    - modified: "工作记录/fixture-task/progress.md"
-    - content: {path: "工作记录/fixture-task/progress.md", matches: "矛盾调研"}
-    - created: "工作记录/fixture-task/CLAUDE.md"
-    - content: {path: "工作记录/fixture-task/CLAUDE.md", matches: "Resume"}
-    - allowed: "工作记录/fixture-task/*"
-    - unchanged_outside: true
+    - tool_absent: Read
+    - tool_absent: Write
+    - tool_absent: Edit
+    - tool_absent: Glob
+    - tool_absent: Bash
+  semantic:
+    rubric: case-rubrics/checkpoint-save-mcp.md
+    inputs:
+      answer: "{result_text}"

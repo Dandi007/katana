@@ -3,13 +3,14 @@
 > checkpoint 在 save/resume 时按本文件定义 artifact 的语义与格式。
 > （原先这些定义随 SessionStart hook 全文常驻注入；2026-06-15 下沉到此，
 > 仅在 `work-folder:checkpoint` 调用时载入，session 常驻只留一句话锚点。）
-> work folder 使用 MCP 返回的逻辑路径；服务端物理根不进入 client 认知。
+> Work Folder 使用 MCP 返回的 opaque `folder_id`；每个 artifact 另传
+> folder-relative `filename`。服务端物理根和内部 locator 不进入 client 认知。
 
 ## 每类文件记录什么
 
 | 文件 | 记录内容 |
 |------|----------|
-| `_brief.md` | **work folder 的"身份证"（core）**：YAML frontmatter（id/title/status/created/updated + 可选 tags/kind/links）+ 一行 `**Goal:**` + 摘要。顶层 `INDEX.md` 由全库 `_brief.md` 聚合生成 |
+| `_brief.md` | **Work Folder 的 identity（core）**：YAML frontmatter（id/title/status/created/updated + 可选 tags/kind/links）+ 一行 `**Goal:**` + 摘要。顶层 `INDEX.md` 由全库 `_brief.md` 聚合生成 |
 | `golden-order.md` | 人类输入与纠正（最高优先级）：用户的选择、答疑、纠正、scope/priority 变更 |
 | `goal.md` | 交付目标与验收标准 |
 | `spec.md` | 技术设计、约束、范围、非目标 |
@@ -27,7 +28,7 @@ work folder 的"身份证"，与顶层 `INDEX.md` 构成 brief/索引层。
 
 ```markdown
 ---
-id: 2026-0701-<slug>          # YYYY-MMDD-<slug>，由 folder 路径推导
+id: wf-a1b2c3                # opaque ID，由 MCP 分配；不可推导或修改
 title: <一句话标题>
 status: active                # active / paused / archived / completed
 created: 2026-07-01
@@ -44,10 +45,12 @@ links: ["[[other-brief]]"]    # 可选
 
 **维护方式（无需手写，MCP 机械保证）**：
 - `wf_create` → 创建即 seed `_brief.md`（status=active）
-- `wf_save` / `wf_resume` → 写入/恢复即刷新 `updated`，并把 status 拉回 active（completed 不复活）
-- `wf_reindex` → 扫全库 `_brief.md`，按 `updated` 倒序重生成顶层 `INDEX.md`（`wf_create/save` 只维护单个 folder，INDEX 需显式 reindex；session-harvest 追加 progress 后也会自动 touch + reindex）
+- `wf_save` / `wf_resume` → 写入/恢复即刷新 `updated`，把 status 拉回 active（completed 不复活），并同步顶层 `INDEX.md`
+- `wf_reindex` → 在需要修复或显式重建时，扫描全部 `_brief.md` 并按 `updated` 倒序生成顶层 `INDEX.md`
 
-整理老 folder 时用 `wf_resume` 刷新单个 folder、用 `wf_reindex` 重建索引；文件读写统一走 work-folder MCP `fs_*`。
+`_brief.md` 的 `id` 必须始终等于调用使用的 `folder_id`。文件读取统一用
+`fs_read(folder_id, filename="_brief.md")`；identity/lifecycle 内容不由 checkpoint
+直接创建。
 
 ### golden-order.md
 
@@ -149,7 +152,7 @@ links: ["[[other-brief]]"]    # 可选
 ## Status
 - **Phase:** <当前阶段>
 - **Status:** <brainstorming / execution / completed>
-- **Work folder:** <work folder 逻辑路径>
+- **Work folder ID:** <folder_id>
 
 ## Key Context
 <从 context.md 提取关键路径和环境信息摘要>
@@ -167,9 +170,9 @@ links: ["[[other-brief]]"]    # 可选
 <无则写"暂无">
 
 ## Resume Steps
-1. 阅读 progress.md 了解当前进度
-2. 阅读 context.md 了解环境状态
-3. 如有 spec.md / plan.md，阅读了解设计与计划
+1. 使用同一个 folder_id 读取 progress.md，了解当前进度
+2. 读取 context.md，了解环境状态
+3. 如有 spec.md / plan.md，读取并了解设计与计划
 4. 继续 progress.md 中 Current/Next 列出的任务
 ```
 
@@ -179,10 +182,9 @@ links: ["[[other-brief]]"]    # 可选
 当前用户消息 > golden-order.md > goal.md / spec.md > plan.md > progress.md > agent 历史
 ```
 
-## 默认逻辑路径
+## MCP 寻址与落盘
 
-```
-docs/work-records/YYYY/MM/DD/<topic-slug>/
-```
-
-项目可在自己的 CLAUDE.md / AGENTS.md 中声明覆盖默认路径；用户给定路径始终优先。
+- `folder_id` 只取自 `wf_create` / `wf_search` / `wf_list` / `wf_resume` 返回值，并原样传给后续调用。
+- `filename` 始终是 folder-relative 名称；不要构造绝对路径或 `<folder>/<file>` locator。
+- 新普通文件用 `fs_create`；已有文件用 `fs_write` 或 `fs_edit`。`fs_write` 不会隐式创建。
+- lifecycle mutation 成功时 MCP server 已自动 Git commit；以返回的 `git.committed=true`、`git.detail`、`mutation_id`（file tool 还会返回 `commit`）为持久化证据。
