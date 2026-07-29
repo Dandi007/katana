@@ -181,9 +181,14 @@ git -C "$REPO" commit -m "migrate(work-folder): cut over to flat ID layout"
 恢复流量后做最小 smoke：
 
 1. `wf_list` / `wf_search` 只返回 opaque `folder_id`。
-2. 对一个 text 文件调用 `fs_read(folder_id, filename)`。
-3. 对一个 binary 文件调用 `fs_read_bytes(folder_id, filename, limit=1)`。
-4. 用新 idempotency key 做一次受治理 mutation，并确认 Git commit、runtime receipt 和 replay。
+2. `wf_search` 必须把 configured data root 及其 deterministic `source_id`
+   作为 exact filter 传给 vault-search；source filter 在全局 `top_k` 截断前生效，
+   避免其他 source 的高分结果挤掉 Work Folder 命中。
+3. source filter 是主隔离边界，但 server 仍须校验返回 locator 为
+   `wf-<6 lowercase hex>/<folder-relative filename>`，不把 backend 输出直接暴露。
+4. 对一个 text 文件调用 `fs_read(folder_id, filename)`。
+5. 对一个 binary 文件调用 `fs_read_bytes(folder_id, filename, limit=1)`。
+6. 用新 idempotency key 做一次受治理 mutation，并确认 Git commit、runtime receipt 和 replay。
 
 ## 6. Failure policy
 

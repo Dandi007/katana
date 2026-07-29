@@ -44,3 +44,22 @@ def test_search_passes_exclude():
         return httpx.Response(200, json={"results": [], "mode": "hybrid"})
 
     vs.search("x", exclude=["memory"], client=_mock_client(handler))
+
+
+def test_search_passes_exact_source_filters():
+    source_root = "/data/work-records"
+    source_id = "e8b0d7b6f4e2"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["filter"] == {
+            "source_root": source_root,
+            "source_id": source_id,
+        }
+        return httpx.Response(200, json={"results": [], "mode": "hybrid"})
+
+    vs.search(
+        "x",
+        source_root=source_root,
+        source_id=source_id,
+        client=_mock_client(handler),
+    )

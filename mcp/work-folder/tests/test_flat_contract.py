@@ -179,10 +179,11 @@ def test_lifecycle_is_id_only_and_never_leaks_repo_path(tmp_path, monkeypatch):
 
 
 def test_search_returns_id_and_filename_without_paths(monkeypatch):
+    monkeypatch.setattr(server, "_repo_root", "/data/work-records")
     monkeypatch.setattr(
         server.vault_search,
         "search",
-        lambda query, top_k: SimpleNamespace(
+        lambda query, top_k, source_root=None, source_id=None: SimpleNamespace(
             results=[
                 SimpleNamespace(
                     path="wf-abc123/findings/note.md",

@@ -196,7 +196,7 @@ def test_list_search_and_reindex_are_locator_free(configured, monkeypatch):
     monkeypatch.setattr(
         server.vault_search,
         "search",
-        lambda query, top_k: type(
+        lambda query, top_k, source_root=None, source_id=None: type(
             "Response",
             (),
             {
