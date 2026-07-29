@@ -15,6 +15,7 @@ import subprocess
 import pytest
 from fastmcp import Client
 
+from katana_kernel import MutationBrokenError
 from katana_work_folder_mcp import server as _server_mod
 from katana_work_folder_mcp.fs_tools import FSTools, ID_RE
 from katana_work_folder_mcp.store import _wf_policy
@@ -226,6 +227,42 @@ def test_fs_capabilities_via_mcp(srv):
     result = _call(mcp, "fs_capabilities")
     assert "capabilities" in result
     assert "fs_read" in result["capabilities"]["operations"]
+
+
+def test_fs_create_broken_is_machine_readable_and_never_success(
+    tools, monkeypatch,
+):
+    _setup_work_folder(tools, "broken")
+    broken = MutationBrokenError(
+        "manual recovery required",
+        {"state": "BROKEN", "paths": ["broken/_brief.md"]},
+    )
+
+    def _raise_broken(*args, **kwargs):
+        raise broken
+
+    monkeypatch.setattr(tools._kernel, "mutate", _raise_broken)
+    result = tools.fs_create("broken/_brief.md", _brief_no_id("broken"))
+
+    assert result["code"] == "BROKEN"
+    assert result["state"] == "BROKEN"
+    assert result["blocked"] is True
+    assert result["manual_recovery_required"] is True
+    assert "git" not in result
+
+
+def test_work_folder_server_broken_envelope_is_not_success():
+    broken = MutationBrokenError(
+        "manual recovery required",
+        {"state": "BROKEN", "paths": ["broken/_brief.md"]},
+    )
+    result = _server_mod._server_mutation(
+        lambda: (_ for _ in ()).throw(broken)
+    )
+
+    assert result["code"] == result["state"] == "BROKEN"
+    assert result["blocked"] is True
+    assert "git" not in result
 
 
 # ── fs_resolve ───────────────────────────────────────────────────────────────

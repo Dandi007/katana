@@ -22,12 +22,20 @@ from katana_kernel import (
     DomainPolicy,
     GovernedKernel,
     GovernedVFS,
+    MutationBrokenError,
     ResourceIdLedger,
     TransactionManifest,
 )
 from katana_memory_mcp import index as index_mod
 from katana_memory_mcp.store import MemoryStore
 from katana_memory_mcp.fs_tools import FSTools
+
+
+def _server_mutation(call) -> dict:
+    try:
+        return call()
+    except MutationBrokenError as exc:
+        return exc.as_error()
 
 
 def _memory_policy() -> DomainPolicy:
@@ -115,21 +123,33 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str,
     async def memory_create(name: str, description: str, body: str,
                             type: str | None = None,
                             expected_base_sha: str | None = None) -> dict:
-        return store.create_card(tenant, name, description, body, type=type,
-                                 expected_base_sha=expected_base_sha)
+        return _server_mutation(
+            lambda: store.create_card(
+                tenant, name, description, body, type=type,
+                expected_base_sha=expected_base_sha,
+            )
+        )
 
     @m.tool()
     async def memory_update(id: str, name: str | None = None, description: str | None = None,
                             body: str | None = None, status: str | None = None,
                             type: str | None = None, last_verified: str | None = None,
                             expected_base_sha: str | None = None) -> dict:
-        return store.update_card(tenant, id, name=name, description=description, body=body,
-                                 status=status, type=type, last_verified=last_verified,
-                                 expected_base_sha=expected_base_sha)
+        return _server_mutation(
+            lambda: store.update_card(
+                tenant, id, name=name, description=description, body=body,
+                status=status, type=type, last_verified=last_verified,
+                expected_base_sha=expected_base_sha,
+            )
+        )
 
     @m.tool()
     async def memory_delete(id: str, expected_base_sha: str | None = None) -> dict:
-        return store.delete_card(tenant, id, expected_base_sha=expected_base_sha)
+        return _server_mutation(
+            lambda: store.delete_card(
+                tenant, id, expected_base_sha=expected_base_sha,
+            )
+        )
 
     @m.tool()
     async def memory_read(id: str, offset: int | None = None, limit: int | None = None) -> dict:
@@ -139,8 +159,12 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str,
     async def memory_edit(id: str, old_string: str, new_string: str,
                            replace_all: bool = False,
                            expected_base_sha: str | None = None) -> dict:
-        return store.edit_card(tenant, id, old_string, new_string, replace_all=replace_all,
-                                expected_base_sha=expected_base_sha)
+        return _server_mutation(
+            lambda: store.edit_card(
+                tenant, id, old_string, new_string, replace_all=replace_all,
+                expected_base_sha=expected_base_sha,
+            )
+        )
 
     # ── fs_* Full VFS tools ──────────────────────────────────────────────────
 

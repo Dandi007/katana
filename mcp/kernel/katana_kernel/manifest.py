@@ -11,6 +11,7 @@ import json
 import os
 import time
 from pathlib import Path
+from collections.abc import Callable
 
 
 class ManifestError(Exception):
@@ -27,12 +28,15 @@ class TransactionManifest:
         self._staging_dir.mkdir(parents=True, exist_ok=True)
 
     def record(self, domain: str, op: str, result: dict, git_result: dict | None = None,
-               changed_paths: list[str] | None = None) -> dict:
+               changed_paths: list[str] | None = None,
+               before_write: Callable[[str], None] | None = None) -> dict:
         self._ensure_dirs()
         ts = int(time.time() * 1_000_000)
         resource_id = result.get("id", "unknown")
         manifest_id = f"{domain}-{op}-{resource_id}-{ts}"
         staging_path = self._staging_dir / f"{manifest_id}.json"
+        if before_write is not None:
+            before_write(str(staging_path))
 
         record = {
             "manifest_id": manifest_id,
@@ -43,12 +47,26 @@ class TransactionManifest:
             "changed_paths": changed_paths or [],
             "git": git_result or {},
         }
-        staging_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+        with staging_path.open("x", encoding="utf-8") as staging_file:
+            staging_file.write(json.dumps(record, indent=2))
         return record
 
-    def commit_manifests(self) -> dict:
+    def commit_manifests(self, manifest_ids: list[str] | None = None) -> dict:
         self._ensure_dirs()
-        staged = sorted(self._staging_dir.glob("*.json"))
+        if manifest_ids is None:
+            staged = sorted(self._staging_dir.glob("*.json"))
+        else:
+            staged = []
+            for manifest_id in manifest_ids:
+                name = (
+                    manifest_id
+                    if manifest_id.endswith(".json")
+                    else f"{manifest_id}.json"
+                )
+                path = self._staging_dir / name
+                if not path.is_file():
+                    raise ManifestError(f"staged manifest not found: {name}")
+                staged.append(path)
         moved = []
         for sp in staged:
             dest = self._dir / sp.name

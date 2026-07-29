@@ -24,9 +24,9 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _write_context(folder: str, resource_path: str, branch: str = "-") -> None:
-    """写一个带「关键路径」表的 context.md，单条资源指向 resource_path。"""
-    md = (
+def _context_snapshot(resource_path: str, branch: str = "-") -> str:
+    """生成一个带「关键路径」表的 context.md 快照。"""
+    return (
         "# Context\n\n**Updated:** 2026-06-22 14:00\n\n"
         "## 工作上下文\n- 集成测试\n\n"
         "## 关键路径\n"
@@ -35,7 +35,6 @@ def _write_context(folder: str, resource_path: str, branch: str = "-") -> None:
         f"| target | {resource_path} | {branch} | 探测目标 |\n\n"
         "## 环境信息\n- test\n"
     )
-    (Path(folder) / "context.md").write_text(md, encoding="utf-8")
 
 
 @pytest.fixture
@@ -72,7 +71,12 @@ def test_lifecycle_create_save_resume_match(configured, tmp_path):
     # resume MATCH：context 指向一个存在的非 git 目录 → 真实 fs_git_probe 判 MATCH
     plain = tmp_path / "exists-plain"
     plain.mkdir()
-    _write_context(folder, str(plain))
+    context_saved = _run(server.wf_save(
+        folder,
+        summary="更新关键路径",
+        context_snapshot=_context_snapshot(str(plain)),
+    ))
+    assert context_saved["saved"] is True
     res = _run(server.wf_resume(folder))
     assert res["ok"] is True
     assert res["verification"]["overall"] == "MATCH"
@@ -87,7 +91,12 @@ def test_lifecycle_create_save_resume_match(configured, tmp_path):
 
 def test_resume_broken_blocks(configured):
     folder = _run(server.wf_create("broken 场景"))["path"]
-    _write_context(folder, "/nonexistent/wf-mcp-integration-xyz")
+    context_saved = _run(server.wf_save(
+        folder,
+        summary="更新关键路径",
+        context_snapshot=_context_snapshot("/nonexistent/wf-mcp-integration-xyz"),
+    ))
+    assert context_saved["saved"] is True
     res = _run(server.wf_resume(folder))
     assert res["ok"] is True
     assert res["verification"]["overall"] == "BROKEN"
@@ -121,7 +130,12 @@ def test_resume_drift_real_dirty_git(configured, tmp_path):
     (repo / "untracked.txt").write_text("y", encoding="utf-8")
 
     folder = _run(server.wf_create("drift 场景"))["path"]
-    _write_context(folder, str(repo))  # branch="-"（无期望），靠 dirty 触发 DRIFT
+    context_saved = _run(server.wf_save(
+        folder,
+        summary="更新关键路径",
+        context_snapshot=_context_snapshot(str(repo)),
+    ))
+    assert context_saved["saved"] is True
     res = _run(server.wf_resume(folder))
     assert res["ok"] is True
     assert res["verification"]["overall"] == "DRIFT"

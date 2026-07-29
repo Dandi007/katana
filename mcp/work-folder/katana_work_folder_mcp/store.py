@@ -561,5 +561,10 @@ class WorkFolderStore:
 
             return result
 
+        if dry_run:
+            # dry_run is a pure read: do not enter the governed mutation path
+            # with an empty changed-path allowlist.
+            return _write(self._binding, args)
+
         return self._call_mutate("wf_reindex", args, _write,
                                  expected_base_sha, "work-folder: reindex")
