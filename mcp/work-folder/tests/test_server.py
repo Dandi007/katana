@@ -345,7 +345,7 @@ def test_do_search_shapes_only_flat_id_locators(monkeypatch):
 
     assert captured == {
         "query": "工作记录",
-        "top_k": 5,
+        "top_k": 20,
         "source_root": source_root,
         "source_id": source_id,
     }
@@ -424,6 +424,74 @@ def test_do_search_filters_source_before_top_k(monkeypatch):
         ("wf-abc123", "findings.md"),
         ("wf-def456", "progress.md"),
     ]
+
+
+def test_do_search_oversamples_before_locator_defense(monkeypatch):
+    source_root = "/data/work-records"
+    source_id = hashlib.sha256(source_root.encode("utf-8")).hexdigest()
+    captured = {}
+    same_source_hits = [
+        SimpleNamespace(
+            path="INDEX.md",
+            score=0.99,
+            title="Index",
+            snippet="control",
+        ),
+        SimpleNamespace(
+            path=".katana/control-archive/INDEX.md",
+            score=0.98,
+            title="Archived index",
+            snippet="control",
+        ),
+        SimpleNamespace(
+            path="wf-abc123/findings.md",
+            score=0.91,
+            title="Work A",
+            snippet="work",
+        ),
+        SimpleNamespace(
+            path="wf-def456/progress.md",
+            score=0.90,
+            title="Work B",
+            snippet="work",
+        ),
+        SimpleNamespace(
+            path="wf-fedcba/plan.md",
+            score=0.89,
+            title="Work C",
+            snippet="work",
+        ),
+    ]
+
+    def fake_search(
+        query,
+        *,
+        top_k=10,
+        source_root=None,
+        source_id=None,
+    ):
+        captured.update(
+            top_k=top_k,
+            source_root=source_root,
+            source_id=source_id,
+        )
+        return SimpleNamespace(results=same_source_hits[:top_k])
+
+    monkeypatch.setattr(server, "_repo_root", source_root)
+    monkeypatch.setattr(server.vault_search, "search", fake_search)
+
+    result = server._do_search("Work Folder", 2)
+
+    assert captured == {
+        "top_k": 20,
+        "source_root": source_root,
+        "source_id": source_id,
+    }
+    assert [(item["folder_id"], item["filename"]) for item in result] == [
+        ("wf-abc123", "findings.md"),
+        ("wf-def456", "progress.md"),
+    ]
+    assert len(result) == 2
 
 
 def test_do_search_requires_configured_source_root(monkeypatch):

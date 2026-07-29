@@ -62,6 +62,8 @@ _ALLOWED_KATANA_ENTRIES = {
     "runtime",
     "tombstones.json",
 }
+_SEARCH_OVERSAMPLE_FACTOR = 4
+_SEARCH_MIN_CANDIDATES = 20
 
 _DROP_PUBLIC_KEYS = {
     "changed_paths",
@@ -402,10 +404,16 @@ def _do_search(query: str, top_k: int) -> list[dict]:
     """先限定 Work Folder source，再把 locator 收敛为 ID + filename。"""
     if _repo_root is None:
         raise RuntimeError("work-folder store not initialized; call configure() first")
+    if top_k <= 0:
+        return []
     source_id = hashlib.sha256(_repo_root.encode("utf-8")).hexdigest()
+    candidate_top_k = max(
+        top_k * _SEARCH_OVERSAMPLE_FACTOR,
+        _SEARCH_MIN_CANDIDATES,
+    )
     response = vault_search.search(
         query,
-        top_k=top_k,
+        top_k=candidate_top_k,
         source_root=_repo_root,
         source_id=source_id,
     )
@@ -425,6 +433,8 @@ def _do_search(query: str, top_k: int) -> list[dict]:
             "title": hit.title,
             "snippet": _redact_string(hit.snippet),
         })
+        if len(results) >= top_k:
+            break
     return results
 
 
