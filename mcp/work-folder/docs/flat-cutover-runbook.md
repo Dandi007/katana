@@ -19,6 +19,10 @@ Cutover 开始前必须同时满足：
 3. `legacy_root` 是 data repo 内的旧日期树根。
 4. plan、repair、sentinel、checkpoint 和命令输出均存放在 data repo 之外。
 5. 已备份 source HEAD，且有独立方式恢复整个 repo；迁移器本身不会 reset、clean、commit 或 push。
+6. 所有迁移 phase 都使用下方精确 `PYTHONPATH`，不追加 ambient
+   `PYTHONPATH`。迁移器还会用 `inspect.getfile` 验证 kernel、shared 和
+   work-folder package 全部来自 `KATANA_CODE` 所指向的同一 checkout；
+   任何预加载的其它安装都会 fail closed。
 
 以下示例变量只用于说明，必须替换成实际绝对路径：
 
@@ -35,6 +39,8 @@ mkdir -p "$STATE"
 先生成 inventory：
 
 ```bash
+PYTHONDONTWRITEBYTECODE=1 \
+PYTHONPATH="$KATANA_CODE/mcp/kernel:$KATANA_CODE/mcp/shared:$KATANA_CODE/mcp/work-folder" \
 python3 "$KATANA_CODE/mcp/work-folder/scripts/migrate_flat.py" inventory \
   --repo-root "$REPO" \
   --legacy-root "$LEGACY" \
@@ -47,7 +53,7 @@ python3 "$KATANA_CODE/mcp/work-folder/scripts/migrate_flat.py" inventory \
 - primary root 与 accidental `智元工作/工作记录` double root 没有相同 logical locator。
 - `is_empty=true`、`brief_state=missing|parse_error|invalid_metadata` 的 topic 全部进入 repair 清单。
 - tombstone 集合完整，且没有 live ID 与 tombstone 重叠。
-- `.superpowers`、`.review-loop`、`.sessions` 文件会迁往 folder 内的 `archive/runtime/`。
+- 路径任意层级的 `.superpowers`、`.review-loop`、`.sessions` segment 都会迁往 folder 内的 `archive/runtime/<type>/`；segment 前后的完整相对上下文会保留，以避免 nested run 重名。
 - text 文件标为 `fs_read`，binary 文件标为 `fs_read_bytes`。
 
 迁移器不会猜测 metadata。每个 repair entry 必须绑定 inventory 中的 state；非 missing brief 还必须绑定原始 SHA-256：
@@ -69,6 +75,8 @@ python3 "$KATANA_CODE/mcp/work-folder/scripts/migrate_flat.py" inventory \
 生成 plan：
 
 ```bash
+PYTHONDONTWRITEBYTECODE=1 \
+PYTHONPATH="$KATANA_CODE/mcp/kernel:$KATANA_CODE/mcp/shared:$KATANA_CODE/mcp/work-folder" \
 python3 "$KATANA_CODE/mcp/work-folder/scripts/migrate_flat.py" plan \
   --repo-root "$REPO" \
   --legacy-root "$LEGACY" \
@@ -84,6 +92,8 @@ python3 "$KATANA_CODE/mcp/work-folder/scripts/migrate_flat.py" plan \
 ```bash
 APPROVED_PLAN_HASH='<从独立只读审批记录复制>'
 
+PYTHONDONTWRITEBYTECODE=1 \
+PYTHONPATH="$KATANA_CODE/mcp/kernel:$KATANA_CODE/mcp/shared:$KATANA_CODE/mcp/work-folder" \
 python3 "$KATANA_CODE/mcp/work-folder/scripts/migrate_flat.py" sentinel \
   --repo-root "$REPO" \
   --legacy-root "$LEGACY" \
@@ -97,6 +107,8 @@ python3 "$KATANA_CODE/mcp/work-folder/scripts/migrate_flat.py" sentinel \
 ```bash
 HEAD=$(git -C "$REPO" rev-parse HEAD)
 
+PYTHONDONTWRITEBYTECODE=1 \
+PYTHONPATH="$KATANA_CODE/mcp/kernel:$KATANA_CODE/mcp/shared:$KATANA_CODE/mcp/work-folder" \
 python3 "$KATANA_CODE/mcp/work-folder/scripts/migrate_flat.py" apply \
   --repo-root "$REPO" \
   --legacy-root "$LEGACY" \
@@ -114,6 +126,8 @@ python3 "$KATANA_CODE/mcp/work-folder/scripts/migrate_flat.py" apply \
 Dry-run 通过后执行 apply：
 
 ```bash
+PYTHONDONTWRITEBYTECODE=1 \
+PYTHONPATH="$KATANA_CODE/mcp/kernel:$KATANA_CODE/mcp/shared:$KATANA_CODE/mcp/work-folder" \
 python3 "$KATANA_CODE/mcp/work-folder/scripts/migrate_flat.py" apply \
   --repo-root "$REPO" \
   --legacy-root "$LEGACY" \
@@ -130,6 +144,8 @@ Apply 中断时，不生成新 inventory/plan，也不手工猜测已完成步�
 Apply 成功会内嵌 verification，仍应独立再跑一次：
 
 ```bash
+PYTHONDONTWRITEBYTECODE=1 \
+PYTHONPATH="$KATANA_CODE/mcp/kernel:$KATANA_CODE/mcp/shared:$KATANA_CODE/mcp/work-folder" \
 python3 "$KATANA_CODE/mcp/work-folder/scripts/migrate_flat.py" verify \
   --repo-root "$REPO" \
   --legacy-root "$LEGACY" \

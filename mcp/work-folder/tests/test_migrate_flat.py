@@ -3,8 +3,11 @@ from __future__ import annotations
 import copy
 import fcntl
 import hashlib
+import json
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -152,6 +155,15 @@ def _without_id_line(text: str) -> str:
     return re.sub(r"(?m)^id:[^\n]*\n", "", text)
 
 
+def _write_shadow_package(root: Path, module_name: str) -> None:
+    package = root / module_name
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        'ORIGIN = "ambient-shadow"\n',
+        encoding="utf-8",
+    )
+
+
 def test_cli_exposes_inventory_plan_sentinel_apply_verify() -> None:
     parser = build_parser()
     subparsers = next(
@@ -172,6 +184,88 @@ def test_cli_exposes_inventory_plan_sentinel_apply_verify() -> None:
         if action.dest == "expected_plan_hash"
     )
     assert expected_hash.required is True
+
+
+def test_cli_bootstraps_pinned_checkout_ahead_of_ambient_shadow(
+    flat_repo: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    repo, legacy_root = flat_repo
+    shadow = tmp_path / "ambient-shadow"
+    for module_name in migration._PINNED_MODULE_ROOTS:
+        _write_shadow_package(shadow, module_name)
+    script = Path(migration.__file__).resolve()
+    environment = os.environ.copy()
+    environment.update({
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": str(shadow),
+    })
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "inventory",
+            "--repo-root",
+            str(repo),
+            "--legacy-root",
+            str(legacy_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["ok"] is True
+    assert not list(shadow.rglob("__pycache__"))
+
+
+@pytest.mark.parametrize("module_name", migration._PINNED_MODULE_ROOTS)
+def test_cli_rejects_wrong_preloaded_install(
+    module_name: str,
+    flat_repo: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    repo, legacy_root = flat_repo
+    shadow = tmp_path / "preloaded-shadow"
+    _write_shadow_package(shadow, module_name)
+    script = Path(migration.__file__).resolve()
+    environment = os.environ.copy()
+    environment.update({
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": str(shadow),
+    })
+    cli_argv = [
+        str(script),
+        "inventory",
+        "--repo-root",
+        str(repo),
+        "--legacy-root",
+        str(legacy_root),
+    ]
+    command = "\n".join([
+        "import runpy",
+        "import sys",
+        f"import {module_name}",
+        f"sys.argv = {cli_argv!r}",
+        f"runpy.run_path({str(script)!r}, run_name='__main__')",
+    ])
+
+    result = subprocess.run(
+        [sys.executable, "-c", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    error = json.loads(result.stderr)
+    assert error["code"] == "PINNED_IMPORT_MISMATCH"
+    assert module_name in error["message"]
+    assert error["details"]["actual_source"].startswith(str(shadow))
 
 
 def test_inventory_accepts_only_date_topic_anchors_and_classifies_controls(
@@ -924,15 +1018,38 @@ def test_tombstones_are_reserved_merged_and_live_overlap_fails_closed(
     }
 
 
-def test_runtime_dot_dirs_are_archived_and_binary_is_api_reachable(
+def test_root_and_nested_runtime_dot_segments_are_archived_end_to_end(
     flat_repo: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
     repo, legacy_root = flat_repo
     topic = legacy_root / "2026/07/01/canonical"
-    runtime = topic / ".superpowers"
-    runtime.mkdir()
-    (runtime / "cache.bin").write_bytes(b"\x00\xff\x10")
+    payloads = {
+        ".sessions/root-session.txt": b"root session\n",
+        ".superpowers/root-cache.bin": b"\x00\xff\x10",
+        ".review-loop/root-review.txt": b"root review\n",
+        "runs/main/.sessions/nested-session.txt": b"nested session\n",
+        "runs/main/.superpowers/nested-cache.txt": b"nested cache\n",
+        "runs/main/.review-loop/nested-review.txt": b"nested review\n",
+    }
+    expected_destinations = {
+        ".sessions/root-session.txt":
+            "archive/runtime/sessions/root-session.txt",
+        ".superpowers/root-cache.bin":
+            "archive/runtime/superpowers/root-cache.bin",
+        ".review-loop/root-review.txt":
+            "archive/runtime/review-loop/root-review.txt",
+        "runs/main/.sessions/nested-session.txt":
+            "archive/runtime/sessions/runs/main/nested-session.txt",
+        "runs/main/.superpowers/nested-cache.txt":
+            "archive/runtime/superpowers/runs/main/nested-cache.txt",
+        "runs/main/.review-loop/nested-review.txt":
+            "archive/runtime/review-loop/runs/main/nested-review.txt",
+    }
+    for relative_path, content in payloads.items():
+        target = topic / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
     github = topic / ".github"
     github.mkdir()
     (github / "workflow.yml").write_text("name: test\n", encoding="utf-8")
@@ -944,12 +1061,16 @@ def test_runtime_dot_dirs_are_archived_and_binary_is_api_reachable(
         for entry in plan["map"]
         if entry["old_locator"] == "2026/07/01/canonical"
     )
-    binary = next(
-        record
+    runtime_records = {
+        record["source_relative_path"]: record
         for record in item["content_hashes"]
-        if record["source_relative_path"] == ".superpowers/cache.bin"
-    )
-    assert binary["relative_path"] == "archive/runtime/superpowers/cache.bin"
+        if record["source_relative_path"] in payloads
+    }
+    assert {
+        source: record["relative_path"]
+        for source, record in runtime_records.items()
+    } == expected_destinations
+    binary = runtime_records[".superpowers/root-cache.bin"]
     assert binary["api_tool"] == "fs_read_bytes"
     sentinel = _write_sentinel(tmp_path, plan)
     result = apply_plan(
@@ -961,10 +1082,81 @@ def test_runtime_dot_dirs_are_archived_and_binary_is_api_reachable(
         maintenance_sentinel=sentinel,
     )
     assert result["verification"]["api_reachability"]["fs_read_bytes"] == 1
-    assert (
-        repo / item["new_id"] / "archive/runtime/superpowers/cache.bin"
-    ).read_bytes() == b"\x00\xff\x10"
+    for source, destination in expected_destinations.items():
+        assert (
+            repo / item["new_id"] / destination
+        ).read_bytes() == payloads[source]
     assert (repo / item["new_id"] / ".github/workflow.yml").is_file()
+
+
+def test_runtime_archive_mapping_collision_fails_closed(
+    flat_repo: tuple[Path, Path],
+) -> None:
+    repo, legacy_root = flat_repo
+    topic = legacy_root / "2026/07/01/canonical"
+    first = topic / ".sessions/runs/main/duplicate.txt"
+    second = topic / "runs/main/.sessions/duplicate.txt"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_text("first\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    _commit_all(repo, "add colliding runtime paths")
+
+    inventory = build_inventory(repo, legacy_root)
+
+    assert inventory["ok"] is True
+    with pytest.raises(MigrationError, match="DESTINATION_FILE_COLLISION"):
+        build_plan(inventory)
+
+
+@pytest.mark.parametrize(
+    ("tampered_destination", "error_pattern"),
+    [
+        (
+            "runs/main/.sessions/state.json",
+            "runtime archive mapping",
+        ),
+        ("../outside.txt", "unsafe relative path"),
+    ],
+)
+def test_plan_validator_rejects_invalid_nested_runtime_destination(
+    tampered_destination: str,
+    error_pattern: str,
+    flat_repo: tuple[Path, Path],
+) -> None:
+    repo, legacy_root = flat_repo
+    nested = (
+        legacy_root
+        / "2026/07/01/canonical/runs/main/.sessions/state.json"
+    )
+    nested.parent.mkdir(parents=True)
+    nested.write_text('{"state":"saved"}\n', encoding="utf-8")
+    _commit_all(repo, "add nested session state")
+    plan = copy.deepcopy(_make_plan(repo, legacy_root))
+    item = next(
+        entry
+        for entry in plan["map"]
+        if entry["old_locator"] == "2026/07/01/canonical"
+    )
+    record = next(
+        value
+        for value in item["content_hashes"]
+        if value["source_relative_path"]
+        == "runs/main/.sessions/state.json"
+    )
+    record["relative_path"] = tampered_destination
+    unsigned = {
+        key: value
+        for key, value in plan.items()
+        if key != "plan_hash"
+    }
+    plan["plan_hash"] = hashlib.sha256(canonical_json(unsigned)).hexdigest()
+
+    with pytest.raises(
+        MigrationError,
+        match=error_pattern,
+    ):
+        migration._validate_plan(plan)
 
 
 def test_apply_resumes_exact_plan_from_external_checkpoint(

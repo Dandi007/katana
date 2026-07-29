@@ -19,6 +19,8 @@ import base64
 import binascii
 import datetime as dt
 import hashlib
+import importlib
+import inspect
 import json
 import os
 import re
@@ -29,7 +31,23 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-import yaml
+_SCRIPT_PATH = Path(__file__).resolve()
+_PINNED_MCP_ROOT = _SCRIPT_PATH.parents[2]
+_PINNED_IMPORT_ROOTS = (
+    _PINNED_MCP_ROOT / "kernel",
+    _PINNED_MCP_ROOT / "shared",
+    _PINNED_MCP_ROOT / "work-folder",
+)
+for _import_root in reversed(_PINNED_IMPORT_ROOTS):
+    _import_value = str(_import_root)
+    while _import_value in sys.path:
+        sys.path.remove(_import_value)
+    sys.path.insert(0, _import_value)
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - exercised by deployment preflight
+    yaml = None
 
 
 SCHEMA_VERSION = 2
@@ -112,6 +130,48 @@ class MigrationError(RuntimeError):
             "message": self.message,
             "details": self.details,
         }
+
+
+_PINNED_MODULE_ROOTS = {
+    "katana_kernel": _PINNED_MCP_ROOT / "kernel" / "katana_kernel",
+    "katana_kb_mcp_shared": (
+        _PINNED_MCP_ROOT / "shared" / "katana_kb_mcp_shared"
+    ),
+    "katana_work_folder_mcp": (
+        _PINNED_MCP_ROOT / "work-folder" / "katana_work_folder_mcp"
+    ),
+}
+
+
+def _validate_pinned_checkout_imports() -> None:
+    """Prove every migration phase is running from this script's checkout."""
+
+    if yaml is None:
+        raise MigrationError(
+            "MISSING_RUNTIME_DEPENDENCY",
+            "PyYAML is required by the Work Folder migration executable",
+        )
+    for module_name, expected_root in _PINNED_MODULE_ROOTS.items():
+        try:
+            module = importlib.import_module(module_name)
+            module_source = Path(inspect.getfile(module)).resolve()
+        except Exception as exc:
+            raise MigrationError(
+                "PINNED_IMPORT_UNAVAILABLE",
+                f"cannot import {module_name} from the pinned checkout",
+                details={"expected_root": str(expected_root.resolve())},
+            ) from exc
+        try:
+            module_source.relative_to(expected_root.resolve())
+        except ValueError as exc:
+            raise MigrationError(
+                "PINNED_IMPORT_MISMATCH",
+                f"{module_name} resolved outside the pinned checkout",
+                details={
+                    "actual_source": str(module_source),
+                    "expected_root": str(expected_root.resolve()),
+                },
+            ) from exc
 
 
 def canonical_json(value: Any) -> bytes:
@@ -501,6 +561,23 @@ def deterministic_id(
         counter += 1
 
 
+def _runtime_archive_destination(source_relative_path: str) -> str | None:
+    """Map the first runtime-dot segment while retaining all path context."""
+
+    source_parts = PurePosixPath(source_relative_path).parts
+    for index, segment in enumerate(source_parts):
+        if segment not in RUNTIME_TOPIC_DIRS:
+            continue
+        return PurePosixPath(
+            "archive",
+            "runtime",
+            segment.lstrip("."),
+            *source_parts[:index],
+            *source_parts[index + 1:],
+        ).as_posix()
+    return None
+
+
 def _record_topic(
     repo_root: Path,
     legacy_root: Path,
@@ -537,9 +614,10 @@ def _record_topic(
                 "topic payload may not contain .git or .katana segments",
             ))
             continue
-        runtime_payload = bool(
-            source_parts and source_parts[0] in RUNTIME_TOPIC_DIRS
+        runtime_destination = _runtime_archive_destination(
+            source_relative_path
         )
+        runtime_payload = runtime_destination is not None
         if item_locator not in tracked and not runtime_payload:
             errors.append(_error(
                 "UNTRACKED_TOPIC_FILE",
@@ -556,12 +634,7 @@ def _record_topic(
             content_kind = "utf8_text"
             api_tool = "fs_read"
         if runtime_payload:
-            destination_relative_path = PurePosixPath(
-                "archive",
-                "runtime",
-                source_parts[0].lstrip("."),
-                *source_parts[1:],
-            ).as_posix()
+            destination_relative_path = runtime_destination
         else:
             destination_relative_path = source_relative_path
         files.append({
@@ -814,6 +887,7 @@ def build_inventory(
 ) -> dict[str, Any]:
     """Classify a legacy Work Folder tree without changing it."""
 
+    _validate_pinned_checkout_imports()
     repo, legacy, legacy_relative = _validate_roots(repo_root, legacy_root)
     errors: list[dict[str, str]] = []
     controls: list[dict[str, Any]] = []
@@ -1380,6 +1454,7 @@ def build_plan(
 ) -> dict[str, Any]:
     """Build a deterministic, content-addressed flat migration plan."""
 
+    _validate_pinned_checkout_imports()
     if (
         inventory.get("kind") != f"{PLAN_KIND}-inventory"
         or inventory.get("schema_version") != SCHEMA_VERSION
@@ -1596,6 +1671,7 @@ def maintenance_sentinel_payload(
     *,
     expected_plan_hash: str | None = None,
 ) -> dict[str, Any]:
+    _validate_pinned_checkout_imports()
     if (
         expected_plan_hash is not None
         and expected_plan_hash != plan.get("plan_hash")
@@ -1878,6 +1954,14 @@ def _validate_plan_item(
         source_relative_path = record.get("source_relative_path")
         if not _is_safe_relative_path(source_relative_path):
             _invalid_plan("content hash contains an unsafe source relative path")
+        expected_destination = (
+            _runtime_archive_destination(source_relative_path)
+            or source_relative_path
+        )
+        if relative_path != expected_destination:
+            _invalid_plan(
+                "content destination does not match runtime archive mapping"
+            )
         if relative_path in by_path:
             _invalid_plan("content hash paths must be unique per topic")
         if source_relative_path in source_paths:
@@ -2400,6 +2484,7 @@ def verify_plan(
 ) -> dict[str, Any]:
     """Verify the migrated working tree against a frozen plan."""
 
+    _validate_pinned_checkout_imports()
     _validate_plan(plan)
     repo, legacy, _ = _validate_roots(
         repo_root,
@@ -2930,6 +3015,7 @@ def apply_plan(
 ) -> dict[str, Any]:
     """Apply and verify while holding the governed repository mutation lock."""
 
+    _validate_pinned_checkout_imports()
     from katana_kernel.gitops import (  # noqa: PLC0415 - standalone script
         repository_mutation_lock,
     )
@@ -3160,6 +3246,7 @@ def _validate_cli_roots(
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     try:
+        _validate_pinned_checkout_imports()
         if args.phase == "inventory":
             result = build_inventory(args.repo_root, args.legacy_root)
             _emit(result, args.output)
