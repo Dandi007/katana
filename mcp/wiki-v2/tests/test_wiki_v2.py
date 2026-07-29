@@ -351,7 +351,7 @@ class TestSearch:
         store.wiki_create("测试搜索", _sample_body("测试搜索"), _sample_frontmatter(
             title="测试搜索", 摘要="搜索测试"))
         result = store.wiki_search("测试")
-        assert len(result["results"]) >= 0
+        assert len(result["results"]) > 0, "hybrid search must return at least one result"
         health = result["index_health"]
         assert health["mode"] == "hybrid"
 
@@ -569,7 +569,7 @@ class TestMigration:
 
         search_result = store.wiki_search("测试")
         assert "index_health" in search_result
-        assert len(search_result["results"]) >= 0
+        assert len(search_result["results"]) > 0, "search must return at least one result"
 
         get_result = store.wiki_get("测试页面")
         assert get_result["id"] is not None

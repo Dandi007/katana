@@ -50,6 +50,24 @@ class WikiStore:
             gitignore.write_text(".katana/index/\n")
 
     def _load_index(self) -> None:
+        self._search._ensure_lancedb()
+        if self._search._table is not None:
+            try:
+                self._search._db.drop_table("pages")
+                import pyarrow as pa
+                dim = self._search._vector_dim()
+                self._search._table = self._search._db.create_table("pages", pa.table({
+                    "id": pa.array([], type=pa.string()),
+                    "vector": pa.array([], type=pa.list_(pa.float32(), dim)),
+                }))
+            except Exception as e:
+                self._search._last_error = str(e)
+                self._search._mode = "keyword_only"
+        self._search._keyword = _search.KeywordIndex()
+        self._search._degraded_pages = set()
+        self._search._last_error = None
+        keyword_path = str(Path(self._data_root) / ".katana" / "index" / "keyword.json")
+        self._search._keyword.load(keyword_path)
         pages = _pages.scan_pages(self._data_root)
         for page in pages:
             if page["id"] and not page.get("_error"):
@@ -110,6 +128,8 @@ class WikiStore:
                 self._git_quiet("checkout", "--", ".")
                 self._git_quiet("clean", "-fd", "pages/")
                 raise
+            keyword_path = str(Path(self._data_root) / ".katana" / "index" / "keyword.json")
+            self._search._keyword.save(keyword_path)
             manifest_path = self._write_manifest(tool, changed_paths, write_result)
             all_paths = list(changed_paths) + [manifest_path]
             commit_sha = self._commit(commit_msg, all_paths)
@@ -333,28 +353,33 @@ class WikiStore:
         if err is not None:
             return err
 
-        new_fm = dict(frontmatter) if frontmatter else dict(page["frontmatter"])
-
-        if new_fm.get("id") and new_fm["id"] != page["id"]:
-            return {"code": "REF_MISMATCH", "message": f"id mismatch: expected {page['id']}, got {new_fm['id']}"}
-        new_fm["id"] = page["id"]
-
-        errs = _inv.validate_edit_grade(page["frontmatter"], page["body"], new_fm, body)
-        if errs:
-            return {"code": "VALIDATION_FAILED", "message": "; ".join(errs)}
+        if frontmatter and frontmatter.get("id") and frontmatter["id"] != page["id"]:
+            return {"code": "REF_MISMATCH", "message": f"id mismatch: expected {page['id']}, got {frontmatter['id']}"}
 
         store = self
 
         def _write(changed_paths):
-            page_path = _pages.title_to_path(page["title"])
+            current_page = _pages.find_page_by_ref(store._data_root, ref)
+            access_err = store._check_page_accessible(current_page, ref)
+            if access_err is not None:
+                raise StoreError(access_err)
+            new_fm = dict(frontmatter) if frontmatter else dict(current_page["frontmatter"])
+            new_fm["id"] = current_page["id"]
+            errs = _inv.validate_edit_grade(current_page["frontmatter"], current_page["body"], new_fm, body)
+            if errs:
+                raise StoreError({"code": "VALIDATION_FAILED", "message": "; ".join(errs)})
+            page_path = _pages.title_to_path(current_page["title"])
             full = Path(store._data_root) / page_path
             _pages.write_page(str(full), new_fm, body)
             changed_paths.append(page_path)
-            store._search.remove_page(page["id"])
-            store._search.index_page(page["id"], page["title"], body)
-            return {"id": page["id"], "path": page_path}
+            store._search.remove_page(current_page["id"])
+            store._search.index_page(current_page["id"], current_page["title"], body)
+            return {"id": current_page["id"], "path": page_path}
 
-        return self._mutate("wiki_update", _write, f"wiki: update {page['title']}")
+        try:
+            return self._mutate("wiki_update", _write, f"wiki: update {page['title']}")
+        except StoreError as e:
+            return e.response
 
     def wiki_edit(self, ref: str, old_string: str, new_string: str) -> dict:
         page = _pages.find_page_by_ref(self._data_root, ref)
@@ -362,32 +387,36 @@ class WikiStore:
         if err is not None:
             return err
 
-        body = page["body"]
-        count = body.count(old_string)
-        if count == 0:
-            return {"code": "VALIDATION_FAILED", "message": "old_string not found in page body"}
-        if count > 1:
-            return {"code": "VALIDATION_FAILED", "message": f"old_string matches {count} times; must be unique"}
-
-        new_body = body.replace(old_string, new_string, 1)
-        new_fm = dict(page["frontmatter"])
-
-        errs = _inv.validate_edit_grade(page["frontmatter"], page["body"], new_fm, new_body)
-        if errs:
-            return {"code": "VALIDATION_FAILED", "message": "; ".join(errs)}
-
         store = self
 
         def _write(changed_paths):
-            page_path = _pages.title_to_path(page["title"])
+            current_page = _pages.find_page_by_ref(store._data_root, ref)
+            access_err = store._check_page_accessible(current_page, ref)
+            if access_err is not None:
+                raise StoreError(access_err)
+            body = current_page["body"]
+            count = body.count(old_string)
+            if count == 0:
+                raise StoreError({"code": "VALIDATION_FAILED", "message": "old_string not found in page body"})
+            if count > 1:
+                raise StoreError({"code": "VALIDATION_FAILED", "message": f"old_string matches {count} times; must be unique"})
+            new_body = body.replace(old_string, new_string, 1)
+            new_fm = dict(current_page["frontmatter"])
+            errs = _inv.validate_edit_grade(current_page["frontmatter"], current_page["body"], new_fm, new_body)
+            if errs:
+                raise StoreError({"code": "VALIDATION_FAILED", "message": "; ".join(errs)})
+            page_path = _pages.title_to_path(current_page["title"])
             full = Path(store._data_root) / page_path
             _pages.write_page(str(full), new_fm, new_body)
             changed_paths.append(page_path)
-            store._search.remove_page(page["id"])
-            store._search.index_page(page["id"], page["title"], new_body)
-            return {"id": page["id"], "path": page_path}
+            store._search.remove_page(current_page["id"])
+            store._search.index_page(current_page["id"], current_page["title"], new_body)
+            return {"id": current_page["id"], "path": page_path}
 
-        return self._mutate("wiki_edit", _write, f"wiki: edit {page['title']}")
+        try:
+            return self._mutate("wiki_edit", _write, f"wiki: edit {page['title']}")
+        except StoreError as e:
+            return e.response
 
     def wiki_rename(self, ref: str, new_title: str) -> dict:
         page = _pages.find_page_by_ref(self._data_root, ref)
@@ -448,25 +477,24 @@ class WikiStore:
         if err is not None:
             return err
 
-        inlinks = _pages.compute_inlinks(self._data_root, page["title"])
-        if inlinks and not force:
-            return {
-                "code": "DELETE_BLOCKED",
-                "message": f"page has {len(inlinks)} inlink(s); use force=true to delete",
-                "inlinks": inlinks,
-            }
-
-        if force and inlinks and inlink_action != "remove_links":
-            return {
-                "code": "VALIDATION_FAILED",
-                "message": "force delete requires inlink_action='remove_links'",
-                "inlinks": inlinks,
-            }
-
         store = self
 
         def _write(changed_paths):
             title = page["title"]
+            inlinks = _pages.compute_inlinks(store._data_root, title)
+            if inlinks and not force:
+                raise StoreError({
+                    "code": "DELETE_BLOCKED",
+                    "message": f"page has {len(inlinks)} inlink(s); use force=true to delete",
+                    "inlinks": inlinks,
+                })
+            if force and inlinks and inlink_action != "remove_links":
+                raise StoreError({
+                    "code": "VALIDATION_FAILED",
+                    "message": "force delete requires inlink_action='remove_links'",
+                    "inlinks": inlinks,
+                })
+
             page_path = _pages.title_to_path(title)
             full = Path(store._data_root) / page_path
             full.unlink()
@@ -487,7 +515,10 @@ class WikiStore:
             store._search.remove_page(page["id"])
             return {"id": page["id"], "deleted_title": title}
 
-        return self._mutate("wiki_delete", _write, f"wiki: delete {page['title']}")
+        try:
+            return self._mutate("wiki_delete", _write, f"wiki: delete {page['title']}")
+        except StoreError as e:
+            return e.response
 
     def wiki_ingest_plan(self, sources: str) -> dict:
         try:

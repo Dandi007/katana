@@ -151,4 +151,14 @@ def validate_edit_grade(
         if not isinstance(summary, str) or len(summary) > DEFAULT_SUMMARY_MAX_LEN:
             errors.append(f"摘要超长（>{DEFAULT_SUMMARY_MAX_LEN} 字）")
 
+    old_has_provenance = bool(check_provenance(old_fm, old_body) == [])
+    new_has_provenance = bool(check_provenance(new_fm, new_body) == [])
+    if old_has_provenance and not new_has_provenance:
+        errors.append("edit-grade 不得新增缺失: provenance（操作前有 # References 或 sources，操作后缺失）")
+
+    old_has_outlinks = bool(check_outlinks(old_body) == [])
+    new_has_outlinks = bool(check_outlinks(new_body) == [])
+    if old_has_outlinks and not new_has_outlinks:
+        errors.append("edit-grade 不得新增缺失: outlink（操作前有 [[...]]，操作后缺失）")
+
     return errors
