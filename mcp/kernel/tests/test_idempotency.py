@@ -141,6 +141,59 @@ def test_prepare_finalize_and_committed_replay(tmp_path):
     assert ledger.list_unresolved() == []
 
 
+def test_finalize_updates_verified_head_in_same_transition(tmp_path):
+    ledger = SQLiteMutationLedger(tmp_path / ".katana" / "ledger.sqlite")
+    claim = _claim(ledger)
+    ledger.prepare(
+        claim.record.mutation_id,
+        result={"folder_id": "wf-abc123"},
+        changed_paths=["wf-abc123/progress.md"],
+        postimages={"wf-abc123/progress.md": "sha256:" + "1" * 64},
+    )
+
+    ledger.finalize(
+        claim.record.mutation_id,
+        commit_sha="b" * 40,
+        response={"folder_id": "wf-abc123"},
+        verified_head="c" * 40,
+    )
+
+    assert ledger.get_meta("verified_head") == "c" * 40
+
+
+def test_finalize_without_verified_head_invalidates_old_history_proof(tmp_path):
+    ledger = SQLiteMutationLedger(tmp_path / ".katana" / "ledger.sqlite")
+    ledger.set_meta("verified_head", "a" * 40)
+    claim = _claim(ledger)
+    ledger.prepare(
+        claim.record.mutation_id,
+        result={"folder_id": "wf-abc123"},
+        changed_paths=["wf-abc123/progress.md"],
+        postimages={"wf-abc123/progress.md": "sha256:" + "1" * 64},
+    )
+
+    ledger.finalize(
+        claim.record.mutation_id,
+        commit_sha="b" * 40,
+        response={"folder_id": "wf-abc123"},
+    )
+
+    assert ledger.get_meta("verified_head") is None
+
+
+def test_future_ledger_schema_is_rejected_without_downgrade(tmp_path):
+    path = tmp_path / ".katana" / "ledger.sqlite"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA user_version=99")
+
+    with pytest.raises(RuntimeError, match="newer than supported"):
+        SQLiteMutationLedger(path)
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 99
+
+
 def test_finalize_before_prepare_is_rejected(tmp_path):
     ledger = SQLiteMutationLedger(tmp_path / ".katana" / "ledger.sqlite")
     claim = _claim(ledger)

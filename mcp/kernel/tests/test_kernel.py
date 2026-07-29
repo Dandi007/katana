@@ -12,12 +12,18 @@ import pytest
 from katana_kernel.gitops import (
     CASRejectionError,
     DirtyWorkTreeError,
+    FileImage,
     RollbackSafetyError,
     RuntimeStateConfigurationError,
     git_commit as exact_git_commit,
     head_sha,
 )
 from katana_kernel.kernel import GovernedKernel, MutationBrokenError
+from katana_kernel.idempotency import (
+    IdempotencyConflictError,
+    SQLiteMutationLedger,
+    canonical_request_hash,
+)
 from katana_kernel.ledger import ResourceIdLedger
 from katana_kernel.manifest import TransactionManifest
 from katana_kernel.policy import DomainPolicy
@@ -794,3 +800,867 @@ def test_kernel_runtime_manifest_keeps_tombstone_tracked(
     assert manifest.get_manifest(result["manifest"]["manifest_id"])["git"][
         "committed"
     ] is True
+
+
+def _idempotent_runtime_kernel(
+    git_repo,
+    memory_domain_policy,
+    *,
+    commit_ignore=True,
+):
+    if commit_ignore:
+        ignore = Path(git_repo) / ".gitignore"
+        ignore.write_text(
+            "/.katana/manifests/\n/.katana/ledger.sqlite*\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", ".gitignore"], cwd=git_repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "ignore runtime mutation state"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+        )
+    manifest = TransactionManifest(
+        os.path.join(git_repo, ".katana", "manifests"),
+        git_tracked=False,
+    )
+    mutation_ledger = SQLiteMutationLedger(
+        os.path.join(git_repo, ".katana", "ledger.sqlite"),
+    )
+    kernel = GovernedKernel()
+    kernel.bind(
+        "memory",
+        memory_domain_policy,
+        GovernedVFS(git_repo),
+        ResourceIdLedger(os.path.join(git_repo, ".katana", "tombstones.json")),
+        manifest,
+        git_repo,
+        mutation_ledger=mutation_ledger,
+    )
+    return kernel, manifest, mutation_ledger
+
+
+def test_kernel_idempotent_runtime_mutation_replays_without_cas_or_write(
+    git_repo, memory_domain_policy,
+):
+    kernel, manifest, mutation_ledger = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+    base_sha = head_sha(git_repo)
+    write_calls = 0
+
+    def _write(binding, args):
+        nonlocal write_calls
+        write_calls += 1
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    first = kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        expected_base_sha=base_sha,
+        write_fn=_write,
+        commit_msg="test: idempotent create",
+        idempotency_key="session-1:lines-10-20",
+        idempotency_payload={"card": "m-test01", "content": "transaction"},
+    )
+    committed_sha = head_sha(git_repo)
+    second = kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        expected_base_sha=base_sha,
+        write_fn=_write,
+        commit_msg="test: idempotent create",
+        idempotency_key="session-1:lines-10-20",
+        idempotency_payload={"content": "transaction", "card": "m-test01"},
+    )
+
+    commit_message = subprocess.run(
+        ["git", "-C", git_repo, "log", "-1", "--format=%B"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    manifests = manifest.list_manifests()
+
+    assert first == second
+    assert write_calls == 1
+    assert head_sha(git_repo) == committed_sha
+    assert first["mutation_id"]
+    assert len(manifests) == 1
+    assert mutation_ledger.get(first["mutation_id"]).state == "COMMITTED"
+    assert f"Katana-Mutation-Id: {first['mutation_id']}" in commit_message
+    assert "Katana-Idempotency-Key-SHA256: sha256:" in commit_message
+    assert "Katana-Request-SHA256: sha256:" in commit_message
+    assert "Katana-Postimages-SHA256: sha256:" in commit_message
+
+
+def test_kernel_committed_replay_uses_verified_head_fast_path(
+    git_repo, memory_domain_policy, monkeypatch,
+):
+    kernel, _, _ = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+
+    def _write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    first = kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        write_fn=_write,
+        idempotency_key="fast-replay",
+        idempotency_payload={"content": "transaction"},
+    )
+
+    def _unexpected_ancestry_check(*args, **kwargs):
+        raise AssertionError("verified HEAD must avoid per-record ancestry scans")
+
+    monkeypatch.setattr(
+        "katana_kernel.kernel.commit_is_ancestor",
+        _unexpected_ancestry_check,
+    )
+    replay = kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        write_fn=lambda **_: (_ for _ in ()).throw(
+            AssertionError("committed replay must not call write_fn")
+        ),
+        idempotency_key="fast-replay",
+        idempotency_payload={"content": "transaction"},
+    )
+
+    assert replay == first
+
+
+def test_kernel_first_idempotent_response_matches_json_durable_replay(
+    git_repo, memory_domain_policy,
+):
+    kernel, _, _ = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+
+    def _write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        return {
+            "id": "m-test01",
+            "echo": ("first", "second"),
+            "changed_paths": ["card.md"],
+        }
+
+    first = kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        write_fn=_write,
+        idempotency_key="json-response",
+        idempotency_payload={"content": "transaction"},
+    )
+    replay = kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        write_fn=lambda **_: (_ for _ in ()).throw(
+            AssertionError("committed replay must not call write_fn")
+        ),
+        idempotency_key="json-response",
+        idempotency_payload={"content": "transaction"},
+    )
+
+    assert first == replay
+    assert first["echo"] == ["first", "second"]
+
+
+def test_kernel_idempotency_payload_conflict_precedes_write(
+    git_repo, memory_domain_policy,
+):
+    kernel, _, _ = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+
+    def _write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        write_fn=_write,
+        idempotency_key="same-key",
+        idempotency_payload={"content": "first"},
+    )
+    called = False
+
+    def _unexpected_write(binding, args):
+        nonlocal called
+        called = True
+        raise AssertionError("conflicting request must not call write_fn")
+
+    with pytest.raises(IdempotencyConflictError):
+        kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=_unexpected_write,
+            idempotency_key="same-key",
+            idempotency_payload={"content": "different"},
+        )
+
+    assert called is False
+
+
+def test_kernel_clean_prewrite_failure_aborts_and_allows_same_request_retry(
+    git_repo, memory_domain_policy,
+):
+    kernel, _, mutation_ledger = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+
+    def _fail_before_write(binding, args):
+        raise ValueError("pre-write failure")
+
+    with pytest.raises(ValueError, match="pre-write failure"):
+        kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=_fail_before_write,
+            idempotency_key="retry-safe",
+            idempotency_payload={"content": "transaction"},
+        )
+
+    [aborted] = mutation_ledger.list_by_states({"ABORTED"})
+    assert aborted.attempt == 1
+
+    def _write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    result = kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        write_fn=_write,
+        idempotency_key="retry-safe",
+        idempotency_payload={"content": "transaction"},
+    )
+
+    record = mutation_ledger.get(result["mutation_id"])
+    assert record.state == "COMMITTED"
+    assert record.attempt == 2
+
+
+def test_kernel_dirty_failure_marks_ledger_broken_and_blocks_new_mutations(
+    git_repo, memory_domain_policy,
+):
+    kernel, _, mutation_ledger = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+
+    def _dirty_failure(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        raise RuntimeError("write crashed")
+
+    with pytest.raises(MutationBrokenError):
+        kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=_dirty_failure,
+            idempotency_key="broken-key",
+            idempotency_payload={"content": "transaction"},
+        )
+
+    [broken] = mutation_ledger.list_unresolved()
+    assert broken.state == "BROKEN"
+    called = False
+
+    def _unexpected_write(binding, args):
+        nonlocal called
+        called = True
+        return {"id": "m-never", "changed_paths": ["never.md"]}
+
+    with pytest.raises(MutationBrokenError, match="unresolved"):
+        kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=_unexpected_write,
+            idempotency_key="new-key",
+            idempotency_payload={"content": "new"},
+        )
+
+    assert called is False
+
+
+def test_kernel_reconciles_git_commit_after_sqlite_finalize_failure(
+    git_repo, memory_domain_policy, monkeypatch,
+):
+    kernel, _, mutation_ledger = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+    real_finalize = mutation_ledger.finalize
+    finalize_calls = 0
+
+    def _fail_finalize_once(*args, **kwargs):
+        nonlocal finalize_calls
+        finalize_calls += 1
+        if finalize_calls == 1:
+            raise OSError("injected SQLite finalize failure")
+        return real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(mutation_ledger, "finalize", _fail_finalize_once)
+
+    def _write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    with pytest.raises(MutationBrokenError):
+        kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=_write,
+            idempotency_key="recover-key",
+            idempotency_payload={"content": "transaction"},
+        )
+
+    committed_sha = head_sha(git_repo)
+    [prepared] = mutation_ledger.list_unresolved()
+    assert prepared.state == "PREPARED"
+
+    restarted, _, restarted_ledger = _idempotent_runtime_kernel(
+        git_repo,
+        memory_domain_policy,
+        commit_ignore=False,
+    )
+    called = False
+
+    def _unexpected_write(binding, args):
+        nonlocal called
+        called = True
+        raise AssertionError("reconcile must not execute write_fn again")
+
+    result = restarted.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        expected_base_sha=prepared.base_sha,
+        write_fn=_unexpected_write,
+        idempotency_key="recover-key",
+        idempotency_payload={"content": "transaction"},
+    )
+
+    assert called is False
+    assert result["git"]["detail"] == committed_sha
+    assert restarted_ledger.get(prepared.mutation_id).state == "COMMITTED"
+
+
+def test_kernel_receipt_records_only_effective_git_changes(
+    git_repo, memory_domain_policy, monkeypatch,
+):
+    unchanged = Path(git_repo) / "unchanged.md"
+    unchanged.write_text("same", encoding="utf-8")
+    subprocess.run(["git", "add", "unchanged.md"], cwd=git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "seed unchanged file"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    kernel, _, mutation_ledger = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+    real_finalize = mutation_ledger.finalize
+    finalize_calls = 0
+
+    def _fail_finalize_once(*args, **kwargs):
+        nonlocal finalize_calls
+        finalize_calls += 1
+        if finalize_calls == 1:
+            raise OSError("injected SQLite finalize failure")
+        return real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(mutation_ledger, "finalize", _fail_finalize_once)
+
+    def _write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        binding.vfs.write("unchanged.md", "same")
+        return {
+            "id": "m-test01",
+            "changed_paths": ["card.md", "unchanged.md"],
+        }
+
+    with pytest.raises(MutationBrokenError):
+        kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=_write,
+            idempotency_key="effective-paths",
+            idempotency_payload={"content": "transaction"},
+        )
+
+    [prepared] = mutation_ledger.list_unresolved()
+    assert prepared.changed_paths == ["card.md"]
+    assert set(prepared.postimages) == {"card.md"}
+
+    restarted, _, restarted_ledger = _idempotent_runtime_kernel(
+        git_repo,
+        memory_domain_policy,
+        commit_ignore=False,
+    )
+    result = restarted.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        write_fn=lambda **_: (_ for _ in ()).throw(
+            AssertionError("receipt recovery must not call write_fn")
+        ),
+        idempotency_key="effective-paths",
+        idempotency_payload={"content": "transaction"},
+    )
+
+    assert result["git"]["detail"] == head_sha(git_repo)
+    assert restarted_ledger.get(prepared.mutation_id).state == "COMMITTED"
+
+
+def test_kernel_receipt_recovery_rejects_git_blob_postimage_mismatch(
+    git_repo, memory_domain_policy,
+):
+    kernel, _, mutation_ledger = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+    payload = {"content": "transaction"}
+    claim = mutation_ledger.claim(
+        domain="memory",
+        op="create",
+        idempotency_key="forged-postimage",
+        request_hash=kernel._request_hash("memory", "create", payload),
+        base_sha=head_sha(git_repo),
+    )
+    prepared_result = {
+        "operation_result": {"id": "m-test01"},
+        "manifest_id": "manual-manifest",
+    }
+    expected_postimages = {
+        "card.md": kernel._postimage_hash(
+            FileImage(True, b"transaction", 0o644)
+        ),
+    }
+    prepared = mutation_ledger.prepare(
+        claim.record.mutation_id,
+        result=prepared_result,
+        changed_paths=["card.md"],
+        postimages=expected_postimages,
+    )
+    commit_message = kernel._receipt_commit_message(
+        "test: forged postimage receipt",
+        prepared,
+        canonical_request_hash(prepared_result),
+    )
+    (Path(git_repo) / "card.md").write_text("tampered", encoding="utf-8")
+    subprocess.run(["git", "add", "card.md"], cwd=git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", commit_message],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    called = False
+
+    def _unexpected_write(binding, args):
+        nonlocal called
+        called = True
+        raise AssertionError("invalid receipt must not call write_fn")
+
+    with pytest.raises(MutationBrokenError, match="unresolved"):
+        kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=_unexpected_write,
+            idempotency_key="forged-postimage",
+            idempotency_payload=payload,
+        )
+
+    assert called is False
+    assert mutation_ledger.get(prepared.mutation_id).state == "BROKEN"
+
+
+def test_kernel_git_reset_marks_committed_idempotency_record_orphaned(
+    git_repo, memory_domain_policy,
+):
+    kernel, _, mutation_ledger = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+    base_sha = head_sha(git_repo)
+
+    def _write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    result = kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        write_fn=_write,
+        idempotency_key="orphan-key",
+        idempotency_payload={"content": "transaction"},
+    )
+    subprocess.run(
+        ["git", "reset", "--hard", base_sha],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(MutationBrokenError, match="unresolved"):
+        kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=_write,
+            idempotency_key="orphan-key",
+            idempotency_payload={"content": "transaction"},
+        )
+
+    assert mutation_ledger.get(result["mutation_id"]).state == "ORPHANED"
+
+
+def test_kernel_missing_runtime_ledger_with_receipts_fails_closed(
+    git_repo, memory_domain_policy,
+):
+    kernel, _, mutation_ledger = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+
+    def _write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        write_fn=_write,
+        idempotency_key="lost-ledger",
+        idempotency_payload={"content": "transaction"},
+    )
+    ledger_path = Path(mutation_ledger.path)
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        Path(f"{ledger_path}{suffix}").unlink(missing_ok=True)
+
+    restarted, _, _ = _idempotent_runtime_kernel(
+        git_repo,
+        memory_domain_policy,
+        commit_ignore=False,
+    )
+    called = False
+
+    def _unexpected_write(binding, args):
+        nonlocal called
+        called = True
+        raise AssertionError("missing ledger must block writes")
+
+    with pytest.raises(MutationBrokenError, match="ledger is incomplete"):
+        restarted.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=_unexpected_write,
+            idempotency_key="new-key",
+            idempotency_payload={"content": "new"},
+        )
+
+    assert called is False
+
+
+def test_kernel_rejects_caller_supplied_reserved_receipt_trailer(
+    git_repo, memory_domain_policy,
+):
+    kernel, _, _ = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+    called = False
+
+    def _write(binding, args):
+        nonlocal called
+        called = True
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    with pytest.raises(ValueError, match="reserved Katana"):
+        kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=_write,
+            commit_msg="test\n\nKatana-Mutation-Id: spoofed",
+            idempotency_key="reserved-trailer",
+            idempotency_payload={"content": "transaction"},
+        )
+
+    assert called is False
+
+
+def test_kernel_concurrent_same_key_serializes_to_one_commit_and_one_write(
+    git_repo, memory_domain_policy,
+):
+    first_kernel, _, _ = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+    second_kernel, _, _ = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy, commit_ignore=False,
+    )
+    base_sha = head_sha(git_repo)
+    first_inside_write = threading.Event()
+    release_first = threading.Event()
+    second_finished = threading.Event()
+    second_write_called = False
+    outcomes = {}
+
+    def _first_write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        first_inside_write.set()
+        assert release_first.wait(timeout=5)
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    def _second_write(binding, args):
+        nonlocal second_write_called
+        second_write_called = True
+        raise AssertionError("second writer must replay")
+
+    def _run_first():
+        outcomes["first"] = first_kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            expected_base_sha=base_sha,
+            write_fn=_first_write,
+            idempotency_key="concurrent-key",
+            idempotency_payload={"content": "transaction"},
+        )
+
+    def _run_second():
+        try:
+            outcomes["second"] = second_kernel.mutate(
+                "memory",
+                "create",
+                _valid_args(),
+                expected_base_sha=base_sha,
+                write_fn=_second_write,
+                idempotency_key="concurrent-key",
+                idempotency_payload={"content": "transaction"},
+            )
+        finally:
+            second_finished.set()
+
+    first_thread = threading.Thread(target=_run_first)
+    second_thread = threading.Thread(target=_run_second)
+    first_thread.start()
+    assert first_inside_write.wait(timeout=5)
+    second_thread.start()
+    assert not second_finished.wait(timeout=0.2)
+
+    release_first.set()
+    first_thread.join(timeout=5)
+    second_thread.join(timeout=5)
+
+    assert outcomes["first"] == outcomes["second"]
+    assert second_write_called is False
+    commits = subprocess.run(
+        ["git", "-C", git_repo, "rev-list", "--count", f"{base_sha}..HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert commits == "1"
+
+
+def test_kernel_reconciles_clean_pending_claim_as_safe_retry(
+    git_repo, memory_domain_policy,
+):
+    kernel, _, mutation_ledger = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+    payload = {"content": "transaction"}
+    pending = mutation_ledger.claim(
+        domain="memory",
+        op="create",
+        idempotency_key="crashed-before-write",
+        request_hash=kernel._request_hash("memory", "create", payload),
+        base_sha=head_sha(git_repo),
+    )
+
+    def _write(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    result = kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        write_fn=_write,
+        idempotency_key="crashed-before-write",
+        idempotency_payload=payload,
+    )
+
+    record = mutation_ledger.get(pending.record.mutation_id)
+    assert result["mutation_id"] == pending.record.mutation_id
+    assert record.state == "COMMITTED"
+    assert record.attempt == 2
+
+
+def test_kernel_pending_claim_with_dirty_scene_fails_closed(
+    git_repo, memory_domain_policy,
+):
+    kernel, _, mutation_ledger = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+    payload = {"content": "transaction"}
+    pending = mutation_ledger.claim(
+        domain="memory",
+        op="create",
+        idempotency_key="crashed-dirty",
+        request_hash=kernel._request_hash("memory", "create", payload),
+        base_sha=head_sha(git_repo),
+    )
+    (Path(git_repo) / "partial.md").write_text(
+        "uncertain mutation scene",
+        encoding="utf-8",
+    )
+    called = False
+
+    def _unexpected_write(binding, args):
+        nonlocal called
+        called = True
+        raise AssertionError("dirty PENDING scene must fail closed")
+
+    with pytest.raises(MutationBrokenError, match="unresolved"):
+        kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=_unexpected_write,
+            idempotency_key="crashed-dirty",
+            idempotency_payload=payload,
+        )
+
+    assert called is False
+    assert mutation_ledger.get(pending.record.mutation_id).state == "BROKEN"
+
+
+def test_kernel_runtime_ledger_requires_all_sqlite_sidecars_ignored(
+    git_repo, memory_domain_policy,
+):
+    ignore = Path(git_repo) / ".gitignore"
+    ignore.write_text(
+        "/.katana/manifests/\n/.katana/ledger.sqlite\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", ".gitignore"], cwd=git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "incomplete runtime ignore"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    manifest = TransactionManifest(
+        os.path.join(git_repo, ".katana", "manifests"),
+        git_tracked=False,
+    )
+    mutation_ledger = SQLiteMutationLedger(
+        os.path.join(git_repo, ".katana", "ledger.sqlite"),
+    )
+    kernel = GovernedKernel()
+    kernel.bind(
+        "memory",
+        memory_domain_policy,
+        GovernedVFS(git_repo),
+        ResourceIdLedger(os.path.join(git_repo, ".katana", "tombstones.json")),
+        manifest,
+        git_repo,
+        mutation_ledger=mutation_ledger,
+    )
+
+    with pytest.raises(
+        RuntimeStateConfigurationError,
+        match="ledger.sqlite-wal",
+    ):
+        kernel.mutate(
+            "memory",
+            "create",
+            _valid_args(),
+            write_fn=lambda **_: {
+                "id": "m-never",
+                "changed_paths": ["never.md"],
+            },
+            idempotency_key="bad-ignore",
+        )
+
+
+def test_kernel_idempotent_noop_is_safely_aborted_not_left_broken(
+    git_repo, memory_domain_policy,
+):
+    target = Path(git_repo) / "card.md"
+    target.write_text("transaction", encoding="utf-8")
+    subprocess.run(["git", "add", "card.md"], cwd=git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "seed card"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    kernel, _, mutation_ledger = _idempotent_runtime_kernel(
+        git_repo, memory_domain_policy,
+    )
+
+    def _write_same_content(binding, args):
+        binding.vfs.write("card.md", args["content"])
+        return {"id": "m-test01", "changed_paths": ["card.md"]}
+
+    result = kernel.mutate(
+        "memory",
+        "create",
+        _valid_args(),
+        write_fn=_write_same_content,
+        idempotency_key="noop-key",
+        idempotency_payload={"content": "transaction"},
+    )
+
+    [aborted] = mutation_ledger.list_by_states({"ABORTED"})
+    assert result["git"]["committed"] is False
+    assert result["mutation_id"] == aborted.mutation_id
+    assert aborted.state == "ABORTED"
+    assert mutation_ledger.list_unresolved() == []
+
+
+def test_kernel_rejects_sqlite_ledger_with_default_tracked_manifest(
+    git_repo, memory_domain_policy,
+):
+    mutation_ledger = SQLiteMutationLedger(
+        os.path.join(git_repo, ".katana", "ledger.sqlite"),
+    )
+    kernel = GovernedKernel()
+
+    with pytest.raises(ValueError, match="runtime, non-Git manifest"):
+        kernel.bind(
+            "memory",
+            memory_domain_policy,
+            GovernedVFS(git_repo),
+            ResourceIdLedger(
+                os.path.join(git_repo, ".katana", "tombstones.json")
+            ),
+            TransactionManifest(
+                os.path.join(git_repo, ".katana", "manifests")
+            ),
+            git_repo,
+            mutation_ledger=mutation_ledger,
+        )

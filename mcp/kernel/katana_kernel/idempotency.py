@@ -2,7 +2,8 @@
 
 The ledger is runtime state, not a Git transaction target.  Callers must keep
 its database and SQLite sidecar files ignored by Git and coordinate claims with
-the repository mutation lock.
+the repository mutation lock.  This module does not rebuild a missing database
+from Git history; commit receipts only reconcile rows already persisted here.
 """
 
 from __future__ import annotations
@@ -120,6 +121,14 @@ class SQLiteMutationLedger:
         connection = self._connect()
         try:
             connection.execute("PRAGMA journal_mode=WAL")
+            current_version = connection.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0]
+            if current_version > _SCHEMA_VERSION:
+                raise RuntimeError(
+                    "mutation ledger schema is newer than supported: "
+                    f"{current_version} > {_SCHEMA_VERSION}"
+                )
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
@@ -322,6 +331,39 @@ class SQLiteMutationLedger:
         finally:
             connection.close()
 
+    def lookup(
+        self,
+        *,
+        domain: str,
+        idempotency_key: str,
+        op: str | None = None,
+        request_hash: str | None = None,
+    ) -> MutationRecord | None:
+        """Look up one namespaced key and optionally verify its request identity."""
+        hashed_key = _key_hash(domain, idempotency_key)
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT * FROM mutation_ledger
+                WHERE domain = ? AND key_hash = ?
+                """,
+                (domain, hashed_key),
+            ).fetchone()
+            if row is None:
+                return None
+            if (
+                (op is not None and row["op"] != op)
+                or (
+                    request_hash is not None
+                    and row["request_hash"] != request_hash
+                )
+            ):
+                raise IdempotencyConflictError(row["mutation_id"])
+            return self._record(row)
+        finally:
+            connection.close()
+
     def prepare(
         self,
         mutation_id: str,
@@ -348,9 +390,12 @@ class SQLiteMutationLedger:
         *,
         commit_sha: str,
         response: dict[str, Any],
+        verified_head: str | None = None,
     ) -> MutationRecord:
         if not commit_sha:
             raise ValueError("commit_sha is required")
+        if verified_head is not None and not verified_head:
+            raise ValueError("verified_head must be non-empty when provided")
         return self._transition(
             mutation_id,
             allowed={"PREPARED"},
@@ -360,12 +405,20 @@ class SQLiteMutationLedger:
                 "response_json": _canonical_json(response),
                 "error_json": None,
             },
+            metadata=(
+                {"verified_head": verified_head}
+                if verified_head is not None
+                else None
+            ),
+            delete_metadata=(
+                set() if verified_head is not None else {"verified_head"}
+            ),
         )
 
     def mark_aborted(self, mutation_id: str, reason: Any) -> MutationRecord:
         return self._transition(
             mutation_id,
-            allowed={"PENDING"},
+            allowed={"PENDING", "PREPARED"},
             target="ABORTED",
             assignments={"error_json": _canonical_json(reason)},
         )
@@ -393,6 +446,8 @@ class SQLiteMutationLedger:
         allowed: set[str],
         target: str,
         assignments: dict[str, Any],
+        metadata: dict[str, str] | None = None,
+        delete_metadata: set[str] | None = None,
     ) -> MutationRecord:
         now = time.time_ns()
         with self._transaction() as connection:
@@ -415,10 +470,27 @@ class SQLiteMutationLedger:
                 """,
                 values,
             )
+            for key, value in (metadata or {}).items():
+                connection.execute(
+                    """
+                    INSERT INTO ledger_meta(key, value)
+                    VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                    """,
+                    (key, value),
+                )
+            for key in delete_metadata or set():
+                connection.execute(
+                    "DELETE FROM ledger_meta WHERE key = ?",
+                    (key,),
+                )
             return self._record(self._select(connection, mutation_id))
 
-    def list_unresolved(self) -> list[MutationRecord]:
-        placeholders = ", ".join("?" for _ in _UNRESOLVED_STATES)
+    def list_by_states(self, states: set[str]) -> list[MutationRecord]:
+        if not states:
+            return []
+        ordered_states = tuple(sorted(states))
+        placeholders = ", ".join("?" for _ in ordered_states)
         connection = self._connect()
         try:
             rows = connection.execute(
@@ -427,11 +499,50 @@ class SQLiteMutationLedger:
                 WHERE state IN ({placeholders})
                 ORDER BY created_at, mutation_id
                 """,
-                _UNRESOLVED_STATES,
+                ordered_states,
             ).fetchall()
             return [self._record(row) for row in rows]
         finally:
             connection.close()
+
+    def list_unresolved(self) -> list[MutationRecord]:
+        return self.list_by_states(set(_UNRESOLVED_STATES))
+
+    def list_committed(self) -> list[MutationRecord]:
+        return self.list_by_states({"COMMITTED"})
+
+    def record_count(self) -> int:
+        connection = self._connect()
+        try:
+            return connection.execute(
+                "SELECT COUNT(*) FROM mutation_ledger"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+
+    def get_meta(self, key: str) -> str | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT value FROM ledger_meta WHERE key = ?",
+                (key,),
+            ).fetchone()
+            return None if row is None else row["value"]
+        finally:
+            connection.close()
+
+    def set_meta(self, key: str, value: str) -> None:
+        if not key:
+            raise ValueError("metadata key is required")
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO ledger_meta(key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (key, value),
+            )
 
     @property
     def path(self) -> str:

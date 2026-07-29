@@ -97,6 +97,184 @@ def cas_guard(repo_root: str, expected_base_sha: str | None) -> None:
         )
 
 
+def commit_is_ancestor(
+    repo_root: str,
+    ancestor_sha: str,
+    descendant: str = "HEAD",
+) -> bool:
+    if not ancestor_sha:
+        return False
+    result = _run(
+        repo_root, "merge-base", "--is-ancestor", ancestor_sha, descendant,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    detail = result.stderr.strip() or "git merge-base failed"
+    raise RollbackSafetyError(
+        f"cannot verify commit ancestry for {ancestor_sha}: {detail}"
+    )
+
+
+def commit_parents(repo_root: str, commit_sha: str) -> list[str]:
+    result = _run(repo_root, "rev-list", "--parents", "-n", "1", commit_sha)
+    if result.returncode != 0 or not result.stdout.strip():
+        detail = result.stderr.strip() or "git rev-list failed"
+        raise RollbackSafetyError(
+            f"cannot read commit parents for {commit_sha}: {detail}"
+        )
+    return result.stdout.split()[1:]
+
+
+def commit_changed_paths(repo_root: str, commit_sha: str) -> list[str]:
+    result = _run(
+        repo_root,
+        "diff-tree",
+        "--root",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "-z",
+        commit_sha,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git diff-tree failed"
+        raise RollbackSafetyError(
+            f"cannot read changed paths for {commit_sha}: {detail}"
+        )
+    paths = [path for path in result.stdout.split("\0") if path]
+    return validate_transaction_paths(repo_root, paths)
+
+
+def commit_file_image(
+    repo_root: str,
+    commit_sha: str,
+    path: str,
+) -> FileImage:
+    """Read one exact regular-file image from a commit tree."""
+    normalized = _normalize_transaction_path(repo_root, path)
+    try:
+        tree = subprocess.run(
+            [
+                "git",
+                "-C",
+                repo_root,
+                "ls-tree",
+                "--full-tree",
+                "-z",
+                commit_sha,
+                "--",
+                f":(literal){normalized}",
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise RollbackSafetyError(
+            f"cannot read committed image for {normalized!r}: {exc}"
+        ) from exc
+    if tree.returncode != 0:
+        detail = tree.stderr.decode(errors="replace").strip()
+        raise RollbackSafetyError(
+            f"cannot read committed image for {normalized!r}: "
+            f"{detail or 'git ls-tree failed'}"
+        )
+    entries = [entry for entry in tree.stdout.split(b"\0") if entry]
+    if not entries:
+        return FileImage(False)
+    if len(entries) != 1 or b"\t" not in entries[0]:
+        raise RollbackSafetyError(
+            f"ambiguous committed image for {normalized!r}"
+        )
+    header, committed_path = entries[0].split(b"\t", 1)
+    fields = header.split()
+    if (
+        len(fields) != 3
+        or committed_path.decode(errors="surrogateescape") != normalized
+    ):
+        raise RollbackSafetyError(
+            f"malformed committed image for {normalized!r}"
+        )
+    mode, object_type, object_sha = fields
+    if object_type != b"blob" or mode not in {b"100644", b"100755"}:
+        raise RollbackSafetyError(
+            f"committed target must be a regular file: {normalized!r}"
+        )
+    try:
+        blob = subprocess.run(
+            [
+                "git",
+                "-C",
+                repo_root,
+                "cat-file",
+                "blob",
+                object_sha.decode("ascii"),
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise RollbackSafetyError(
+            f"cannot read committed blob for {normalized!r}: {exc}"
+        ) from exc
+    if blob.returncode != 0:
+        detail = blob.stderr.decode(errors="replace").strip()
+        raise RollbackSafetyError(
+            f"cannot read committed blob for {normalized!r}: "
+            f"{detail or 'git cat-file failed'}"
+        )
+    file_mode = 0o755 if mode == b"100755" else 0o644
+    return FileImage(True, blob.stdout, file_mode)
+
+
+def find_commit_with_trailer(
+    repo_root: str,
+    key: str,
+    value: str,
+) -> str | None:
+    needle = f"{key}: {value}"
+    result = _run(
+        repo_root,
+        "log",
+        "-n",
+        "1",
+        "--format=%H",
+        "--fixed-strings",
+        f"--grep={needle}",
+        "HEAD",
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git log failed"
+        raise RollbackSafetyError(
+            f"cannot search mutation receipt {needle!r}: {detail}"
+        )
+    return result.stdout.strip() or None
+
+
+def read_katana_commit_trailers(
+    repo_root: str,
+    commit_sha: str,
+) -> dict[str, str]:
+    result = _run(repo_root, "show", "-s", "--format=%B", commit_sha)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git show failed"
+        raise RollbackSafetyError(
+            f"cannot read mutation receipt for {commit_sha}: {detail}"
+        )
+    trailers: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if not line.startswith("Katana-") or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        if key in trailers:
+            raise RollbackSafetyError(
+                f"duplicate reserved trailer {key!r} in {commit_sha}"
+            )
+        trailers[key] = value.strip()
+    return trailers
+
+
 @contextmanager
 def repository_mutation_lock(
     repo_root: str,
@@ -427,6 +605,21 @@ class TransactionJournal:
                 + ", ".join(missing)
             )
         return {path: self._expected[path] for path in normalized}
+
+    def effective_paths(self, paths: list[str]) -> list[str]:
+        """Return allowlisted paths whose postimage differs from clean HEAD."""
+        normalized = validate_transaction_paths(self.repo_root, paths)
+        missing = [path for path in normalized if path not in self._expected]
+        if missing:
+            raise RollbackSafetyError(
+                "transaction paths missing explicit journal entries: "
+                + ", ".join(missing)
+            )
+        return [
+            path
+            for path in normalized
+            if self._expected[path] != self._preimages[path]
+        ]
 
     def verify_worktree(self) -> None:
         for path, expected in self._expected.items():
