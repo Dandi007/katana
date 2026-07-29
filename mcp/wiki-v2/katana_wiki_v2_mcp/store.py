@@ -16,6 +16,12 @@ from katana_wiki_v2_mcp import pages as _pages
 from katana_wiki_v2_mcp import search as _search
 
 
+class StoreError(Exception):
+    def __init__(self, response: dict):
+        super().__init__(response.get("message", "store error"))
+        self.response = response
+
+
 class WikiStore:
     _manifest_counter: int = 0
 
@@ -126,6 +132,8 @@ class WikiStore:
             return {"code": "NOT_FOUND", "message": f"page not found: {ref}"}
         if page.get("_error"):
             return {"code": "VALIDATION_FAILED", "message": f"page is unparseable: {ref} ({page['_error']})"}
+        if not page.get("id"):
+            return {"code": "VALIDATION_FAILED", "message": f"page has no valid id: {ref}"}
         return None
 
     # ── read tools ──────────────────────────────────────────────────────────
@@ -253,21 +261,6 @@ class WikiStore:
         if title_err:
             return {"code": "VALIDATION_FAILED", "message": title_err}
 
-        existing = _pages.find_page_by_title(self._data_root, title)
-        if existing is not None:
-            if existing.get("_error"):
-                return {
-                    "code": "TITLE_EXISTS",
-                    "message": f"title already exists but page is unparseable: {title} ({existing['_error']})",
-                    "existing_id": None,
-                }
-            return {
-                "code": "TITLE_EXISTS",
-                "message": f"title already exists: {title}",
-                "existing_id": existing["id"],
-                "existing_摘要": existing["frontmatter"].get("摘要", ""),
-            }
-
         if extra_titles and title in extra_titles:
             return {
                 "code": "TITLE_EXISTS",
@@ -288,6 +281,23 @@ class WikiStore:
 
         return None
 
+    def _check_title_exists_locked(self, title: str) -> dict | None:
+        existing = _pages.find_page_by_title(self._data_root, title)
+        if existing is not None:
+            if existing.get("_error"):
+                return {
+                    "code": "TITLE_EXISTS",
+                    "message": f"title already exists but page is unparseable: {title} ({existing['_error']})",
+                    "existing_id": None,
+                }
+            return {
+                "code": "TITLE_EXISTS",
+                "message": f"title already exists: {title}",
+                "existing_id": existing["id"],
+                "existing_摘要": existing["frontmatter"].get("摘要", ""),
+            }
+        return None
+
     def wiki_create(self, title: str, body: str, frontmatter: dict,
                     allow_no_outlink: bool = False) -> dict:
         err = self._validate_create_page(title, body, frontmatter, allow_no_outlink=allow_no_outlink)
@@ -300,6 +310,9 @@ class WikiStore:
         store = self
 
         def _write(changed_paths):
+            conflict = store._check_title_exists_locked(title)
+            if conflict is not None:
+                raise StoreError(conflict)
             new_id = _pages.make_id(existing_ids={p["id"] for p in _pages.scan_pages(store._data_root) if p["id"]})
             full_fm["id"] = new_id
             page_path = _pages.title_to_path(title)
@@ -309,7 +322,10 @@ class WikiStore:
             store._search.index_page(new_id, title, full_body)
             return {"id": new_id, "path": page_path}
 
-        return self._mutate("wiki_create", _write, f"wiki: create {title}")
+        try:
+            return self._mutate("wiki_create", _write, f"wiki: create {title}")
+        except StoreError as e:
+            return e.response
 
     def wiki_update(self, ref: str, body: str, frontmatter: dict | None = None) -> dict:
         page = _pages.find_page_by_ref(self._data_root, ref)
@@ -472,21 +488,49 @@ class WikiStore:
         return self._mutate("wiki_delete", _write, f"wiki: delete {page['title']}")
 
     def wiki_ingest_plan(self, sources: str) -> dict:
-        resp = self._search.search(sources[:200], top_k=10)
-        results = resp.get("results", [])
-        candidates = []
-        for r in results:
-            page = _pages.find_page_by_id(self._data_root, r["id"])
-            if page is None:
-                continue
-            candidates.append({
-                "id": r["id"],
-                "title": page["title"],
-                "score": r["score"],
-                "snippet": page["body"][:200],
+        try:
+            candidates = json.loads(sources)
+        except (json.JSONDecodeError, TypeError):
+            return {"code": "VALIDATION_FAILED", "message": "sources must be a JSON array of page objects [{title, body, frontmatter?}]"}
+        if not isinstance(candidates, list):
+            return {"code": "VALIDATION_FAILED", "message": "sources must be a JSON array of page objects"}
+
+        pages = []
+        for c in candidates:
+            if not isinstance(c, dict) or "title" not in c or "body" not in c:
+                return {"code": "VALIDATION_FAILED", "message": "each page must have title and body"}
+            title = c["title"]
+            body = c["body"]
+            fm = dict(c.get("frontmatter", {}))
+            similar = []
+            existing = _pages.find_page_by_title(self._data_root, title)
+            if existing is not None:
+                similar.append({
+                    "id": existing.get("id"),
+                    "title": title,
+                    "score": 1.0,
+                    "reason": "exact title match",
+                })
+            search_resp = self._search.search(f"{title}\n{body[:200]}", top_k=5)
+            for r in search_resp.get("results", []):
+                p = _pages.find_page_by_id(self._data_root, r["id"])
+                if p is None or p["title"] == title:
+                    continue
+                similar.append({
+                    "id": r["id"],
+                    "title": p["title"],
+                    "score": r["score"],
+                    "reason": "similar content",
+                })
+            pages.append({
+                "title": title,
+                "body": body,
+                "frontmatter": fm,
+                "action": "create",
+                "similar": similar,
             })
         return {
-            "candidates": candidates,
+            "pages": pages,
             "base_sha": self._head_sha(),
         }
 
@@ -511,6 +555,9 @@ class WikiStore:
             results = []
             for p in pages_list:
                 title = p["title"]
+                conflict = store._check_title_exists_locked(title)
+                if conflict is not None:
+                    raise StoreError(conflict)
                 body = p["body"]
                 fm = dict(p.get("frontmatter", {}))
                 new_id = _pages.make_id(existing_ids={pp["id"] for pp in _pages.scan_pages(store._data_root) if pp["id"]})
@@ -523,7 +570,10 @@ class WikiStore:
                 results.append({"id": new_id, "path": page_path})
             return {"results": results}
 
-        return self._mutate("wiki_ingest_apply", _write, "wiki: ingest apply")
+        try:
+            return self._mutate("wiki_ingest_apply", _write, "wiki: ingest apply")
+        except StoreError as e:
+            return e.response
 
     def wiki_meta_write(self, name: str, content: str) -> dict:
         if name not in ("WIKI.md", "log.md"):

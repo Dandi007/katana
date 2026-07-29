@@ -223,6 +223,11 @@ class WikiSearch:
 
     def remove_page(self, page_id: str) -> None:
         self._keyword.remove(page_id)
+        if self._table is not None:
+            try:
+                self._table.delete(f"id = '{page_id}'")
+            except Exception:
+                pass
 
     def index_health(self) -> dict:
         return {

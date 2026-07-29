@@ -144,13 +144,16 @@ def scan_pages(data_root: str) -> list[dict]:
             text = p.read_text(encoding="utf-8")
             fm, body = parse_page(text)
             title = p.stem
-            pages.append({
+            page_data = {
                 "path": f"pages/{p.name}",
                 "title": title,
                 "frontmatter": fm,
                 "body": body,
                 "id": fm.get("id"),
-            })
+            }
+            if not text.startswith("---\n"):
+                page_data["_error"] = "missing frontmatter delimiter"
+            pages.append(page_data)
         except Exception as e:
             pages.append({
                 "path": f"pages/{p.name}",
@@ -171,13 +174,16 @@ def find_page_by_title(data_root: str, title: str) -> dict | None:
     try:
         text = full.read_text(encoding="utf-8")
         fm, body = parse_page(text)
-        return {
+        page_data = {
             "path": path,
             "title": title,
             "frontmatter": fm,
             "body": body,
             "id": fm.get("id"),
         }
+        if not text.startswith("---\n"):
+            page_data["_error"] = "missing frontmatter delimiter"
+        return page_data
     except Exception as e:
         return {
             "path": path,

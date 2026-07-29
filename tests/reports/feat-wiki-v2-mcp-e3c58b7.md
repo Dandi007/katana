@@ -1,24 +1,24 @@
 # Wiki v2 MCP Test Report
 
-- branch: dev_wiki_v2_01 @ `e3c58b7`
+- branch: dev_wiki_v2_01 @ `REWORK`
 - date: 2026-07-30
-- **PASS 63 / FAIL 0 / SKIP 0**
+- **PASS 70 / FAIL 0 / SKIP 0**
 
 | area | tests | result |
 |---|---|---|
-| A1 Write Three-State | 10 | PASS |
+| A1 Write Three-State | 12 | PASS |
 | A2 Rename Regression | 4 | PASS |
 | A3 Delete Regression | 3 | PASS |
-| A4 Invariants (INV-1, INV-2) | 3 | PASS |
-| A5 Search (hybrid/error) | 3 | PASS |
-| A6 Bad Page Isolation | 1 | PASS |
-| A7 Migration CLI | 6 | PASS |
+| A4 Invariants (INV-1, INV-2) | 4 | PASS |
+| A5 Search (hybrid/error) | 4 | PASS |
+| A6 Bad Page Isolation | 2 | PASS |
+| A7 Migration CLI | 7 | PASS |
 | A8 Concurrency | 1 | PASS |
 | Pages Unit | 10 | PASS |
 | Invariants Unit | 4 | PASS |
 | Query Unit | 2 | PASS |
 | VFS Unit | 4 | PASS |
-| Store Read | 5 | PASS |
+| Store Read | 6 | PASS |
 | Meta Write | 2 | PASS |
 | Report Gap | 1 | PASS |
 | Ingest Plan/Apply | 2 | PASS |
@@ -40,5 +40,5 @@
 
 ```
 cd mcp/wiki-v2 && uv run --extra dev pytest -q
-63 passed in 3.99s
+70 passed in 5.59s
 ```

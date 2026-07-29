@@ -872,31 +872,48 @@ class TestIngest:
         store = _make_store(d)
         store.wiki_create("已有页", _sample_body("已有页"), _sample_frontmatter(
             title="已有页", 摘要="已有"))
-        result = store.wiki_ingest_plan("test source")
-        assert "candidates" in result
+        sources = json.dumps([{
+            "title": "新页面",
+            "body": _sample_body("新页面"),
+            "frontmatter": {
+                "创建日期": "2026-07-30",
+                "tags": ["test"],
+                "类型": "卡片",
+                "source_type": "human",
+                "credibility": "high",
+                "摘要": "新页面",
+                "sources": ["test"],
+            },
+        }])
+        result = store.wiki_ingest_plan(sources)
+        assert "pages" in result
         assert "base_sha" in result
+        assert len(result["pages"]) == 1
+        assert result["pages"][0]["title"] == "新页面"
+        assert result["pages"][0]["action"] == "create"
 
-    def test_ingest_apply(self):
+    def test_ingest_apply_roundtrip(self):
         d = _make_data_root()
         store = _make_store(d)
-        plan = {
-            "pages": [{
-                "title": "批量页",
-                "body": _sample_body("批量页"),
-                "frontmatter": {
-                    "创建日期": "2026-07-30",
-                    "tags": ["test"],
-                    "类型": "卡片",
-                    "source_type": "human",
-                    "credibility": "high",
-                    "摘要": "批量",
-                    "sources": ["test"],
-                },
-            }],
-        }
+        sources = json.dumps([{
+            "title": "批量页",
+            "body": _sample_body("批量页"),
+            "frontmatter": {
+                "创建日期": "2026-07-30",
+                "tags": ["test"],
+                "类型": "卡片",
+                "source_type": "human",
+                "credibility": "high",
+                "摘要": "批量",
+                "sources": ["test"],
+            },
+        }])
+        plan = store.wiki_ingest_plan(sources)
         result = store.wiki_ingest_apply(plan)
         assert "commit" in result
         assert "results" in result
+        get_result = store.wiki_get("批量页")
+        assert get_result["id"] is not None
 
 
 # ── rebuild index test ──────────────────────────────────────────────────────

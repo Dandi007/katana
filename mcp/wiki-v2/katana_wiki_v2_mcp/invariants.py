@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 
 ALLOWED_TYPES: set[str] = {"卡片", "索引", "源码分析", "架构"}
-CODE_TYPES: set[str] = {"源码分析", "架构"}
 
 _VALID_SOURCE_TYPES: set[str] = {"human", "mixed", "llm"}
 _VALID_CREDIBILITIES: set[str] = {"high", "medium", "low"}
@@ -61,17 +60,12 @@ def check_frontmatter(fm: dict) -> list[str]:
 def check_provenance(fm: dict, body: str) -> list[str]:
     errors: list[str] = []
 
-    page_type = fm.get("类型")
     sources = fm.get("sources")
     has_sources = isinstance(sources, list) and len(sources) > 0
     has_references = bool(_REFERENCES_RE.search(body))
 
-    if page_type in CODE_TYPES:
-        if not has_sources:
-            errors.append(f"{page_type} 硬要求 frontmatter sources")
-    else:
-        if not has_sources and not has_references:
-            errors.append("缺 provenance：需 frontmatter sources 或正文 # References")
+    if not has_sources and not has_references:
+        errors.append("缺 provenance：需 frontmatter sources 或正文 # References")
 
     return errors
 
