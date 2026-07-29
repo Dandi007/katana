@@ -173,6 +173,27 @@ async def wiki_query(question: str, top_k: int = 10) -> dict:
 
 
 @mcp.tool()
+async def wiki_report_gap(question: str, note: str | None = None) -> dict:
+    """记录一次「wiki 未覆盖」——当 wiki_query 返回了候选但你自检后判定无一支撑本问题时调用。
+
+    cold=False 只代表检索有返回。分数不能区分真命中与噪声（标题字面匹配得高分，
+    自然语言提问命中真页面时分数与无关页同量级），所以「是否真覆盖」须由你阅读候选后判断；
+    判为未覆盖时用本 tool 记 gap log，让知识盲区可见——否则 gap 只在结果集为空时才被记录。
+
+    Args:
+        question: 原始问题文本。
+        note: 可选，补充说明（例如最接近的候选为何不够）。
+    """
+    if _store is None:
+        raise RuntimeError("wiki store not initialized; call configure() first")
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    line = f"## [{ts}] query | gap: {question}"
+    if note:
+        line += f" — {note}"
+    return _server_mutation(lambda: _store.append_gap_log(line))
+
+
+@mcp.tool()
 async def wiki_ingest_plan(source_text: str) -> dict:
     """入库第一步：server orient 判重，并返回 proposal schema 与唯一 canonical base_sha。
     updates apply 必须传 expected_base_sha=plan.base_sha。Args: source_text 待入库内容(或其摘录)。"""

@@ -18,6 +18,22 @@ SYNTHESIS_CONTRACT: str = (
     "  须明示 non-wiki 来源，或改为通用知识模式并显式说明。"
 )
 
+# cold 只在结果集为空时为 True，而检索分数无法区分「真命中」与「噪声」：
+# 实测标题精确命中 top1≈1.03，但自然语言问已覆盖话题只有 0.0211~0.0378，
+# 与无覆盖话题的噪声区间 0.0206~0.0341 完全重叠。任何单一阈值都会误杀
+# 「问得像人话」的真命中。因此支撑性判断由模型逐条自评，服务端只强制它必须做。
+SUPPORT_GATE: str = (
+    "⚠️ 支撑性自检（在综合前必须先做，不可跳过）："
+    "① cold=False 只表示「检索有返回」，不表示「wiki 覆盖此问题」——"
+    "  分数不可作为相关性判据（标题字面匹配会拿到高分，而自然语言提问命中真页面时分数"
+    "  与无关页噪声同量级），故不得用 score 高低替代阅读判断；"
+    "② 逐个候选判断它是否真的支撑本问题（snippet 不足以判断时按 read_ladder 读全文）；"
+    "③ 若没有任何候选支撑该问题，等同 cold：必须显式声明 wiki 未覆盖，"
+    "  并按 non-wiki 来源作答或改通用知识模式，禁止拿低分候选凑答案；"
+    "  同时调 wiki_report_gap(question) 记一条 gap log，让盲区可见；"
+    "④ 在答案开头用一句话交代自检结论（例如「wiki 有 N 篇相关」或「wiki 未覆盖，以下为 non-wiki」）。"
+)
+
 READ_LADDER: str = (
     "候选阅读梯（硬阈值）："
     "候选 ≤5 → 全部内联阅读，不跳过；"
@@ -53,7 +69,8 @@ def _do_query(
 
     Returns:
         hot: {"cold": False, "candidates": [...], "candidate_count": N,
-              "synthesis_contract": SYNTHESIS_CONTRACT, "read_ladder": READ_LADDER}
+              "synthesis_contract": SYNTHESIS_CONTRACT, "support_gate": SUPPORT_GATE,
+              "read_ladder": READ_LADDER}
         cold: {"cold": True, "message": ..., "candidates": [],
                "synthesis_contract": SYNTHESIS_CONTRACT}
     """
@@ -84,5 +101,6 @@ def _do_query(
         "candidates": candidates,
         "candidate_count": len(candidates),
         "synthesis_contract": SYNTHESIS_CONTRACT,
+        "support_gate": SUPPORT_GATE,
         "read_ladder": READ_LADDER,
     }

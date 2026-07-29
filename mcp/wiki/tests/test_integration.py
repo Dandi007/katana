@@ -344,3 +344,12 @@ def test_lint_mechanical_reports_broken_link(wiki_repo):
         "---\n链 [[不存在]]\n", encoding="utf-8")
     res = _run(server.wiki_lint_mechanical())
     assert any(f["code"] == "broken_link" for f in res["findings"])
+
+
+def test_report_gap_appends_log(wiki_repo):
+    """模型自评为「未覆盖」时能记 gap log——此前 gap 只在结果集为空时才可能被记录。"""
+    res = _run(server.wiki_report_gap("wiki 完全没有的话题", note="最接近的候选只讲了别的事"))
+    assert res.get("changed_paths") == ["log.md"] or res.get("applied") is not False
+    log = (wiki_repo / "log.md").read_text(encoding="utf-8")
+    assert "gap: wiki 完全没有的话题" in log
+    assert "最接近的候选只讲了别的事" in log

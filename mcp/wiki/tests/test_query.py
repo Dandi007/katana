@@ -48,3 +48,33 @@ def test_search_scoped_to_wiki_root():
 def test_server_has_wiki_root_attr():
     import katana_wiki_mcp.server as s
     assert hasattr(s, "_wiki_root")
+
+
+def test_hot_path_ships_support_gate():
+    """cold=False 时必须下发支撑性自检契约，并点名 wiki_report_gap。
+
+    分数无法区分真命中与噪声（实测：标题命中 top1≈1.03，自然语言问已覆盖话题
+    0.0211~0.0378，与无覆盖噪声 0.0206~0.0341 完全重叠），所以服务端不做阈值裁决，
+    改为强制模型逐条自评——但契约必须真的随返回体下发，否则等于没有。
+    """
+    resp = _resp([vs.SearchResult(path="Zettelkasten/a.md", score=0.0211, title="A", snippet="s")])
+    out = query._do_query("自然语言提问", None, "/tmp/x", 10,
+                          search_fn=lambda q, **k: resp,
+                          log_fn=lambda *a: None,
+                          now_fn=lambda: "2026-07-29 10:00")
+    assert out["cold"] is False
+    gate = out["support_gate"]
+    assert "score" in gate and "不得用 score" in gate      # 明确禁止用分数替代阅读
+    assert "wiki_report_gap" in gate                       # 判为未覆盖时有可执行动作
+    assert out["synthesis_contract"]                       # 既有契约不被顶掉
+
+
+def test_low_score_candidate_is_still_hot_not_dropped():
+    """低分候选不得被服务端擅自判 cold——那会误杀「问得像人话」的真命中。"""
+    resp = _resp([vs.SearchResult(path="Zettelkasten/第一性原理.md", score=0.0211, title="第一性原理", snippet="s")])
+    out = query._do_query("如何判断一个想法是不是第一性的", None, "/tmp/x", 10,
+                          search_fn=lambda q, **k: resp,
+                          log_fn=lambda *a: None,
+                          now_fn=lambda: "2026-07-29 10:00")
+    assert out["cold"] is False
+    assert [c["path"] for c in out["candidates"]] == ["Zettelkasten/第一性原理.md"]
