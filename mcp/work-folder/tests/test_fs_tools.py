@@ -162,11 +162,12 @@ def _setup_work_folder(tools, dirname):
 
 
 def _setup_work_folder_with_context(tools, dirname):
-    """Create a valid work-folder directory with progress.md, context.md, and CLAUDE.md (brief created via fs_create by callers)."""
+    """Create a valid work-folder directory with progress.md, context.md, and resume guides (brief created via fs_create by callers)."""
     _mkdir(tools, dirname)
     _create_file(tools, f"{dirname}/progress.md", _progress_md())
     _create_file(tools, f"{dirname}/context.md", _context_md())
     _create_file(tools, f"{dirname}/CLAUDE.md", _claude_md())
+    _create_file(tools, f"{dirname}/AGENTS.md", _claude_md())
 
 
 @pytest.fixture
@@ -559,6 +560,8 @@ def test_fs_create_resource_id_prefix(tools):
 
 def test_fs_create_duplicate_path_rejected(tools):
     _setup_work_folder(tools, "test-dup")
+    first = tools.fs_create("test-dup/_brief.md", _brief_no_id("test-dup"))
+    assert first["node_type"] == "file"
     result = tools.fs_create("test-dup/_brief.md", _brief_no_id("test-dup"))
     assert result["code"] == "RESOURCE_EXISTS"
 
@@ -817,7 +820,8 @@ def test_fs_write_context_removed_rejected(tools):
 def test_fs_edit_claude_preserves_resume_guide(tools):
     _setup_work_folder_with_context(tools, "test-edit-claude")
     result = tools.fs_edit("test-edit-claude/CLAUDE.md",
-        "暂无", "Some decisions were made")
+        "## Key Decisions\n暂无",
+        "## Key Decisions\nSome decisions were made")
     assert result["node_type"] == "file"
 
 
@@ -1040,8 +1044,8 @@ def test_fs_copy_brief_to_non_work_folder_rejected(tools):
 
 def test_fs_single_cas_expected_base_commit(tools):
     _setup_work_folder(tools, "test-cas-param")
-    tools.fs_create("test-cas-param/_brief.md", _brief_no_id("test-cas-param"))
-    content = _brief("test-cas-param-updated", rid="wf-abc123")
+    created = tools.fs_create("test-cas-param/_brief.md", _brief_no_id("test-cas-param"))
+    content = _brief("test-cas-param-updated", rid=created["resource_id"])
     result = tools.fs_write(
         "test-cas-param/_brief.md", content,
         expected_base_commit="a" * 40,
@@ -1795,10 +1799,10 @@ def test_scan_uses_brief_pattern(tools):
 def test_mcp_error_base_commit_conflict(srv):
     mcp, repo, tools = srv
     _setup_work_folder(tools, "mcp-err-cas")
-    tools.fs_create("mcp-err-cas/_brief.md", _brief_no_id("mcp-err-cas"))
+    created = tools.fs_create("mcp-err-cas/_brief.md", _brief_no_id("mcp-err-cas"))
     result = _call(mcp, "fs_write", {
         "path": "mcp-err-cas/_brief.md",
-        "content": _brief("mcp-err-cas-updated", rid="wf-abc123"),
+        "content": _brief("mcp-err-cas-updated", rid=created["resource_id"]),
         "expected_base_commit": "0" * 40,
     })
     assert result["code"] == "BASE_COMMIT_CONFLICT"
