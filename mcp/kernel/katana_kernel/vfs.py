@@ -129,18 +129,26 @@ class GovernedVFS:
         dst.parent.mkdir(parents=True, exist_ok=True)
         src.rename(dst)
 
-    def ls(self, pattern: str = "*.md") -> list[str]:
+    def ls(
+        self,
+        pattern: str = "*.md",
+        *,
+        include_hidden: bool = False,
+    ) -> list[str]:
         if "/" in pattern or "*" in pattern or "?" in pattern:
             return sorted(
                 str(p.relative_to(self._root))
                 for p in self._root.glob(pattern)
-                if not p.name.startswith(".") and p.is_file()
+                if (
+                    (include_hidden or not p.name.startswith("."))
+                    and p.is_file()
+                )
             )
         resolved = self._resolve(pattern) if pattern and pattern != "." else self._root
         return sorted(
             str(p.relative_to(self._root))
             for p in resolved.iterdir()
-            if not p.name.startswith(".") and p.is_file()
+            if (include_hidden or not p.name.startswith(".")) and p.is_file()
         )
 
     def mkdir(self, path: str, op: str = "mkdir", args: dict | None = None):

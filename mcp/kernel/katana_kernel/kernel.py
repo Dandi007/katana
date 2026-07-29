@@ -6,6 +6,7 @@ Orchestrates the full governance chain:
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import hashlib
 import json
@@ -30,6 +31,7 @@ from katana_kernel.gitops import (
     is_working_tree_clean,
     read_katana_commit_trailers,
     repository_mutation_lock,
+    require_exact_git_root,
     require_clean_working_tree,
     validate_runtime_state_paths,
     validate_runtime_state_tree,
@@ -100,7 +102,11 @@ class GovernedKernel:
             raise ValueError(
                 "SQLite mutation ledger requires a runtime, non-Git manifest"
             )
-        resolved = os.path.realpath(repo_root)
+        resolved = require_exact_git_root(repo_root)
+        if os.path.realpath(vfs.root) != resolved:
+            raise ValueError(
+                "GovernedVFS root must equal the exact bound Git repo_root"
+            )
         if resolved in self._repo_roots:
             raise ValueError(f"repo_root {resolved!r} already bound by another domain")
         binding = DomainBinding(
@@ -109,7 +115,7 @@ class GovernedKernel:
             vfs=vfs,
             ledger=ledger,
             manifest=manifest,
-            repo_root=repo_root,
+            repo_root=resolved,
             mutation_ledger=mutation_ledger,
         )
         self._bindings[domain] = binding
@@ -144,6 +150,84 @@ class GovernedKernel:
                     f"{ledger_path}-journal",
                 ],
             )
+
+    @staticmethod
+    def _runtime_state_allowances(binding: DomainBinding) -> list[str]:
+        """Return the exact ignored runtime paths owned by this binding."""
+        if binding.manifest.git_tracked:
+            return []
+        allowances = [binding.manifest.manifests_dir]
+        if binding.mutation_ledger is not None:
+            ledger_path = binding.mutation_ledger.path
+            allowances.extend(
+                [
+                    ledger_path,
+                    f"{ledger_path}-wal",
+                    f"{ledger_path}-shm",
+                    f"{ledger_path}-journal",
+                ]
+            )
+        return allowances
+
+    def reconcile(self, domain: str) -> dict[str, Any]:
+        """Validate and reconcile one runtime binding before serving traffic."""
+        binding = self.get_binding(domain)
+        with repository_mutation_lock(binding.repo_root):
+            self._validate_runtime_configuration(binding)
+            require_clean_working_tree(
+                binding.repo_root,
+                allowed_ignored_paths=self._runtime_state_allowances(binding),
+            )
+            if binding.mutation_ledger is not None:
+                self._reconcile_runtime_ledger(binding)
+            return {
+                "ok": True,
+                "domain": domain,
+                "head": head_sha(binding.repo_root),
+                "unresolved": (
+                    len(binding.mutation_ledger.list_unresolved())
+                    if binding.mutation_ledger is not None
+                    else 0
+                ),
+            }
+
+    def replay_idempotent(
+        self,
+        domain: str,
+        op: str,
+        args: dict[str, Any],
+        *,
+        idempotency_key: str | None,
+        idempotency_payload: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """Return a reconciled committed response before stateful prechecks."""
+        if idempotency_key is None:
+            return None
+        binding = self.get_binding(domain)
+        if binding.mutation_ledger is None:
+            raise ValueError(
+                "idempotency_key requires an opt-in SQLite mutation ledger"
+            )
+        with repository_mutation_lock(binding.repo_root):
+            self._validate_runtime_configuration(binding)
+            binding.policy.verify(op, args)
+            self._reconcile_runtime_ledger(binding)
+            request_hash = self._request_hash(
+                domain,
+                op,
+                args if idempotency_payload is None else idempotency_payload,
+            )
+            existing = binding.mutation_ledger.lookup(
+                domain=domain,
+                idempotency_key=idempotency_key,
+                op=op,
+                request_hash=request_hash,
+            )
+            if existing is None or existing.state == "ABORTED":
+                return None
+            if existing.state != "COMMITTED" or existing.response is None:
+                raise self._unresolved_error(existing)
+            return copy.deepcopy(existing.response)
 
     @staticmethod
     def _request_hash(domain: str, op: str, payload: Any) -> str:
@@ -305,7 +389,10 @@ class GovernedKernel:
                         "published receipt has no PREPARED ledger state"
                     )
                 self._validate_receipt(binding, record, commit_sha)
-                if not is_working_tree_clean(binding.repo_root):
+                if not is_working_tree_clean(
+                    binding.repo_root,
+                    allowed_ignored_paths=self._runtime_state_allowances(binding),
+                ):
                     raise RollbackSafetyError(
                         "published receipt has a dirty repository scene"
                     )
@@ -336,7 +423,10 @@ class GovernedKernel:
 
         clean_at_base = (
             head_sha(binding.repo_root) == record.base_sha
-            and is_working_tree_clean(binding.repo_root)
+            and is_working_tree_clean(
+                binding.repo_root,
+                allowed_ignored_paths=self._runtime_state_allowances(binding),
+            )
         )
         if record.state == "PENDING" and clean_at_base:
             return ledger.mark_aborted(
@@ -350,7 +440,10 @@ class GovernedKernel:
                 "detail": "pending mutation has no provably safe recovery",
                 "head": head_sha(binding.repo_root),
                 "base_sha": record.base_sha,
-                "worktree_clean": is_working_tree_clean(binding.repo_root),
+                "worktree_clean": is_working_tree_clean(
+                    binding.repo_root,
+                    allowed_ignored_paths=self._runtime_state_allowances(binding),
+                ),
             },
         )
         raise self._unresolved_error(ledger.get(record.mutation_id))
@@ -535,7 +628,10 @@ class GovernedKernel:
         # The governed writer owns the whole repository for the duration of one
         # mutation. Refuse any pre-existing tracked, staged, or untracked state
         # before write_fn can run.
-        base_sha = require_clean_working_tree(binding.repo_root)
+        base_sha = require_clean_working_tree(
+            binding.repo_root,
+            allowed_ignored_paths=self._runtime_state_allowances(binding),
+        )
         if expected_base_sha is not None and base_sha != expected_base_sha:
             raise CASRejectionError(
                 f"CAS mismatch: expected {expected_base_sha[:8]}..., "

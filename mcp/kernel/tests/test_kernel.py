@@ -547,8 +547,9 @@ def test_kernel_rejects_ignored_target_before_modifying_it(
         binding.vfs.write("ignored.md", "transaction")
         return {"id": "m-test01", "changed_paths": ["ignored.md"]}
 
-    with pytest.raises(RollbackSafetyError, match="ignored"):
+    with pytest.raises(DirtyWorkTreeError, match="ignored"):
         kernel.mutate("memory", "create", _valid_args(), write_fn=_write)
+    assert target.read_text(encoding="utf-8") == "user content"
 
     assert target.read_text(encoding="utf-8") == "user content"
 

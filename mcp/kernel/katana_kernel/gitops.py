@@ -77,11 +77,36 @@ def head_sha(repo_root: str) -> str:
     return ""
 
 
-def is_working_tree_clean(repo_root: str) -> bool:
+def require_exact_git_root(repo_root: str) -> str:
+    """Return the canonical Git toplevel or reject a missing/nested root."""
+
+    resolved = Path(repo_root).resolve()
+    if not resolved.is_dir():
+        raise ValueError(f"Git repository root does not exist: {resolved}")
+    result = _run(str(resolved), "rev-parse", "--show-toplevel")
+    if result.returncode != 0 or not result.stdout.strip():
+        raise ValueError(f"not an existing Git repository: {resolved}")
+    discovered = Path(result.stdout.strip()).resolve()
+    if discovered != resolved:
+        raise ValueError(
+            "configured repo_root must equal the exact Git toplevel: "
+            f"{resolved} != {discovered}"
+        )
+    return str(resolved)
+
+
+def is_working_tree_clean(
+    repo_root: str,
+    *,
+    allowed_ignored_paths: list[str] | None = None,
+) -> bool:
     try:
-        r = _run(repo_root, "status", "--porcelain")
-        return r.returncode == 0 and r.stdout.strip() == ""
-    except (subprocess.SubprocessError, OSError):
+        require_clean_working_tree(
+            repo_root,
+            allowed_ignored_paths=allowed_ignored_paths,
+        )
+        return True
+    except (DirtyWorkTreeError, subprocess.SubprocessError, OSError):
         return False
 
 
@@ -319,7 +344,63 @@ def repository_mutation_lock(
             lock_file.close()
 
 
-def require_clean_working_tree(repo_root: str) -> str:
+def _normalize_ignored_allowances(
+    repo_root: str,
+    paths: list[str] | None,
+) -> list[str]:
+    root = Path(repo_root).resolve()
+    normalized: list[str] = []
+    for raw_path in paths or []:
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            relative = candidate.resolve(strict=False).relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise DirtyWorkTreeError(
+                f"ignored runtime allowance escapes repository: {raw_path!r}"
+            ) from exc
+        if (
+            relative in {Path("."), Path("")}
+            or not relative.parts
+            or relative.parts[0] == ".git"
+        ):
+            raise DirtyWorkTreeError(
+                f"invalid ignored runtime allowance: {raw_path!r}"
+            )
+        value = relative.as_posix().rstrip("/")
+        if value not in normalized:
+            normalized.append(value)
+    return normalized
+
+
+def _ignored_untracked_paths(repo_root: str) -> list[str]:
+    try:
+        result = _run(
+            repo_root,
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise DirtyWorkTreeError(
+            f"cannot enumerate ignored repository payload: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git ls-files failed"
+        raise DirtyWorkTreeError(
+            f"cannot enumerate ignored repository payload: {detail}"
+        )
+    return [path for path in result.stdout.split("\0") if path]
+
+
+def require_clean_working_tree(
+    repo_root: str,
+    *,
+    allowed_ignored_paths: list[str] | None = None,
+) -> str:
     """Fail closed unless tracked, staged, and untracked state is clean.
 
     Returns the base HEAD used by the transaction fail-stop guard.
@@ -345,6 +426,23 @@ def require_clean_working_tree(repo_root: str) -> str:
         raise DirtyWorkTreeError(
             "governed mutation rejected: repository has tracked, staged, "
             "or untracked changes"
+        )
+    allowances = _normalize_ignored_allowances(
+        repo_root,
+        allowed_ignored_paths,
+    )
+    unexpected_ignored = [
+        path
+        for path in _ignored_untracked_paths(repo_root)
+        if not any(
+            path == allowed or path.startswith(f"{allowed}/")
+            for allowed in allowances
+        )
+    ]
+    if unexpected_ignored:
+        raise DirtyWorkTreeError(
+            "governed mutation rejected: repository has ignored untracked "
+            f"payload outside runtime state: {unexpected_ignored[0]!r}"
         )
     return base_sha
 
