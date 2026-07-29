@@ -13,7 +13,13 @@ from katana_wiki_mcp.pages import parse_page
 
 DEFAULT_EXCLUDE_DIRS: set[str] = {
     ".git", ".obsidian", ".wiki", ".trash", "转换文档", "DeepThought",
+    # 非知识页：工具产物与 agent 状态，不受 Zettelkasten schema 约束
+    ".audit",        # lint/audit 自己的报告输出
+    "checkpoints",   # work-folder 式的 goal/progress/findings 状态文件
 }
+
+# 非知识页文件名：agent 指令文件，恰好躺在知识 zone 里
+DEFAULT_EXCLUDE_FILES: frozenset[str] = frozenset({"CLAUDE.md", "AGENTS.md"})
 
 
 def safe_parse_page(text: str) -> tuple[dict, str]:
@@ -46,17 +52,21 @@ def _short_hash(text: str) -> str:
 
 
 def enumerate_docs(
-    wiki_root: str, *, exclude_dirs: set[str] | None = None
+    wiki_root: str, *, exclude_dirs: set[str] | None = None,
+    exclude_files: frozenset[str] | None = None,
 ) -> list[dict]:
     """枚举 wiki_root 下所有 .md，prune 干扰/raw 目录，返回结构化清单（按 path 升序）。"""
     excludes = DEFAULT_EXCLUDE_DIRS if exclude_dirs is None else exclude_dirs
+    excluded_files = (
+        DEFAULT_EXCLUDE_FILES if exclude_files is None else exclude_files
+    )
     root = Path(wiki_root)
     out: list[dict] = []
     for dirpath, dirnames, filenames in os.walk(root):
         # 原地剪枝
         dirnames[:] = [d for d in dirnames if d not in excludes]
         for name in filenames:
-            if not name.endswith(".md"):
+            if not name.endswith(".md") or name in excluded_files:
                 continue
             fp = Path(dirpath) / name
             text = fp.read_text(encoding="utf-8")

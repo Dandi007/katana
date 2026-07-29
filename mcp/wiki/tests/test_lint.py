@@ -51,9 +51,52 @@ def test_raw_zone_exempt(tmp_path):
     assert all("DeepThought" not in f["path"] for f in fs)
 
 
-def test_extract_wikilinks_strips_path():
+def test_extract_wikilinks_preserves_path_form():
+    """路径形式必须保留原样——提取阶段剥掉前缀会让同名页互相顶替。
+
+    路径→页面的归一交给 _link_keys（登记全部路径后缀），不在提取阶段做。
+    """
     s = lint.extract_wikilinks("见 [[Index/甲综述]] 和 [[乙]]")
-    assert s == {"甲综述", "乙"}
+    assert s == {"Index/甲综述", "乙"}
+
+
+def test_same_basename_pages_do_not_shadow_each_other(tmp_path):
+    """不同目录下的同名页：只链其中一个，另一个仍须报 orphan。
+
+    旧实现按 basename 字符串比对，[[Index/甲]] 会让顶层 甲.md 也算「被链」。
+    """
+    _page(tmp_path / "Zettelkasten" / "甲.md", _GOOD_FM, "顶层甲 [[乙]]\n")
+    _page(tmp_path / "Zettelkasten" / "Index" / "甲.md", _GOOD_FM, "索引甲 [[乙]]\n")
+    _page(tmp_path / "Zettelkasten" / "乙.md", _GOOD_FM, "只链索引那个 [[Index/甲]]\n")
+    fs = lint.lint_mechanical(str(tmp_path))["findings"]
+    orphans = {f["path"] for f in fs if f["code"] == "orphan"}
+    assert "Zettelkasten/甲.md" in orphans            # 顶层甲无人链
+    assert "Zettelkasten/Index/甲.md" not in orphans  # 索引甲被链到
+
+
+def test_ambiguous_link_is_flagged(tmp_path):
+    """裸 [[甲]] 同时命中多页时报 ambiguous_link，而非静默挑一个。"""
+    _page(tmp_path / "Zettelkasten" / "甲.md", _GOOD_FM, "顶层甲 [[乙]]\n")
+    _page(tmp_path / "Zettelkasten" / "Index" / "甲.md", _GOOD_FM, "索引甲 [[乙]]\n")
+    _page(tmp_path / "Zettelkasten" / "乙.md", _GOOD_FM, "歧义引用 [[甲]]\n")
+    fs = lint.lint_mechanical(str(tmp_path))["findings"]
+    amb = [f for f in fs if f["code"] == "ambiguous_link"]
+    assert len(amb) == 1 and "甲" in amb[0]["detail"]
+
+
+def test_control_files_are_not_linted(tmp_path):
+    """CLAUDE.md / AGENTS.md / .audit/ / checkpoints/ 是 agent 与工具产物，非知识页。"""
+    _page(tmp_path / "Zettelkasten" / "真页.md", _GOOD_FM, "正文 [[真页]]\n")
+    (tmp_path / "Zettelkasten" / "CLAUDE.md").write_text("# 指令\n", encoding="utf-8")
+    (tmp_path / "Zettelkasten" / "AGENTS.md").write_text("# 指令\n", encoding="utf-8")
+    (tmp_path / "Zettelkasten" / ".audit").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Zettelkasten" / ".audit" / "r.md").write_text("裸报告\n", encoding="utf-8")
+    (tmp_path / "Zettelkasten" / "checkpoints" / "x").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Zettelkasten" / "checkpoints" / "x" / "progress.md").write_text(
+        "# Progress\n", encoding="utf-8")
+    touched = {f["path"] for f in lint.lint_mechanical(str(tmp_path))["findings"]}
+    assert not any(p.endswith(("CLAUDE.md", "AGENTS.md")) for p in touched)
+    assert not any("/.audit/" in p or "checkpoints/" in p for p in touched)
 
 
 def test_path_style_wikilink_not_false_broken_or_orphan(tmp_path):
