@@ -1,0 +1,1 @@
+"""katana-wiki-v2-mcp — v2 wiki MCP server with flat pages, stable IDs, single-gate writes, embedded hybrid search."""
