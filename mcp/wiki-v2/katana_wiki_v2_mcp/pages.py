@@ -10,6 +10,7 @@ import hashlib
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 
 import yaml
@@ -45,9 +46,20 @@ def read_page(path: str) -> tuple[dict, str]:
 
 
 def write_page(path: str, fm: dict, body: str) -> None:
+    # 原子写：先写同目录临时文件再 os.replace 换名。
+    # Path.write_text 会先 truncate 再写，留下一个「文件已空但内容未落」的窗口；
+    # mutation 之间虽有 store 写锁，但读路径（wiki_get / scan_pages）不持锁，
+    # 并发读会撞进该窗口，读到缺 frontmatter 分隔符的半截页面而报 unparseable。
+    # os.replace 在同一文件系统上是原子的，读者只能看到旧版本或新版本。
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(render_page(fm, body), encoding="utf-8")
+    tmp = p.with_name(f".{p.name}.tmp{os.getpid()}.{threading.get_ident()}")
+    try:
+        tmp.write_text(render_page(fm, body), encoding="utf-8")
+        os.replace(tmp, p)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def make_id(*, existing_ids: set[str] | None = None, seed: str = "") -> str:
