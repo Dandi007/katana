@@ -612,9 +612,29 @@ class TestConcurrency:
 
         assert len(errors) == 0, f"concurrent errors: {errors}"
 
-        get_by_id = store.wiki_get("并发页新")
-        if get_by_id.get("code") != "NOT_FOUND":
-            assert "并发页编辑后" in get_by_id["body"], \
+        # 两个 mutation 由 store 内单写锁串行化，谁先拿到锁决定另一个看到的世界：
+        #   edit 先 → edit 写入旧标题页，rename 随后搬走该页，编辑内容必须被保留
+        #   rename 先 → 旧标题已不存在，edit 按 ref 找不到页，必须返回 NOT_FOUND 且不写任何东西
+        # 实现以返回值（error dict）而非异常表达拒绝，故断言要按返回码分支，
+        # 否则会把「被正确拒绝的 edit」误判成 lost update。
+        edit_result = next(r for kind, r in results if kind == "edit")
+        rename_result = next(r for kind, r in results if kind == "rename")
+
+        if edit_result.get("code") == "NOT_FOUND":
+            # rename 先行：edit 被正确拒绝，页面应为 rename 后的原始内容
+            assert rename_result.get("code") is None, \
+                f"rename must succeed when it wins the lock: {rename_result}"
+            get_renamed = store.wiki_get("并发页新")
+            assert get_renamed.get("code") != "NOT_FOUND", "renamed page must exist"
+            assert "并发页编辑后" not in get_renamed["body"], \
+                "rejected edit must not have written anything"
+        else:
+            # edit 先行：两者都成功，rename 不得丢掉 edit 的内容
+            assert edit_result.get("code") is None, f"edit failed unexpectedly: {edit_result}"
+            assert rename_result.get("code") is None, f"rename failed unexpectedly: {rename_result}"
+            get_renamed = store.wiki_get("并发页新")
+            assert get_renamed.get("code") != "NOT_FOUND", "renamed page must exist"
+            assert "并发页编辑后" in get_renamed["body"], \
                 "rename must not silently overwrite the edit"
 
     def test_concurrent_writes_serialized(self):
