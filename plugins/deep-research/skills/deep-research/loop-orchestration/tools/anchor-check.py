@@ -20,7 +20,13 @@ def _from_bus(spec):
     for m in json.load(urllib.request.urlopen(req, timeout=30)).get("messages", []):
         pl = m.get("payload") or {}
         if pl.get("anchor") and pl.get("quote"):
-            out.append((f"seq{m.get('channel_seq')}", pl["anchor"], pl["quote"]))
+            # 【必须把 credibility 一起取出来】2026-08-04 补:
+            # 我改 worker.md 时宣称「credibility 变成会被机械证伪的声明」,
+            # 但本工具当时**根本不读 credibility** —— 证伪的是引文,从不与【声称值】对照。
+            # ⇒ 一个在坏引文上标 high 的 worker,不产生任何关联信号。
+            # 这正是本线整晚在追的那类缺陷:**一个被宣称可检验的声明,而检验者不读那个声明。**
+            out.append((f"seq{m.get('channel_seq')}", pl["anchor"], pl["quote"],
+                        pl.get("credibility")))
     return out
 COMMITS = {"/data/code/self/claude-web-gateway": (sys.argv[2] if len(sys.argv)>2 else None),
            "/data/code/self/loop-engine-supervisor-current": 'b503efc' or None}
@@ -91,10 +97,14 @@ for label, block in re.findall(r"### ([FE]\d+)\s+\[[^\]]*\]\n```json\n(\{.*?\n\}
     try: d = json.loads(block)
     except Exception: continue
     if d.get("anchor") and d.get("quote"):
-        entries.append((label, d["anchor"], d["quote"]))
+        entries.append((label, d["anchor"], d["quote"], d.get("credibility")))
 
 res = Counter(); details = []
-for label, anchor, quote in entries:
+# 【声称 vs 实测】credibility 是生产者的自评;本表把它与机械判定对照。
+# 只有对照才让自评承重 —— 否则它只是一个没人读的标签。
+cred = Counter()          # (声称值, 是否验过) -> 计数
+overclaim = []            # 声称 high 却验不过的条目
+for label, anchor, quote, claimed in entries:
     sp = split_anchor(anchor)
     if not sp:
         res["锚点格式不可解析"] += 1; details.append(("锚点格式不可解析", label, anchor, "")); continue
@@ -107,6 +117,7 @@ for label, anchor, quote in entries:
     q = norm(quote)
     if q and q in window:
         res["✅ 命中指定行段"] += 1
+        cred[(claimed or "(未填)", "验得过")] += 1
     elif q and q in norm(content):
         # 找出实际所在行
         for i in range(len(lines)):
@@ -116,6 +127,9 @@ for label, anchor, quote in entries:
             else: continue
             break
         res["⚠️ 行段漂移（引文在文件里但不在指定行）"] += 1
+        cred[(claimed or "(未填)", "引文在但行号错")] += 1
+        if (claimed or "").lower() == "high":
+            overclaim.append(("行段漂移", label, anchor, claimed))
     else:
         # 【分岔点定位】把「引文不在该文件中」拆成两类 —— 它们的成因完全不同：
         #   · 前缀几乎不匹配 → 引文与该文件不沾边（锚点指错文件 / 大范围改写）
@@ -131,6 +145,9 @@ for label, anchor, quote in entries:
         ratio = lo_ / len(q) if q else 0
         if ratio >= 0.5:
             res["🔴 前缀匹配后偏离（编造指纹）"] += 1
+            cred[(claimed or "(未填)", "硬失败")] += 1
+            if (claimed or "").lower() == "high":
+                overclaim.append(("编造指纹", label, anchor, claimed))
             i = nc.find(q[:lo_]) if lo_ else -1
             actual = nc[i+lo_:i+lo_+70] if i >= 0 else ""
             details.append(("🔴 前缀匹配后偏离（编造指纹）", label, anchor,
@@ -139,6 +156,9 @@ for label, anchor, quote in entries:
                             f"        文件续: {actual}"))
         else:
             res["❌ 引文与该文件不沾边"] += 1
+            cred[(claimed or "(未填)", "硬失败")] += 1
+            if (claimed or "").lower() == "high":
+                overclaim.append(("不沾边", label, anchor, claimed))
             details.append(("❌ 引文与该文件不沾边", label, anchor,
                             f"最长匹配前缀仅 {lo_}/{len(q)} 字符({ratio:.0%})"))
 
@@ -158,3 +178,87 @@ if drift:
     print("\n【行段漂移样例（前 8）】")
     for _, label, anchor, extra in drift:
         print(f"  {label}  {anchor}  → {extra}")
+
+# ── 声称 vs 实测（本工具此前完全没做的那一半）──
+print("\n" + "=" * 72)
+print("【credibility 声称 vs 机械实测】")
+if not cred:
+    print("  语料里没有 credibility 字段 —— 无法对照。")
+    print("  注意：**这不等于「都填对了」**，是「压根没有可对照的声明」。")
+else:
+    for (c, v), n in sorted(cred.items()):
+        print(f"  声称 {c:<8s} × 实测 {v:<12s} : {n}")
+    print()
+    if overclaim:
+        print(f"  🔴 **声称 high 但验不过：{len(overclaim)} 条** —— 自评与实测直接冲突")
+        for kind, label, anchor, c in overclaim[:10]:
+            print(f"       [{kind}] {label}  {anchor[:70]}")
+        if len(overclaim) > 10:
+            print(f"       …另 {len(overclaim)-10} 条")
+        print()
+        print("  ⇒ 这些是【可归因到具体条目】的过度声称。credibility 因此不再是标签，")
+        print("     而是一个会被本工具当场对上的断言。")
+    elif all(c == "(未填)" for (c, _) in cred):
+        # 【绝不能报 ✅】全部未填 = 没有可对照的声明,不是「都填对了」。
+        # 实测根因:credibility 是 research.finding.v1 的字段,
+        # 而 anchor+quote 在 research.excerpt.v1 上 —— **两个不同的消息**。
+        # 本节按 excerpt 取 credibility 永远取不到 ⇒ 结论恒为「干净」。
+        # 这是本线今晚删过一次的同型缺陷:**零功率检查,其缺席被读成证据**。
+        print("  🛑 **全部条目都没有 credibility 字段 —— 本节无结论。**")
+        print("     根因：credibility 属 research.finding.v1，anchor/quote 属 research.excerpt.v1，")
+        print("     二者是不同消息。按 excerpt 取 credibility 恒为空。")
+        print("     ⇒ **不要把这读成「没有过度声称」** —— 是压根没有可对照的声明。")
+        print("     正确做法见下方【按 finding 归并】一节。")
+    else:
+        print("  ✅ 无「声称 high 却验不过」的条目。")
+
+# ── 【按 finding 归并】credibility 的正确对照层 ──
+# credibility 在 finding 上,anchor/quote 在 excerpt 上,excerpt 经 refs 指向 finding。
+# ⇒ 对照必须跨消息 join,不能在单条 excerpt 上做。这是本工具此前缺的那一半。
+if CORPUS.startswith("bus:") and ".evidence" in CORPUS:
+    import sqlite3, urllib.request as _u
+    topic = CORPUS.split(":", 1)[1].rsplit(".evidence", 1)[0]
+    try:
+        _tok = open("/data/agent-bus/tokens/line-deep-research.token").read().strip()
+        def _get(ch):
+            r = _u.Request(f"http://127.0.0.1:7490/v1/channels/{ch}/messages?limit=1000",
+                           headers={"Authorization": f"Bearer {_tok}"})
+            return json.load(_u.urlopen(r, timeout=30)).get("messages", [])
+        _db = sqlite3.connect("/data/agent-bus/state/bus.sqlite3")
+        _idx = _get(f"{topic}.index")
+        _fmap = {m["entity_id"]: (m.get("payload") or {})
+                 for m in _idx if (m.get("kind") or "").startswith("research.finding")}
+        _sup = {}
+        for m in _get(f"{topic}.evidence"):
+            pl = m.get("payload") or {}
+            if not (pl.get("anchor") and pl.get("quote")):
+                continue
+            sp = split_anchor(pl["anchor"])
+            good = False
+            if sp:
+                repo, rel, lo, hi = sp
+                c = read_file(repo, rel, COMMITS.get(repo))
+                good = bool(c and norm(pl["quote"]) in norm(c))
+            for (tgt,) in _db.execute(
+                    "SELECT target_entity FROM message_refs WHERE message_id=?", (m["message_id"],)):
+                if tgt in _fmap:
+                    g, t = _sup.get(tgt, (0, 0))
+                    _sup[tgt] = (g + (1 if good else 0), t + 1)
+        print("\n" + "=" * 72)
+        print("【按 finding 归并：声称 credibility vs 支撑引文实测】")
+        rows = []
+        for e, (g, t) in _sup.items():
+            rows.append(((_fmap[e].get("credibility") or "(未填)"), g, t, _fmap[e].get("title", "")))
+        agg = Counter()
+        for c, g, t, _ in rows:
+            agg[(c, "全部验得过" if g == t else ("部分" if g else "一条都验不过"))] += 1
+        for k, n in sorted(agg.items()):
+            print(f"  声称 {k[0]:<8s} × {k[1]:<12s} : {n}")
+        bad = [r for r in rows if r[1] == 0]
+        if bad:
+            print(f"\n  🔴 **{len(bad)} 条 finding 的支撑引文一条都验不过**：")
+            for c, g, t, title in bad:
+                print(f"       credibility={c}  引文 {t} 条全挂  {title[:56]}")
+            print("\n  ⇒ 这才是 credibility 能被对上的位置。")
+    except Exception as _e:  # noqa: BLE001
+        print(f"\n（按 finding 归并失败，跳过：{type(_e).__name__}: {_e}）")
