@@ -27,6 +27,11 @@ COMMITS = {"/data/code/self/claude-web-gateway": (sys.argv[2] if len(sys.argv)>2
 ROOTS = {
     "claude-web-gateway": "/data/code/self/claude-web-gateway",
     "loop-engine-supervisor-current": "/data/code/self/loop-engine-supervisor-current",
+    # 【2026-08-04 补】research:smoke-bus-semantics 的锚点全指 agent-bus 仓,
+    # 而它不在本表里 => 17/17 报「文件不存在」。**那是仪器瞎了,不是语料造假。**
+    # 我差点把它读成「该课题引文全部伪造」——本文件第 53 行的注释早就警告过同一件事,
+    # 我还是又踩了一次。故补一道自检(见下 CONTROL),让仪器自己说「我瞎了」。
+    "agent-bus": "/data/code/self/agent-bus",
 }
 DEFAULT_ROOT = ROOTS["claude-web-gateway"]
 
@@ -63,6 +68,18 @@ def split_anchor(a):
             sub = path[len(base)+1:]
             if os.path.exists(os.path.join(root, sub)): return root, sub, lo, hi
     return DEFAULT_ROOT, path, lo, hi               # 都不命中才回退
+
+# 【仪器自检:全员「文件不存在」= 仪器故障,不是语料结论】
+# 判据来自本线反复踩的坑:任何「统计某物有多少异常」的检查,
+# 必须能区分「样本真的异常」与「我根本没看到样本」。
+# 100% 硬失败在真实语料里几乎不可能,而在 ROOTS 缺仓时必然发生。
+def _instrument_guard(total, missing):
+    if total and missing == total:
+        print("\n🛑 **仪器自检未过**:全部 %d 条都报「文件不存在」。" % total)
+        print("   这几乎必然是 ROOTS 缺少对应仓库,而不是语料全部伪造。")
+        print("   **不要把本次输出当作语料结论。** 先补 ROOTS 再跑。")
+        return False
+    return True
 
 if CORPUS.startswith("bus:"):
     entries = _from_bus(CORPUS)
