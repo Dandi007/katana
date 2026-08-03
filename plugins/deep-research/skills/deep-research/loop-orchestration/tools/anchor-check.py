@@ -4,6 +4,24 @@ import json, os, re, subprocess, sys
 from collections import Counter
 
 CORPUS = sys.argv[1]
+
+# 【可直接读 bus 全集，不必依赖手工导出的语料快照】
+# 起因：本线曾用一份 114 条的导出语料下结论，而 bus 上实际有 131 条 —— 两个不同的集合，
+# 而我一直以为是同一个。「我的数据集」与「全部数据」的差别，只在去比对时才显形。
+# 用法：CORPUS 传 "bus:<evidence_channel>" 即直连取全集。
+def _from_bus(spec):
+    import urllib.request
+    ch = spec.split(":", 1)[1]
+    tok = open("/data/agent-bus/tokens/line-deep-research.token").read().strip()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:7490/v1/channels/{ch}/messages?limit=1000",  # limit 必带
+        headers={"Authorization": f"Bearer {tok}"})
+    out = []
+    for m in json.load(urllib.request.urlopen(req, timeout=30)).get("messages", []):
+        pl = m.get("payload") or {}
+        if pl.get("anchor") and pl.get("quote"):
+            out.append((f"seq{m.get('channel_seq')}", pl["anchor"], pl["quote"]))
+    return out
 COMMITS = {"/data/code/self/claude-web-gateway": (sys.argv[2] if len(sys.argv)>2 else None),
            "/data/code/self/loop-engine-supervisor-current": 'b503efc' or None}
 ROOTS = {
@@ -46,8 +64,12 @@ def split_anchor(a):
             if os.path.exists(os.path.join(root, sub)): return root, sub, lo, hi
     return DEFAULT_ROOT, path, lo, hi               # 都不命中才回退
 
-s = open(CORPUS, encoding="utf-8").read()
-entries = []
+if CORPUS.startswith("bus:"):
+    entries = _from_bus(CORPUS)
+    s = ""
+else:
+    s = open(CORPUS, encoding="utf-8").read()
+    entries = []
 for label, block in re.findall(r"### ([FE]\d+)\s+\[[^\]]*\]\n```json\n(\{.*?\n\})\n```", s, re.S):
     try: d = json.loads(block)
     except Exception: continue
