@@ -1,9 +1,48 @@
 #!/usr/bin/env python3
-"""锚点校验：quote 是否真的出现在 anchor 指的位置。纯确定性，无模型。"""
+"""锚点校验：quote 是否真的出现在 anchor 指的位置。纯确定性，无模型。
+
+v2 (2026-08-04 N2): 支持带版本 URI 格式
+  code://<repo>@<commit>:<path>#L<line>[-<line>]
+  旧格式 (path:line) 继续兼容，显式标注为「旧格式，不可校验 revision」。
+"""
 import json, os, re, subprocess, sys
 from collections import Counter
+from urllib.parse import urlparse, unquote
 
 CORPUS = sys.argv[1]
+
+# ── v2: 带版本 URI 解析 ──
+# 格式: code://<repo-name>@<commit>:<relpath>#L<start>[-<end>]
+VERSIONED_URI_RE = re.compile(
+    r'^code://([^@]+)@([^:]+):(.+)#L(\d+)(?:-L?(\d+))?$'
+)
+
+# 仓库名 → 本地路径映射
+CODE_ROOTS = {
+    "loop-engine":                  "/data/code/self/loop-engine",
+    "agent-bus":                    "/data/code/self/agent-bus",
+    "agent-runtime":                "/data/code/self/agent-runtime",
+    "claude-web-gateway":           "/data/code/self/claude-web-gateway",
+    "loop-engine-supervisor-current": "/data/code/self/loop-engine-supervisor-current",
+    "subagent-mcp":                 "/data/code/self/subagent-mcp",
+    "katana":                       "/data/code/self/katana",
+}
+
+
+def parse_versioned_uri(anchor: str):
+    """解析 code://repo@commit:path#Lline 格式。返回 (repo, commit, relpath, start, end) 或 None。"""
+    m = VERSIONED_URI_RE.match(anchor)
+    if not m:
+        return None
+    repo_name = m.group(1)
+    commit = m.group(2)
+    relpath = m.group(3)
+    start = int(m.group(4))
+    end = int(m.group(5)) if m.group(5) else start
+    repo_path = CODE_ROOTS.get(repo_name)
+    if not repo_path:
+        return None  # 未知仓库
+    return repo_path, commit, relpath, start, end
 
 # 【可直接读 bus 全集，不必依赖手工导出的语料快照】
 # 起因：本线曾用一份 114 条的导出语料下结论，而 bus 上实际有 131 条 —— 两个不同的集合，
@@ -54,26 +93,26 @@ def read_file(repo, relpath, commit):
         return None
 
 def split_anchor(a):
+    # v2: 先尝试带版本 URI
+    vu = parse_versioned_uri(a)
+    if vu:
+        return vu  # (repo_path, commit, relpath, start, end)
+
+    # v1: 裸 path:line 格式（兼容旧数据）
     m = re.match(r"^(.*?):(\d+)(?:-(\d+))?$", a)
     if not m: return None
     path, lo, hi = m.group(1), int(m.group(2)), int(m.group(3) or m.group(2))
     for name, root in ROOTS.items():
         if path.startswith(root):
-            return root, path[len(root)+1:], lo, hi
+            return root, COMMITS.get(root), path[len(root)+1:], lo, hi
     if path.startswith("/"): return None            # 绝对路径但不在已知仓
-    # 【相对路径要试所有已知仓，不能静默回退到主仓】
-    # 原实现直接落 DEFAULT_ROOT，于是 `loop-engine-supervisor-current/...` 这类
-    # 带仓名前缀的相对路径被拿去 claude-web-gateway 里找 → 报「文件不存在」。
-    # 那是【校验器的假阴性】，却会被读成「语料有假锚点」——错误归因，且方向最坏：
-    # 冤枉产物。实测该文件真实存在。
     for root in ROOTS.values():
-        if os.path.exists(os.path.join(root, path)): return root, path, lo, hi
-        # 带仓名前缀：loop-engine-supervisor-current/xxx → <root>/xxx
+        if os.path.exists(os.path.join(root, path)): return root, COMMITS.get(root), path, lo, hi
         base = os.path.basename(root)
         if path.startswith(base + "/"):
             sub = path[len(base)+1:]
-            if os.path.exists(os.path.join(root, sub)): return root, sub, lo, hi
-    return DEFAULT_ROOT, path, lo, hi               # 都不命中才回退
+            if os.path.exists(os.path.join(root, sub)): return root, COMMITS.get(root), sub, lo, hi
+    return DEFAULT_ROOT, COMMITS.get(DEFAULT_ROOT), path, lo, hi
 
 # 【仪器自检:全员「文件不存在」= 仪器故障,不是语料结论】
 # 判据来自本线反复踩的坑:任何「统计某物有多少异常」的检查,
@@ -100,6 +139,8 @@ for label, block in re.findall(r"### ([FE]\d+)\s+\[[^\]]*\]\n```json\n(\{.*?\n\}
         entries.append((label, d["anchor"], d["quote"], d.get("credibility")))
 
 res = Counter(); details = []
+# v2: 统计锚点格式
+fmt_v1 = 0; fmt_v2 = 0
 # 【声称 vs 实测】credibility 是生产者的自评;本表把它与机械判定对照。
 # 只有对照才让自评承重 —— 否则它只是一个没人读的标签。
 cred = Counter()          # (声称值, 是否验过) -> 计数
@@ -108,10 +149,24 @@ for label, anchor, quote, claimed in entries:
     sp = split_anchor(anchor)
     if not sp:
         res["锚点格式不可解析"] += 1; details.append(("锚点格式不可解析", label, anchor, "")); continue
-    repo, rel, lo, hi = sp
-    content = read_file(repo, rel, COMMITS.get(repo))
+    repo, commit, rel, lo, hi = sp[0], sp[1], sp[2], sp[3], sp[4]
+    content = read_file(repo, rel, commit)
     if content is None:
         res["文件不存在"] += 1; details.append(("文件不存在", label, anchor, "")); continue
+
+    # 标记锚点格式: v2 带版本 URI vs v1 裸路径
+    is_versioned = bool(parse_versioned_uri(anchor))
+    if is_versioned:
+        fmt_v2 += 1
+    else:
+        fmt_v1 += 1
+
+    # v2: fetcher 自检——取回内容非空且形态合理
+    if is_versioned and (not content or not content.strip()):
+        res["🔴 v2 fetcher 取回空内容"] += 1
+        details.append(("🔴 v2 fetcher 取回空内容", label, anchor,
+                        f"commit={commit} repo={repo} relpath={rel}"))
+        continue
     lines = content.splitlines()
     window = norm("\n".join(lines[max(0, lo-1):hi]))
     q = norm(quote)
@@ -163,6 +218,9 @@ for label, anchor, quote, claimed in entries:
                             f"最长匹配前缀仅 {lo_}/{len(q)} 字符({ratio:.0%})"))
 
 print(f"语料带 anchor+quote 条目：{len(entries)}   各仓代码状态：{COMMITS}")
+print(f"锚点格式: v2 (versioned URI): {fmt_v2}  v1 (bare path): {fmt_v1}")
+if fmt_v1:
+    print("  ⚠️ v1 裸路径锚点无法校验 revision——revision 不可知则无法区分「编造」与「代码后来改了」")
 print("=" * 72)
 for k, v in res.most_common():
     print(f"  {v:4d}  {k}")
@@ -236,8 +294,8 @@ if CORPUS.startswith("bus:") and ".evidence" in CORPUS:
             sp = split_anchor(pl["anchor"])
             good = False
             if sp:
-                repo, rel, lo, hi = sp
-                c = read_file(repo, rel, COMMITS.get(repo))
+                repo, commit, rel, lo, hi = sp[0], sp[1], sp[2], sp[3], sp[4]
+                c = read_file(repo, rel, commit)
                 good = bool(c and norm(pl["quote"]) in norm(c))
             for (tgt,) in _db.execute(
                     "SELECT target_entity FROM message_refs WHERE message_id=?", (m["message_id"],)):
