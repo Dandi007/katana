@@ -16,14 +16,6 @@ const settings = {
           { type: 'command', command: `"${root}/plugins/wiki/hooks/session-start"` }
         ]
       }
-    ],
-    PostToolUse: [
-      {
-        matcher: 'Write|Edit',
-        hooks: [
-          { type: 'command', command: `python3 "${root}/plugins/fpa/skills/fpa/scripts/validate_fpa.py" --hook` }
-        ]
-      }
     ]
   },
   env: {

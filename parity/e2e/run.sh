@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # katana parity e2e runner — run the same scenario on real Claude Code and real
-# OpenCode inside fully isolated sandboxes, collect injection/fpa/skills, diff.
+# OpenCode inside fully isolated sandboxes, collect injection/skills, diff.
 #
 # Usage: ./run.sh <scenario.json> [cc|oc|both]   (default: both)
 #

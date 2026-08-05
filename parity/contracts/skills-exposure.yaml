@@ -25,7 +25,6 @@ known_differences:
   - tool_dependency: "依赖 CC 专属工具的 skill 在 OC 降级"
     affected:
       - deep-research  # 用 Workflow tool
-      - fpa            # 用 Workflow tool（adversarial verify）
     oc_behavior: "skill 可见可调，编排步骤需 LLM 按文内 fallback 自行替代"
     mitigation: 记录不修
 gate:
