@@ -11,7 +11,34 @@ set -u
 # ── 路径发现 ──
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL="$HERE/anchor-check.py"
-REPO_ROOT_OVERRIDE="${ANCHOR_REPO_ROOT:-/data/code/self/loop-engine-deep-research-plugin}"
+
+# E1..E8 需要一份含 fixture 所指 revision 与文件（src/tick.ts / src/tick-run.ts）
+# 的真实仓根。不硬编码单个绝对路径：优先 ANCHOR_REPO_ROOT，否则在候选基下
+# 发现并**验证**（确实含所需 revision+文件）才采用；找不到则响亮失败——保证
+# E9 的 exit 0 是交付包性质而非环境偶然。
+REQ_REV="a592276892f5e93a5e37d800a52dd48436639c0b"
+repo_valid(){ # $1=候选仓根
+  [ -d "$1" ] || return 1
+  git -C "$1" cat-file -e "$REQ_REV^{commit}" 2>/dev/null || return 1
+  git -C "$1" cat-file -e "$REQ_REV:src/tick.ts" 2>/dev/null || return 1
+  git -C "$1" cat-file -e "$REQ_REV:src/tick-run.ts" 2>/dev/null || return 1
+  return 0
+}
+pick_repo_root(){
+  local cand
+  if [ -n "${ANCHOR_REPO_ROOT:-}" ] && repo_valid "$ANCHOR_REPO_ROOT"; then
+    echo "$ANCHOR_REPO_ROOT"; return 0
+  fi
+  for cand in /data/code/self/loop-engine-deep-research-plugin /data/code/self/*; do
+    [ "$cand" = "/data/code/self/*" ] && continue
+    if repo_valid "$cand"; then echo "$cand"; return 0; fi
+  done
+  return 1
+}
+REPO_ROOT_OVERRIDE="$(pick_repo_root)" || {
+  echo "E9-FAIL: 找不到含所需 revision($REQ_REV) 与 src/tick.ts 的仓根；请设 ANCHOR_REPO_ROOT"
+  exit 9
+}
 
 PY=python3
 [ -x "$(command -v $PY)" ] || { echo "E9-FAIL: python3 not found"; exit 9; }
@@ -47,7 +74,8 @@ if [ "$E2_TOTAL" -eq 131 ] && [ "$E2_OLD" -eq 131 ] && [ "$E2_CUR" -eq 0 ] && [ 
 
 echo "== E3: 变异——正则改回 repo@sha:path 形态 ⇒ E1 必须挂 =="
 BACKUP="$(mktemp)"; cp "$TOOL" "$BACKUP"
-"$PY" - "$TOOL" <<'PY'
+MUT="$(mktemp)"
+"$PY" - "$TOOL" >"$MUT" 2>&1 <<'PY'
 import sys
 p=sys.argv[1]
 s=open(p).read()
@@ -55,15 +83,28 @@ old="r'^code://([^@]+)@([0-9a-fA-F]{7,40})#L(\\d+)(?:-L?(\\d+))?$'"
 new="r'^code://([^@]+)@([^:]+):(.+)#L(\\d+)(?:-L?(\\d+))?$'"
 if old not in s:
     print("MUTATION-ANCHOR-MISS"); sys.exit(9)
-open(p,'w').write(s.replace(old,new))
+s2=s.replace(old,new)
+open(p,'w').write(s2)
+# 回显被改的那一行（spec §3：破坏后必须回显被改行，变异未命中即无证据）
+for line in s2.splitlines():
+    if "^code://" in line and "@([^:]+):(.+)" in line:
+        print("MUTATED-LINE: " + line.strip()); break
 PY
-if [ "$?" -ne 0 ]; then bad "E3 变异未命中正则（无证据）"; else
+if grep -q "MUTATION-ANCHOR-MISS" "$MUT"; then
+  bad "E3 变异未命中正则（无证据）: $(cat "$MUT")"
+else
+  echo "  E3 变异已落到: $(grep 'MUTATED-LINE' "$MUT" | head -1)"
   run_tool --corpus "$HERE/fixtures/tick-reclaim.6.export.json" --repo-root "$REPO_ROOT_OVERRIDE" --json
   E3_HIT=$(field "$OUT" current_verified_hit); E3_UNP=$(field "$OUT" unparseable)
   if [ "$E3_HIT" -eq 0 ] && [ "$E3_UNP" -eq 6 ]; then ok "E3"; else bad "E3 (hit=$E3_HIT unparseable=$E3_UNP)"; fi
   cp "$BACKUP" "$TOOL"
-  # 还原后必须与变异前备份逐字一致（变异不得残留在工作区）
-  if cmp -s "$BACKUP" "$TOOL"; then ok "E3-restore"; else bad "E3-restore 未还原"; fi
+  # 还原后必须用 git diff --stat 确认工作区干净（spec §3：逐字还原并 git diff --stat 确认）
+  DIFFSTAT="$(git -C "$HERE" --no-pager diff --stat 2>/dev/null)"
+  if [ -z "$DIFFSTAT" ]; then
+    ok "E3-restore (git diff --stat 为空，工作区干净)"
+  else
+    bad "E3-restore 未还原: $DIFFSTAT"
+  fi
 fi
 
 echo "== E4: 引文不在该位置 ⇒ 判失败 =="

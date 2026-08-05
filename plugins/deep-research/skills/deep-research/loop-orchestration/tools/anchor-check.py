@@ -39,12 +39,16 @@ def norm(s):
 
 
 def load_entries(corpus):
-    """从导出文件或 live bus channel 读取条目。
+    """从导出文件或 live bus channel 读取条目，返回 (entries, discarded)。
 
     导出文件：JSON 数组，每条可为
       - bus 消息形态 {"payload": {"anchor":..., "quote":...}}，或
       - 直接 {"anchor":..., "quote":...}
     corpus 以 `bus:<channel>` 前缀时直连 bus 取全集。
+
+    ⛔ 无声丢弃即失败：任何记录若无法提取（非 dict / payload 非 dict /
+    缺 anchor 或 anchor 为空），计入 `discarded` 并原样保留在总数里，
+    绝不静默丢掉——由调用方据此判定 exit 3。
     """
     quote_keys = ("quote", "text", "snippet")
     def extract(rec):
@@ -60,6 +64,9 @@ def load_entries(corpus):
         quote = next((pl[k] for k in quote_keys if pl.get(k)), "")
         return {"anchor": anchor, "quote": quote or ""}
 
+    entries = []
+    discarded = 0
+
     if corpus.startswith("bus:"):
         ch = corpus.split("bus:", 1)[1]
         tok = open("/data/agent-bus/tokens/line-deep-research.token").read().strip()
@@ -68,13 +75,27 @@ def load_entries(corpus):
             f"http://127.0.0.1:7490/v1/channels/{ch}/messages?limit=1000",
             headers={"Authorization": f"Bearer {tok}"})
         ms = json.load(urllib.request.urlopen(req, timeout=30)).get("messages", [])
-        return [e for m in ms if (e := extract(m))]
+        for m in ms:
+            e = extract(m)
+            if e is None:
+                discarded += 1
+            else:
+                entries.append(e)
+        return entries, discarded
 
     with open(corpus, encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, dict):
         data = data.get("messages", [data])
-    return [e for r in data if (e := extract(r))]
+    if not isinstance(data, list):
+        data = [data]
+    for r in data:
+        e = extract(r)
+        if e is None:
+            discarded += 1
+        else:
+            entries.append(e)
+    return entries, discarded
 
 
 def classify(anchor):
@@ -125,8 +146,8 @@ def main():
     ap.add_argument("--json", action="store_true", help="机器可读输出")
     args = ap.parse_args()
 
-    entries = load_entries(args.corpus)
-    total = len(entries)
+    entries, discarded = load_entries(args.corpus)
+    total = len(entries) + discarded
 
     cur_parsed = 0
     cur_hit = 0
@@ -169,7 +190,8 @@ def main():
             details.append(("current-mismatch", anchor,
                             "引文不在指定行段（或为空白引文）"))
 
-    sums_ok = (cur_parsed + old_count + unparseable) == total
+    # 三类计数 + 被丢弃记录必须 === 输入总数；任何丢弃都意味着「无声丢弃」→ sums_ok=False
+    sums_ok = (cur_parsed + old_count + unparseable + discarded) == total and discarded == 0
 
     if args.json:
         out = {
@@ -179,6 +201,7 @@ def main():
             "current_failed": cur_fail,
             "old_format": old_count,
             "unparseable": unparseable,
+            "discarded": discarded,
             "sums_ok": sums_ok,
             "loud_failures": [{"anchor": a, "error": e} for a, e in loud_failures],
         }
@@ -188,7 +211,8 @@ def main():
         print(f"  现行格式已解析: {cur_parsed}   （真正校验命中 {cur_hit} / 未命中 {cur_fail}）")
         print(f"  旧格式 path:line: {old_count}   （不可校验 revision，独立计数）")
         print(f"  不可解析: {unparseable}   （独立计数）")
-        print(f"  三类计数之和 === 输入条数: {sums_ok}")
+        print(f"  被丢弃（缺 anchor / 无法提取）: {discarded}   （⛔ 无声丢弃即失败）")
+        print(f"  计数之和 === 输入条数: {sums_ok}")
         if loud_failures:
             print("\n【响亮失败】")
             for a, e in loud_failures:

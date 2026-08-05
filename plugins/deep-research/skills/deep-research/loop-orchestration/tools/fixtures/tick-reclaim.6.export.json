@@ -1,38 +1,44 @@
 [
   {
     "anchor": "code://src/tick.ts@a592276892f5e93a5e37d800a52dd48436639c0b#L202-L211",
-    "claim": "回收扫描只处理 status === \"in_flight\" 的卡；当其 runId 查不到对应 agent.run 事件（!run，即 runId 缺失或 state.runs 中无该条目）时，作为崩溃恢复 reclaim 到 open，retries 不变。",
-    "clue_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
-    "quote": "  // §3 回收：遍历 status === \"in_flight\" 的卡。\n  for (const card of state.cards) {\n    if (card.status !== \"in_flight\") continue;\n\n    const run = card.runId ? state.runs[card.runId] : undefined;\n    if (!run) {\n      // 无对应 agent.run.started → 崩溃恢复，CAS 回 open。\n      decisions.push({ kind: \"reclaim\", clueId: card.clueId, to: \"open\", retries: card.retries });\n      continue;\n    }"
+    "finding_entity_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
+    "quote": "  // §3 回收：遍历 status === \"in_flight\" 的卡。\n  for (const card of state.cards) {\n    if (card.status !== \"in_flight\") continue;\n\n    const run = card.runId ? state.runs[card.runId] : undefined;\n    if (!run) {\n      // 无对应 agent.run.started → 崩溃恢复，CAS 回 open。\n      decisions.push({ kind: \"reclaim\", clueId: card.clueId, to: \"open\", retries: card.retries });\n      continue;\n    }",
+    "seq": 1,
+    "why_relevant": "回收扫描只处理 status === \"in_flight\" 的卡；当其 runId 查不到对应 agent.run 事件（!run，即 runId 缺失或 state.runs 中无该条目）时，作为崩溃恢复 reclaim 到 open，retries 不变。"
   },
   {
     "anchor": "code://src/tick.ts@a592276892f5e93a5e37d800a52dd48436639c0b#L212-L215",
-    "claim": "若该 in_flight 卡的 run 仍处于 started 状态，则跳过不动（不会回收），用于排除回收到 open 的情况。",
-    "clue_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
-    "quote": "    if (run.state === \"started\") {\n      // 仍在跑，无事可做。\n      continue;\n    }"
+    "finding_entity_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
+    "quote": "    if (run.state === \"started\") {\n      // 仍在跑，无事可做。\n      continue;\n    }",
+    "seq": 2,
+    "why_relevant": "若该 in_flight 卡的 run 仍处于 started 状态，则跳过不动（不会回收），用于排除回收到 open 的情况。"
   },
   {
     "anchor": "code://src/tick.ts@a592276892f5e93a5e37d800a52dd48436639c0b#L216-L231",
-    "claim": "run 已 exited 时：仅当 exitCode !== 0（即走到 else if）且 retries < maxRetries 才 reclaim 到 open（retries+1）；exitCode === 0 走 harvest（→explored），retries 耗尽则 reclaim 到 blocked。",
-    "clue_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
-    "quote": "    if (run.exitCode === 0) {\n      // A8e——exited(0) ⇒ 收割步：先把 worker.result.v1 转成 evidence + 新 clue 发回研究板，\n      // 全部发完之后才 CAS 该卡 → explored（spec §1；§1.1 CAS 必须是最后一步）。\n      decisions.push({\n        kind: \"harvest\",\n        clueId: card.clueId,\n        runId: card.runId,\n        text: card.text,\n        depth: card.depth,\n        sources: card.sources,\n      });\n    } else if (card.retries < cfg.maxRetries) {\n      decisions.push({ kind: \"reclaim\", clueId: card.clueId, to: \"open\", retries: card.retries + 1 });\n    } else {\n      decisions.push({ kind: \"reclaim\", clueId: card.clueId, to: \"blocked\", retries: card.retries });\n    }"
+    "finding_entity_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
+    "quote": "    if (run.exitCode === 0) {\n      // A8e——exited(0) ⇒ 收割步：先把 worker.result.v1 转成 evidence + 新 clue 发回研究板，\n      // 全部发完之后才 CAS 该卡 → explored（spec §1；§1.1 CAS 必须是最后一步）。\n      decisions.push({\n        kind: \"harvest\",\n        clueId: card.clueId,\n        runId: card.runId,\n        text: card.text,\n        depth: card.depth,\n        sources: card.sources,\n      });\n    } else if (card.retries < cfg.maxRetries) {\n      decisions.push({ kind: \"reclaim\", clueId: card.clueId, to: \"open\", retries: card.retries + 1 });\n    } else {\n      decisions.push({ kind: \"reclaim\", clueId: card.clueId, to: \"blocked\", retries: card.retries });\n    }",
+    "seq": 3,
+    "why_relevant": "run 已 exited 时：仅当 exitCode !== 0（即走到 else if）且 retries < maxRetries 才 reclaim 到 open（retries+1）；exitCode === 0 走 harvest（→explored），retries 耗尽则 reclaim 到 blocked。"
   },
   {
     "anchor": "code://src/tick-run.ts@a592276892f5e93a5e37d800a52dd48436639c0b#L300-L316",
-    "claim": "reclaim 决策执行时以 from: \"in_flight\" 为 CAS 前置条件落到 decision.to（即 open），只有该卡仍为 in_flight 时才真正迁移到 open，否则 CAS 冲突。",
-    "clue_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
-    "quote": "  for (const decision of decisions) {\n    switch (decision.kind) {\n      case \"reclaim\": {\n        // reclaim 决策源自 in_flight 卡 ⇒ 前置条件为 in_flight。\n        const result = await perform({\n          clueId: decision.clueId,\n          to: decision.to,\n          from: \"in_flight\",\n        });\n        casResults.push({\n          clueId: decision.clueId,\n          to: decision.to,\n          success: result.success,\n          error: result.error,\n        });\n        break;\n      }"
+    "finding_entity_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
+    "quote": "  for (const decision of decisions) {\n    switch (decision.kind) {\n      case \"reclaim\": {\n        // reclaim 决策源自 in_flight 卡 ⇒ 前置条件为 in_flight。\n        const result = await perform({\n          clueId: decision.clueId,\n          to: decision.to,\n          from: \"in_flight\",\n        });\n        casResults.push({\n          clueId: decision.clueId,\n          to: decision.to,\n          success: result.success,\n          error: result.error,\n        });\n        break;\n      }",
+    "seq": 4,
+    "why_relevant": "reclaim 决策执行时以 from: \"in_flight\" 为 CAS 前置条件落到 decision.to（即 open），只有该卡仍为 in_flight 时才真正迁移到 open，否则 CAS 冲突。"
   },
   {
     "anchor": "code://src/tick-run.ts@a592276892f5e93a5e37d800a52dd48436639c0b#L416-L434",
-    "claim": "第三条 in_flight→open 路径（dispatch 回滚）：dispatch 的 CAS open→in_flight 成功后，若 spawnWorker 抛出非配置类（非 AgentRunUnresolvedError / MissingAllowedRootError）的同步异常，则当场把卡从 in_flight CAS 回 open。",
-    "clue_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
-    "quote": "            if (\n              err instanceof AgentRunUnresolvedError ||\n              err instanceof MissingAllowedRootError\n            ) {\n              throw err;\n            }\n            // ⛔ spawn 同步失败 ⇒ 当场 CAS 回 open（S2 补偿规则，真实路径兑现 N5）。\n            const rollback = await perform({\n              clueId: decision.clueId,\n              to: \"open\",\n              from: \"in_flight\",\n              runId,\n            });\n            casResults.push({\n              clueId: decision.clueId,\n              to: \"open\",\n              success: rollback.success,\n              error: rollback.error,\n            });"
+    "finding_entity_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
+    "quote": "            if (\n              err instanceof AgentRunUnresolvedError ||\n              err instanceof MissingAllowedRootError\n            ) {\n              throw err;\n            }\n            // ⛔ spawn 同步失败 ⇒ 当场 CAS 回 open（S2 补偿规则，真实路径兑现 N5）。\n            const rollback = await perform({\n              clueId: decision.clueId,\n              to: \"open\",\n              from: \"in_flight\",\n              runId,\n            });\n            casResults.push({\n              clueId: decision.clueId,\n              to: \"open\",\n              success: rollback.success,\n              error: rollback.error,\n            });",
+    "seq": 5,
+    "why_relevant": "第三条 in_flight→open 路径（dispatch 回滚）：dispatch 的 CAS open→in_flight 成功后，若 spawnWorker 抛出非配置类（非 AgentRunUnresolvedError / MissingAllowedRootError）的同步异常，则当场把卡从 in_flight CAS 回 open。"
   },
   {
     "anchor": "code://src/tick.ts@a592276892f5e93a5e37d800a52dd48436639c0b#L396-L401",
-    "claim": "参考实现 runTick 中同样存在该回滚：CAS 成功把卡置为 in_flight 后 spawnWorker 同步抛错即当场 CAS 回 open（抽象版对任何 spawn 异常都回滚）。",
-    "clue_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
-    "quote": "        try {\n          await deps.spawnWorker(decision.clueId, decision.role, runId, input);\n        } catch {\n          // CAS 成功但 spawn 同步失败 → 当场 CAS 回 open。\n          await deps.cas(decision.clueId, \"open\");\n        }"
+    "finding_entity_id": "msg_01KZ7SCFAYY79KFXQ7CP2YPR57",
+    "quote": "        try {\n          await deps.spawnWorker(decision.clueId, decision.role, runId, input);\n        } catch {\n          // CAS 成功但 spawn 同步失败 → 当场 CAS 回 open。\n          await deps.cas(decision.clueId, \"open\");\n        }",
+    "seq": 6,
+    "why_relevant": "参考实现 runTick 中同样存在该回滚：CAS 成功把卡置为 in_flight 后 spawnWorker 同步抛错即当场 CAS 回 open（抽象版对任何 spawn 异常都回滚）。"
   }
 ]
