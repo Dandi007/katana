@@ -1,0 +1,6 @@
+[
+  {
+    "anchor": "code://src/tick.ts@a592276892f5e93a5e37d800a52dd48436639c0b#L202-L211",
+    "quote": "  // §3 回收：遍历 status === \"in_flight\" 的卡。\n  for (const card of state.cards) {\n    if (card.status !== \"in_flight\") continue;\n\n    const run = card.runId ? state.runs[card.runId] : undefined;\n    if (!run) {\n      // 无对应 agent.run.started → 崩溃恢复，CAS 回 open。\n      decisions.push({ kind: \"reclaim\", clueId: card.clueId, to: \"open\", retries: card.retries });\n      continue;\n    }"
+  }
+]

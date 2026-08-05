@@ -1,322 +1,217 @@
 #!/usr/bin/env python3
 """锚点校验：quote 是否真的出现在 anchor 指的位置。纯确定性，无模型。
 
-v2 (2026-08-04 N2): 支持带版本 URI 格式
-  code://<repo>@<commit>:<path>#L<line>[-<line>]
-  旧格式 (path:line) 继续兼容，显式标注为「旧格式，不可校验 revision」。
+v3 (2026-08-05 N2b): 以**生产者的实际格式**为准，而不是以校验器自己脑子里的格式为准。
+
+生产者 `composeAnchor(source, locator, revision, range)` 组装为
+    <source>://<locator>@<revision>#<range>
+真实实例（2026-08-05 `research:v1-tick-reclaim.evidence`，V1 真跑）：
+    code://src/tick.ts@a592276892f5e93a5e37d800a52dd48436639c0b#L202-L211
+其中 locator 是**仓内相对路径**（不含仓名），revision 是 commit sha。
+
+因为 locator 不含仓名，单看锚点无法确定是哪个仓 ⇒ 仓根必须由调用方以
+`--repo-root` 显式提供；缺失时**响亮失败**，绝不猜测、绝不遍历 CODE_ROOTS 撞运气。
+
+三类锚点**显式**分类（分别计数，总和必须 === 输入条数，任何一类不得静默丢弃）：
+  1) 现行格式  code://<path>@<sha>#L<a>[-L<b>]   → 解析并**真正校验**（取该 revision 的文件，比对 quote）
+  2) 旧格式    裸 path:line                       → 显式标为「旧格式，不可校验 revision」，**独立计数**
+  3) 其它                                        → 显式标为「不可解析」, **独立计数**
+
+fetcher 自检：取回内容必须**非空且形态合理**（行数 > 0 且能定位到给定行段），
+否则**响亮失败**——⛔ 不得当成「引文不匹配」。
+
+⛔ 只读：本工具不向任何 channel 写入。
 """
-import json, os, re, subprocess, sys
+import argparse, json, os, re, subprocess, sys
 from collections import Counter
-from urllib.parse import urlparse, unquote
 
-CORPUS = sys.argv[1]
-
-# ── v2: 带版本 URI 解析 ──
-# 格式: code://<repo-name>@<commit>:<relpath>#L<start>[-<end>]
-VERSIONED_URI_RE = re.compile(
-    r'^code://([^@]+)@([^:]+):(.+)#L(\d+)(?:-L?(\d+))?$'
+# ── 现行格式（生产者的实际格式）：code://<path>@<sha>#L<a>[-L<b>]
+#    path 为仓内相对路径（不含仓名），sha 为 revision。
+CURRENT_URI_RE = re.compile(
+    r'^code://([^@]+)@([0-9a-fA-F]{7,40})#L(\d+)(?:-L?(\d+))?$'
 )
-
-# 仓库名 → 本地路径映射
-CODE_ROOTS = {
-    "loop-engine":                  "/data/code/self/loop-engine",
-    "agent-bus":                    "/data/code/self/agent-bus",
-    "agent-runtime":                "/data/code/self/agent-runtime",
-    "claude-web-gateway":           "/data/code/self/claude-web-gateway",
-    "loop-engine-supervisor-current": "/data/code/self/loop-engine-supervisor-current",
-    "subagent-mcp":                 "/data/code/self/subagent-mcp",
-    "katana":                       "/data/code/self/katana",
-}
+# 旧格式：裸 path:line / path:lo-hi / path:a-b,c-d（历史 131 条）
+OLD_URI_RE = re.compile(r'^(?!code://)(.+):\d+(?:[-,]\d+)*$')
 
 
-def parse_versioned_uri(anchor: str):
-    """解析 code://repo@commit:path#Lline 格式。返回 (repo, commit, relpath, start, end) 或 None。"""
-    m = VERSIONED_URI_RE.match(anchor)
-    if not m:
-        return None
-    repo_name = m.group(1)
-    commit = m.group(2)
-    relpath = m.group(3)
-    start = int(m.group(4))
-    end = int(m.group(5)) if m.group(5) else start
-    repo_path = CODE_ROOTS.get(repo_name)
-    if not repo_path:
-        return None  # 未知仓库
-    return repo_path, commit, relpath, start, end
-
-# 【可直接读 bus 全集，不必依赖手工导出的语料快照】
-# 起因：本线曾用一份 114 条的导出语料下结论，而 bus 上实际有 131 条 —— 两个不同的集合，
-# 而我一直以为是同一个。「我的数据集」与「全部数据」的差别，只在去比对时才显形。
-# 用法：CORPUS 传 "bus:<evidence_channel>" 即直连取全集。
-def _from_bus(spec):
-    import urllib.request
-    ch = spec.split(":", 1)[1]
-    tok = open("/data/agent-bus/tokens/line-deep-research.token").read().strip()
-    req = urllib.request.Request(
-        f"http://127.0.0.1:7490/v1/channels/{ch}/messages?limit=1000",  # limit 必带
-        headers={"Authorization": f"Bearer {tok}"})
-    out = []
-    for m in json.load(urllib.request.urlopen(req, timeout=30)).get("messages", []):
-        pl = m.get("payload") or {}
-        if pl.get("anchor") and pl.get("quote"):
-            # 【必须把 credibility 一起取出来】2026-08-04 补:
-            # 我改 worker.md 时宣称「credibility 变成会被机械证伪的声明」,
-            # 但本工具当时**根本不读 credibility** —— 证伪的是引文,从不与【声称值】对照。
-            # ⇒ 一个在坏引文上标 high 的 worker,不产生任何关联信号。
-            # 这正是本线整晚在追的那类缺陷:**一个被宣称可检验的声明,而检验者不读那个声明。**
-            out.append((f"seq{m.get('channel_seq')}", pl["anchor"], pl["quote"],
-                        pl.get("credibility")))
-    return out
-COMMITS = {"/data/code/self/claude-web-gateway": (sys.argv[2] if len(sys.argv)>2 else None),
-           "/data/code/self/loop-engine-supervisor-current": 'b503efc' or None}
-ROOTS = {
-    "claude-web-gateway": "/data/code/self/claude-web-gateway",
-    "loop-engine-supervisor-current": "/data/code/self/loop-engine-supervisor-current",
-    # 【2026-08-04 补】research:smoke-bus-semantics 的锚点全指 agent-bus 仓,
-    # 而它不在本表里 => 17/17 报「文件不存在」。**那是仪器瞎了,不是语料造假。**
-    # 我差点把它读成「该课题引文全部伪造」——本文件第 53 行的注释早就警告过同一件事,
-    # 我还是又踩了一次。故补一道自检(见下 CONTROL),让仪器自己说「我瞎了」。
-    "agent-bus": "/data/code/self/agent-bus",
-}
-DEFAULT_ROOT = ROOTS["claude-web-gateway"]
-
-def norm(s):  # 空白归一，容忍换行/缩进重排
+def norm(s):
     return re.sub(r"\s+", " ", s).strip()
 
-def read_file(repo, relpath, commit):
-    try:
-        if commit:
-            return subprocess.run(["git", "-C", repo, "show", f"{commit}:{relpath}"],
-                                  capture_output=True, text=True, timeout=20, check=True).stdout
-        return open(f"{repo}/{relpath}", encoding="utf-8").read()
-    except Exception:
-        return None
 
-def split_anchor(a):
-    # v2: 先尝试带版本 URI
-    vu = parse_versioned_uri(a)
-    if vu:
-        return vu  # (repo_path, commit, relpath, start, end)
+def load_entries(corpus):
+    """从导出文件或 live bus channel 读取条目。
 
-    # v1: 裸 path:line 格式（兼容旧数据）
-    m = re.match(r"^(.*?):(\d+)(?:-(\d+))?$", a)
-    if not m: return None
-    path, lo, hi = m.group(1), int(m.group(2)), int(m.group(3) or m.group(2))
-    for name, root in ROOTS.items():
-        if path.startswith(root):
-            return root, COMMITS.get(root), path[len(root)+1:], lo, hi
-    if path.startswith("/"): return None            # 绝对路径但不在已知仓
-    for root in ROOTS.values():
-        if os.path.exists(os.path.join(root, path)): return root, COMMITS.get(root), path, lo, hi
-        base = os.path.basename(root)
-        if path.startswith(base + "/"):
-            sub = path[len(base)+1:]
-            if os.path.exists(os.path.join(root, sub)): return root, COMMITS.get(root), sub, lo, hi
-    return DEFAULT_ROOT, COMMITS.get(DEFAULT_ROOT), path, lo, hi
-
-# 【仪器自检:全员「文件不存在」= 仪器故障,不是语料结论】
-# 判据来自本线反复踩的坑:任何「统计某物有多少异常」的检查,
-# 必须能区分「样本真的异常」与「我根本没看到样本」。
-# 100% 硬失败在真实语料里几乎不可能,而在 ROOTS 缺仓时必然发生。
-def _instrument_guard(total, missing):
-    if total and missing == total:
-        print("\n🛑 **仪器自检未过**:全部 %d 条都报「文件不存在」。" % total)
-        print("   这几乎必然是 ROOTS 缺少对应仓库,而不是语料全部伪造。")
-        print("   **不要把本次输出当作语料结论。** 先补 ROOTS 再跑。")
-        return False
-    return True
-
-if CORPUS.startswith("bus:"):
-    entries = _from_bus(CORPUS)
-    s = ""
-else:
-    s = open(CORPUS, encoding="utf-8").read()
-    entries = []
-for label, block in re.findall(r"### ([FE]\d+)\s+\[[^\]]*\]\n```json\n(\{.*?\n\})\n```", s, re.S):
-    try: d = json.loads(block)
-    except Exception: continue
-    if d.get("anchor") and d.get("quote"):
-        entries.append((label, d["anchor"], d["quote"], d.get("credibility")))
-
-res = Counter(); details = []
-# v2: 统计锚点格式
-fmt_v1 = 0; fmt_v2 = 0
-# 【声称 vs 实测】credibility 是生产者的自评;本表把它与机械判定对照。
-# 只有对照才让自评承重 —— 否则它只是一个没人读的标签。
-cred = Counter()          # (声称值, 是否验过) -> 计数
-overclaim = []            # 声称 high 却验不过的条目
-for label, anchor, quote, claimed in entries:
-    sp = split_anchor(anchor)
-    if not sp:
-        res["锚点格式不可解析"] += 1; details.append(("锚点格式不可解析", label, anchor, "")); continue
-    repo, commit, rel, lo, hi = sp[0], sp[1], sp[2], sp[3], sp[4]
-    content = read_file(repo, rel, commit)
-    if content is None:
-        res["文件不存在"] += 1; details.append(("文件不存在", label, anchor, "")); continue
-
-    # 标记锚点格式: v2 带版本 URI vs v1 裸路径
-    is_versioned = bool(parse_versioned_uri(anchor))
-    if is_versioned:
-        fmt_v2 += 1
-    else:
-        fmt_v1 += 1
-
-    # v2: fetcher 自检——取回内容非空且形态合理
-    if is_versioned and (not content or not content.strip()):
-        res["🔴 v2 fetcher 取回空内容"] += 1
-        details.append(("🔴 v2 fetcher 取回空内容", label, anchor,
-                        f"commit={commit} repo={repo} relpath={rel}"))
-        continue
-    lines = content.splitlines()
-    window = norm("\n".join(lines[max(0, lo-1):hi]))
-    q = norm(quote)
-    if q and q in window:
-        res["✅ 命中指定行段"] += 1
-        cred[(claimed or "(未填)", "验得过")] += 1
-    elif q and q in norm(content):
-        # 找出实际所在行
-        for i in range(len(lines)):
-            for j in range(i+1, min(i+80, len(lines))+1):
-                if q in norm("\n".join(lines[i:j])):
-                    details.append(("⚠️ 行段漂移", label, anchor, f"实际约在 {i+1}-{j}")); break
-            else: continue
-            break
-        res["⚠️ 行段漂移（引文在文件里但不在指定行）"] += 1
-        cred[(claimed or "(未填)", "引文在但行号错")] += 1
-        if (claimed or "").lower() == "high":
-            overclaim.append(("行段漂移", label, anchor, claimed))
-    else:
-        # 【分岔点定位】把「引文不在该文件中」拆成两类 —— 它们的成因完全不同：
-        #   · 前缀几乎不匹配 → 引文与该文件不沾边（锚点指错文件 / 大范围改写）
-        #   · 前缀大段匹配后偏离 → **编造的指纹**：前半照抄、后半自己编
-        # 后者最危险：它通过任何「引文里有没有关键词」式的粗检查，
-        # 且实测编掉的往往是【错误处理】—— 研究结论最爱引用的那部分。
-        nc = norm(content)
-        lo_, hi_ = 0, len(q)
-        while lo_ < hi_:
-            mid = (lo_ + hi_ + 1) // 2
-            if q[:mid] in nc: lo_ = mid
-            else: hi_ = mid - 1
-        ratio = lo_ / len(q) if q else 0
-        if ratio >= 0.5:
-            res["🔴 前缀匹配后偏离（编造指纹）"] += 1
-            cred[(claimed or "(未填)", "硬失败")] += 1
-            if (claimed or "").lower() == "high":
-                overclaim.append(("编造指纹", label, anchor, claimed))
-            i = nc.find(q[:lo_]) if lo_ else -1
-            actual = nc[i+lo_:i+lo_+70] if i >= 0 else ""
-            details.append(("🔴 前缀匹配后偏离（编造指纹）", label, anchor,
-                            f"前 {lo_}/{len(q)} 字符({ratio:.0%})逐字正确，之后偏离\n"
-                            f"        引文续: {q[lo_:lo_+70]}\n"
-                            f"        文件续: {actual}"))
+    导出文件：JSON 数组，每条可为
+      - bus 消息形态 {"payload": {"anchor":..., "quote":...}}，或
+      - 直接 {"anchor":..., "quote":...}
+    corpus 以 `bus:<channel>` 前缀时直连 bus 取全集。
+    """
+    quote_keys = ("quote", "text", "snippet")
+    def extract(rec):
+        if isinstance(rec, dict) and "payload" in rec and isinstance(rec["payload"], dict):
+            pl = rec["payload"]
+        elif isinstance(rec, dict):
+            pl = rec
         else:
-            res["❌ 引文与该文件不沾边"] += 1
-            cred[(claimed or "(未填)", "硬失败")] += 1
-            if (claimed or "").lower() == "high":
-                overclaim.append(("不沾边", label, anchor, claimed))
-            details.append(("❌ 引文与该文件不沾边", label, anchor,
-                            f"最长匹配前缀仅 {lo_}/{len(q)} 字符({ratio:.0%})"))
+            return None
+        anchor = pl.get("anchor")
+        if not anchor:
+            return None
+        quote = next((pl[k] for k in quote_keys if pl.get(k)), "")
+        return {"anchor": anchor, "quote": quote or ""}
 
-print(f"语料带 anchor+quote 条目：{len(entries)}   各仓代码状态：{COMMITS}")
-print(f"锚点格式: v2 (versioned URI): {fmt_v2}  v1 (bare path): {fmt_v1}")
-if fmt_v1:
-    print("  ⚠️ v1 裸路径锚点无法校验 revision——revision 不可知则无法区分「编造」与「代码后来改了」")
-print("=" * 72)
-for k, v in res.most_common():
-    print(f"  {v:4d}  {k}")
-print("=" * 72)
-bad = [d for d in details if d[0] != "⚠️ 行段漂移"]
-if bad:
-    print("\n【硬失败明细】")
-    for kind, label, anchor, extra in bad[:25]:
-        print(f"  {kind}  {label}  {anchor}")
-        if extra: print(f"        引文: {extra}")
-drift = [d for d in details if d[0] == "⚠️ 行段漂移"][:8]
-if drift:
-    print("\n【行段漂移样例（前 8）】")
-    for _, label, anchor, extra in drift:
-        print(f"  {label}  {anchor}  → {extra}")
+    if corpus.startswith("bus:"):
+        ch = corpus.split("bus:", 1)[1]
+        tok = open("/data/agent-bus/tokens/line-deep-research.token").read().strip()
+        import urllib.request
+        req = urllib.request.Request(
+            f"http://127.0.0.1:7490/v1/channels/{ch}/messages?limit=1000",
+            headers={"Authorization": f"Bearer {tok}"})
+        ms = json.load(urllib.request.urlopen(req, timeout=30)).get("messages", [])
+        return [e for m in ms if (e := extract(m))]
 
-# ── 声称 vs 实测（本工具此前完全没做的那一半）──
-print("\n" + "=" * 72)
-print("【credibility 声称 vs 机械实测】")
-if not cred:
-    print("  语料里没有 credibility 字段 —— 无法对照。")
-    print("  注意：**这不等于「都填对了」**，是「压根没有可对照的声明」。")
-else:
-    for (c, v), n in sorted(cred.items()):
-        print(f"  声称 {c:<8s} × 实测 {v:<12s} : {n}")
-    print()
-    if overclaim:
-        print(f"  🔴 **声称 high 但验不过：{len(overclaim)} 条** —— 自评与实测直接冲突")
-        for kind, label, anchor, c in overclaim[:10]:
-            print(f"       [{kind}] {label}  {anchor[:70]}")
-        if len(overclaim) > 10:
-            print(f"       …另 {len(overclaim)-10} 条")
-        print()
-        print("  ⇒ 这些是【可归因到具体条目】的过度声称。credibility 因此不再是标签，")
-        print("     而是一个会被本工具当场对上的断言。")
-    elif all(c == "(未填)" for (c, _) in cred):
-        # 【绝不能报 ✅】全部未填 = 没有可对照的声明,不是「都填对了」。
-        # 实测根因:credibility 是 research.finding.v1 的字段,
-        # 而 anchor+quote 在 research.excerpt.v1 上 —— **两个不同的消息**。
-        # 本节按 excerpt 取 credibility 永远取不到 ⇒ 结论恒为「干净」。
-        # 这是本线今晚删过一次的同型缺陷:**零功率检查,其缺席被读成证据**。
-        print("  🛑 **全部条目都没有 credibility 字段 —— 本节无结论。**")
-        print("     根因：credibility 属 research.finding.v1，anchor/quote 属 research.excerpt.v1，")
-        print("     二者是不同消息。按 excerpt 取 credibility 恒为空。")
-        print("     ⇒ **不要把这读成「没有过度声称」** —— 是压根没有可对照的声明。")
-        print("     正确做法见下方【按 finding 归并】一节。")
-    else:
-        print("  ✅ 无「声称 high 却验不过」的条目。")
+    with open(corpus, encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict):
+        data = data.get("messages", [data])
+    return [e for r in data if (e := extract(r))]
 
-# ── 【按 finding 归并】credibility 的正确对照层 ──
-# credibility 在 finding 上,anchor/quote 在 excerpt 上,excerpt 经 refs 指向 finding。
-# ⇒ 对照必须跨消息 join,不能在单条 excerpt 上做。这是本工具此前缺的那一半。
-if CORPUS.startswith("bus:") and ".evidence" in CORPUS:
-    import sqlite3, urllib.request as _u
-    topic = CORPUS.split(":", 1)[1].rsplit(".evidence", 1)[0]
+
+def classify(anchor):
+    """返回 (类别, 解析结果)。类别 ∈ {current, old, unparseable}。"""
+    m = CURRENT_URI_RE.match(anchor)
+    if m:
+        return "current", {
+            "path": m.group(1),
+            "rev": m.group(2),
+            "lo": int(m.group(3)),
+            "hi": int(m.group(4)) if m.group(4) else int(m.group(3)),
+        }
+    m = OLD_URI_RE.match(anchor)
+    if m:
+        return "old", {"path": m.group(1)}
+    return "unparseable", None
+
+
+def fetch(repo_root, rev, relpath):
+    """取回给定 revision 的文件内容。自检：非空且形态合理。
+
+    若取回失败 / 空 / 形态不合理 → 返回 (None, 错误信息)，由调用方**响亮失败**。
+    """
+    if not repo_root:
+        return None, "缺 --repo-root（仓根必须外部提供，绝不猜测）"
     try:
-        _tok = open("/data/agent-bus/tokens/line-deep-research.token").read().strip()
-        def _get(ch):
-            r = _u.Request(f"http://127.0.0.1:7490/v1/channels/{ch}/messages?limit=1000",
-                           headers={"Authorization": f"Bearer {_tok}"})
-            return json.load(_u.urlopen(r, timeout=30)).get("messages", [])
-        _db = sqlite3.connect("/data/agent-bus/state/bus.sqlite3")
-        _idx = _get(f"{topic}.index")
-        _fmap = {m["entity_id"]: (m.get("payload") or {})
-                 for m in _idx if (m.get("kind") or "").startswith("research.finding")}
-        _sup = {}
-        for m in _get(f"{topic}.evidence"):
-            pl = m.get("payload") or {}
-            if not (pl.get("anchor") and pl.get("quote")):
-                continue
-            sp = split_anchor(pl["anchor"])
-            good = False
-            if sp:
-                repo, commit, rel, lo, hi = sp[0], sp[1], sp[2], sp[3], sp[4]
-                c = read_file(repo, rel, commit)
-                good = bool(c and norm(pl["quote"]) in norm(c))
-            for (tgt,) in _db.execute(
-                    "SELECT target_entity FROM message_refs WHERE message_id=?", (m["message_id"],)):
-                if tgt in _fmap:
-                    g, t = _sup.get(tgt, (0, 0))
-                    _sup[tgt] = (g + (1 if good else 0), t + 1)
-        print("\n" + "=" * 72)
-        print("【按 finding 归并：声称 credibility vs 支撑引文实测】")
-        rows = []
-        for e, (g, t) in _sup.items():
-            rows.append(((_fmap[e].get("credibility") or "(未填)"), g, t, _fmap[e].get("title", "")))
-        agg = Counter()
-        for c, g, t, _ in rows:
-            agg[(c, "全部验得过" if g == t else ("部分" if g else "一条都验不过"))] += 1
-        for k, n in sorted(agg.items()):
-            print(f"  声称 {k[0]:<8s} × {k[1]:<12s} : {n}")
-        bad = [r for r in rows if r[1] == 0]
-        if bad:
-            print(f"\n  🔴 **{len(bad)} 条 finding 的支撑引文一条都验不过**：")
-            for c, g, t, title in bad:
-                print(f"       credibility={c}  引文 {t} 条全挂  {title[:56]}")
-            print("\n  ⇒ 这才是 credibility 能被对上的位置。")
-    except Exception as _e:  # noqa: BLE001
-        print(f"\n（按 finding 归并失败，跳过：{type(_e).__name__}: {_e}）")
+        r = subprocess.run(
+            ["git", "-C", repo_root, "show", f"{rev}:{relpath}"],
+            capture_output=True, text=True, timeout=20, check=True)
+    except subprocess.CalledProcessError as e:
+        return None, f"fetcher 取不到该 revision: git show {rev}:{relpath} rc={e.returncode}"
+    except Exception as e:  # noqa: BLE001
+        return None, f"fetcher 执行失败: {type(e).__name__}: {e}"
+    content = r.stdout
+    if not content or not content.strip():
+        return None, f"fetcher 取回空内容: git show {rev}:{relpath}（rc=0 但无输出）"
+    if len(content.splitlines()) < 1:
+        return None, f"fetcher 取回内容形态不合理（无有效行）: {rev}:{relpath}"
+    return content, None
+
+
+def main():
+    ap = argparse.ArgumentParser(description="anchor-check v3 (N2b)")
+    ap.add_argument("--corpus", required=True,
+                    help="导出 JSON 文件路径，或 bus:<channel> 直连")
+    ap.add_argument("--repo-root", default=None,
+                    help="仓根（现行格式 locator 为仓内相对路径，必须外部提供）")
+    ap.add_argument("--json", action="store_true", help="机器可读输出")
+    args = ap.parse_args()
+
+    entries = load_entries(args.corpus)
+    total = len(entries)
+
+    cur_parsed = 0
+    cur_hit = 0
+    cur_fail = 0
+    old_count = 0
+    unparseable = 0
+    loud_failures = []
+    details = []
+
+    for e in entries:
+        anchor = e["anchor"]
+        kind, parsed = classify(anchor)
+        if kind == "old":
+            old_count += 1
+            details.append(("old", anchor, "旧格式，不可校验 revision"))
+            continue
+        if kind == "unparseable":
+            unparseable += 1
+            details.append(("unparseable", anchor, "不可解析"))
+            continue
+        # current
+        cur_parsed += 1
+        content, err = fetch(args.repo_root, parsed["rev"], parsed["path"])
+        if err:
+            loud_failures.append((anchor, err))
+            continue
+        lines = content.splitlines()
+        lo, hi = parsed["lo"], parsed["hi"]
+        if lo < 1 or hi > len(lines):
+            loud_failures.append(
+                (anchor, f"取回内容行数 {len(lines)} 无法定位到 L{lo}-L{hi}（形态不合理）"))
+            continue
+        window = norm("\n".join(lines[lo - 1:hi]))
+        q = norm(e["quote"])
+        if q and q in window:
+            cur_hit += 1
+            details.append(("current-hit", anchor, "命中"))
+        else:
+            cur_fail += 1
+            details.append(("current-mismatch", anchor,
+                            "引文不在指定行段（或为空白引文）"))
+
+    sums_ok = (cur_parsed + old_count + unparseable) == total
+
+    if args.json:
+        out = {
+            "total": total,
+            "current_parsed": cur_parsed,
+            "current_verified_hit": cur_hit,
+            "current_failed": cur_fail,
+            "old_format": old_count,
+            "unparseable": unparseable,
+            "sums_ok": sums_ok,
+            "loud_failures": [{"anchor": a, "error": e} for a, e in loud_failures],
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        print(f"输入条目总数: {total}")
+        print(f"  现行格式已解析: {cur_parsed}   （真正校验命中 {cur_hit} / 未命中 {cur_fail}）")
+        print(f"  旧格式 path:line: {old_count}   （不可校验 revision，独立计数）")
+        print(f"  不可解析: {unparseable}   （独立计数）")
+        print(f"  三类计数之和 === 输入条数: {sums_ok}")
+        if loud_failures:
+            print("\n【响亮失败】")
+            for a, e in loud_failures:
+                print(f"  {a}\n    -> {e}")
+        if not sums_ok or cur_fail:
+            print("\n【未命中明细】")
+            for kind, a, extra in details:
+                if kind in ("current-mismatch", "old", "unparseable"):
+                    print(f"  {kind:<18} {a}  {extra}")
+
+    # 退出码：
+    #   0  → 无响亮失败 且 无现行格式未命中
+    #   1  → 有现行格式引文未命中（校验失败）
+    #   2  → 有响亮失败（缺 repo-root / fetcher 取不到 / 形态不合理）
+    #   3  → 三类计数之和与输入条数不符（静默丢弃）
+    if loud_failures:
+        sys.exit(2)
+    if not sums_ok:
+        sys.exit(3)
+    if cur_fail:
+        sys.exit(1)
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

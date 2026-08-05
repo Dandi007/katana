@@ -1,0 +1,919 @@
+[
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/service.ts:128-130",
+    "finding_entity_id": "msg_01KZ074KZEQFF57C3GPE1GZJN1",
+    "quote": "    if (!completion_criteria || typeof completion_criteria !== 'string' || !completion_criteria.trim()) {\n      throw new Error('completion_criteria is required')\n    }",
+    "seq": 1,
+    "why_relevant": "注册期对 completion_criteria 唯一的处理就是非空校验，之后不再被任何分支读取或比较——证明服务端不参与完成判定。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/service.ts:169-188",
+    "finding_entity_id": "msg_01KZ074KZEQFF57C3GPE1GZJN1",
+    "quote": "    const fallbackTrigger: Trigger = {\n      id: generateId('trg'),\n      scope_id: scopeId,\n      goal_id: goal.id,\n      callback_id: default_callback_id,\n      kind: 'cron',\n      spec_json: {\n        description: `Fallback for ${description}`,\n        interval_seconds: interval,\n        max_iterations: maxIter,\n        fire_mode: 'on_change',\n      },\n      status: 'active',\n      next_fire_at: new Date(Date.now() + interval * 1_000).toISOString(),\n      fires: 0,\n      last_output_hash: null,\n      consecutive_probe_failures: 0,\n      created_at: now,\n      expires_at: expiresAt,\n    }",
+    "seq": 2,
+    "why_relevant": "loop_register 把 goal 变成单条 cron fallback trigger：interval 与 max_iterations 直接进 spec 决定烧的频率与次数，completion_criteria 则只挂在 goal 上不进 trigger——三参数里它不参与触发。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:272-278",
+    "finding_entity_id": "msg_01KZ074KZEQFF57C3GPE1GZJN1",
+    "quote": "      goal: goal\n        ? {\n            id: goal.id,\n            description: goal.description,\n            completion_criteria: goal.completion_criteria,\n          }\n        : null,",
+    "seq": 3,
+    "why_relevant": "completion_criteria 的唯一去处是被打包进发给 callback 的 envelope——即把判定责任交给 consumer 进程，而非由服务端消费。"
+  },
+  {
+    "anchor": "/data/code/self/loop-engine-supervisor-current/loop_engine_supervisor/supervision.py:142-152",
+    "finding_entity_id": "msg_01KZ074KZEQFF57C3GPE1GZJN1",
+    "quote": "    async def retire_goal(\n        self, unit: sqlite3.Row, outcome: str, summary: str\n    ) -> None:\n        loop_goal_id = unit[\"loop_goal_id\"]\n        if not loop_goal_id:\n            return\n        await self._client.loop_complete(\n            loop_id=loop_goal_id,\n            summary=summary,\n            outcome=outcome,\n        )",
+    "seq": 4,
+    "why_relevant": "consumer 在自己的业务状态机判定 unit 终态后，主动调用 loop_complete——以活样本互证：完成判定在 consumer 侧，Loop MCP 服务端从不读 completion_criteria 下结论。代码↔代码互证，credibility 升 high。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:198-214",
+    "finding_entity_id": "msg_01KZ075MXHBD8JGC1K36JAWH3G",
+    "quote": "    const expiresAt = Date.parse(trigger.expires_at)\n    if (expiresAt <= this.clock.now()) {\n      trigger.status = 'expired'\n      trigger.next_fire_at = null\n      this.store.updateTrigger(trigger)\n      this.store.createAuditEvent(\n        trigger.scope_id, 'trigger_expired', 'trigger', trigger.id,\n        { reason: 'ttl' },\n      )\n\n      if (trigger.goal_id) {\n        this.store.terminateGoal(\n          trigger.scope_id, trigger.goal_id, 'expired', 'TTL expired', null, 'ttl',\n        )\n      }\n      return\n    }",
+    "seq": 1,
+    "why_relevant": "终止路径之一：fallback trigger 的 expires_at(= goal 创建时 now+ttl_seconds) 一到，整个 goal 被 terminateGoal 标 expired、reason=ttl。这是 fireCron 在 interval 之外的第一道闸。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:227-242",
+    "finding_entity_id": "msg_01KZ075MXHBD8JGC1K36JAWH3G",
+    "quote": "    if (maxIterations !== undefined && trigger.fires >= maxIterations) {\n      trigger.status = 'expired'\n      trigger.next_fire_at = null\n      this.store.updateTrigger(trigger)\n      this.store.createAuditEvent(\n        trigger.scope_id, 'trigger_expired', 'trigger', trigger.id,\n        { reason: 'iteration_limit' },\n      )\n\n      if (trigger.goal_id) {\n        this.store.terminateGoal(\n          trigger.scope_id, trigger.goal_id, 'expired', 'Iteration limit reached', null, 'iteration_limit',\n        )\n      }\n      return\n    }",
+    "seq": 2,
+    "why_relevant": "终止路径之二：trigger.fires 累计达到 max_iterations 即终止 goal 为 expired/iteration_limit。注意 outcome 一律是 expired（不是 cancelled），consumer 若不主动 loop_complete，正常耗尽的 loop 会落 expired 而非 completed。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:163-180",
+    "finding_entity_id": "msg_01KZ075MXHBD8JGC1K36JAWH3G",
+    "quote": "      if (result.exitCode === 0 && result.errorKind === null) {\n        invocation.status = 'succeeded'\n        invocation.lease_until = null\n        invocation.updated_at = now\n        this.store.updateInvocation(invocation)\n        this.store.createAuditEvent(\n          invocation.scope_id,\n          'invocation_succeeded',\n          'invocation',\n          invocation.id,\n          { attempt: invocation.attempt, duration_ms: result.durationMs },\n        )\n\n        if (goal && goal.status !== 'active') {\n          this.startSuccessor(invocation, false)\n        } else {\n          this.startSuccessor(invocation, goal !== null)\n        }",
+    "seq": 3,
+    "why_relevant": "callback 成功(exit 0)并不触发任何 terminateGoal——只把 invocation 标 succeeded 并准备 successor。证明『goal 完成』与『某次 callback 跑成功』是两件事：完成必须靠 loop_complete RPC 显式触发。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:244-250",
+    "finding_entity_id": "msg_01KZ075MXHBD8JGC1K36JAWH3G",
+    "quote": "    const callbackId = trigger.callback_id ?? (trigger.goal_id\n      ? this.store.getGoal(trigger.goal_id, trigger.scope_id)?.default_callback_id\n      : null)\n    if (!callbackId) return\n\n    const callback = this.store.getCallback(callbackId, trigger.scope_id)\n    if (!callback || callback.status !== 'active') return",
+    "seq": 4,
+    "why_relevant": "callback 被 disable 或查不到时 fireCron 直接 return，不记 audit、不终止 goal；但下一轮 interval 仍会被 scheduleTrigger 重新 arm——即 goal 卡在 active 状态静默空转到 TTL 或 max_iter，是 consumer 侧静默失效的典型路径。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:216-218,280-283",
+    "finding_entity_id": "msg_01KZ076FBXYAAG854B9TJGBZPA",
+    "quote": "    const spec = trigger.spec_json as Record<string, unknown>\n    const maxFires = typeof spec.max_fires === 'number' ? spec.max_fires : undefined\n    const maxIterations = typeof spec.max_iterations === 'number' ? spec.max_iterations : undefined\n...\n    trigger.fires++\n    trigger.next_fire_at = new Date(this.clock.now() + intervalSeconds * 1_000).toISOString()\n    this.store.updateTrigger(trigger)\n    this.scheduleTrigger(trigger)",
+    "seq": 1,
+    "why_relevant": "fireCron 只从 spec 读 max_fires/max_iterations 做 gate；过闸后 trigger.fires 无条件 ++ 并按 interval 重新 scheduleTrigger。fires 计的是『拍』，发生在 recordFiringAndCoalesce 之前的位置无关——即使 firing 被合并也不会少算。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:819-827",
+    "finding_entity_id": "msg_01KZ076FBXYAAG854B9TJGBZPA",
+    "quote": "      if (goalId) {\n        const pending = this.getPendingInvocationForGoal(goalId, scopeId)\n        if (pending) {\n          this.linkFiringToInvocation(pending.id, firing.id)\n          pending.merged_count++\n          pending.updated_at = now\n          this.updateInvocation(pending)\n          invocation = pending\n        } else {",
+    "seq": 2,
+    "why_relevant": "当 goal 已有 pending(或 running→建 successor) invocation 时，新一轮 firing 只 link 进去、merged_count++，不会新建 invocation。即同一 goal 同时只有一条 invocation 在跑——多拍可被压成一次 callback 执行，但 max_iterations 照算拍数，二者解耦。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:347-349",
+    "finding_entity_id": "msg_01KZ076FBXYAAG854B9TJGBZPA",
+    "quote": "    const fireMode = typeof spec.fire_mode === 'string' ? spec.fire_mode : 'on_change'\n    const shouldFire = fireMode === 'once'\n      || (trigger.last_output_hash !== result.hash && result.output.length > 0)",
+    "seq": 3,
+    "why_relevant": "on_change 去重(trigger.last_output_hash 比对)只在 fireWatch 里实现。对比 fireCron 全程无 fire_mode/last_output_hash 引用——证明 cron 路径不 dedup，loop fallback 的 on_change 不生效。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:276-283",
+    "finding_entity_id": "msg_01KZ076FBXYAAG854B9TJGBZPA",
+    "quote": "    const intervalSeconds = typeof spec.interval_seconds === 'number'\n      ? spec.interval_seconds\n      : this.config.defaultFallbackIntervalSeconds\n\n    trigger.fires++\n    trigger.next_fire_at = new Date(this.clock.now() + intervalSeconds * 1_000).toISOString()\n    this.store.updateTrigger(trigger)\n    this.scheduleTrigger(trigger)",
+    "seq": 4,
+    "why_relevant": "fireCron 过闸后只读 spec.interval_seconds 决定下一拍，随即无条件 fires++/重 arm——既不查 fire_mode 也不比对 last_output_hash。loop_register 写入的 fire_mode:on_change 在这条路径上是死字段。"
+  },
+  {
+    "anchor": "src/loop-mcp/scheduler.ts:94-112",
+    "finding_entity_id": "msg_01KZ0798XYNH44SH5TTR4BHS4R",
+    "quote": "  private rebuildTimers(): void {\n    const triggers = this.store.listActiveTriggers()\n    for (const trigger of triggers) {\n      this.scheduleTrigger(trigger)\n    }\n  }\n\n  private scheduleTrigger(trigger: Trigger): void {\n    if (trigger.status !== 'active') return\n    if (!trigger.next_fire_at) return\n\n    const nextFireMs = Date.parse(trigger.next_fire_at)\n    const delayMs = Math.max(0, nextFireMs - this.clock.now())\n\n    const cleanup = this.timer.setTimeout(() => {\n      return this.fireTrigger(trigger.id)\n    }, delayMs)\n    this.timerCleanups.push(cleanup)\n  }",
+    "seq": 1,
+    "why_relevant": "rebuildTimers is the only bulk-arming site and it runs solely from start(); scheduleTrigger (the per-trigger arm primitive) is called here and only inside post-fire re-arm paths, never on the registration path - so nothing arms a trigger created after start()."
+  },
+  {
+    "anchor": "src/loop-mcp/processRunner.ts:34-37",
+    "finding_entity_id": "msg_01KZ078GG6H7Y7KX83PTTVF1AM",
+    "quote": "  let resolvedExecutable = command_argv[0]\n  if (options.policy) {\n    resolvedExecutable = options.policy.validateCallbackCommand(command_argv, callbackCwd)\n  }",
+    "seq": 1,
+    "why_relevant": "Fire-time re-runs the registration validator with no try/catch; any CommandValidationError thrown here rejects runCommand and propagates upward."
+  },
+  {
+    "anchor": "src/loop-mcp/invocationWorker.ts:73-85",
+    "finding_entity_id": "msg_01KZ078GG6H7Y7KX83PTTVF1AM",
+    "quote": "    this.running = true\n    try {\n      const now = this.clock.iso()\n      const claimed = this.store.claimInvocation(now, 30_000)\n      if (!claimed) return false\n\n      const result = await this.executeInvocation(claimed)\n      await this.finalizeInvocation(claimed.invocation, result, claimed.goal)\n\n      return true\n    } finally {\n      this.running = false\n    }",
+    "seq": 2,
+    "why_relevant": "try block has only a finally, no catch; a rejection from executeInvocation escapes processOne, and finalizeInvocation (the only code that transitions the invocation out of 'running') is skipped, orphaning it with an open lease."
+  },
+  {
+    "anchor": "src/loop-mcp/scheduler.ts:431-436",
+    "finding_entity_id": "msg_01KZ078GG6H7Y7KX83PTTVF1AM",
+    "quote": "  private poll(): void {\n    if (!this.active) return\n    this.pollTimer = this.timer.setTimeout(() => this.poll(), this.pollingIntervalMs)\n\n    void this.worker.processOne()\n  }",
+    "seq": 3,
+    "why_relevant": "`void` discards the promise with no .catch, so a rejected processOne becomes an unhandled promise rejection."
+  },
+  {
+    "anchor": "src/loop-mcp/processRunner.ts:62-69",
+    "finding_entity_id": "msg_01KZ078GG6H7Y7KX83PTTVF1AM",
+    "quote": "  private resolveExecutable(name: string): string {\n    if (isAbsolute(name)) {\n      const resolved = realpathSync(name)\n      this.validateFile(resolved, 'executable')\n      if (!this.resolvedAllowedExecutables.includes(resolved)) {\n        throw new CommandValidationError(`executable \"${name}\" is not in the allowlist`)",
+    "seq": 4,
+    "why_relevant": "For absolute executables realpathSync is NOT wrapped in try/catch (unlike the PATH-search branch at lines 73-84), so a missing/deleted absolute executable throws a raw ENOENT -- not even a CommandValidationError -- on the same escape path."
+  },
+  {
+    "anchor": "src/loop-mcp/main.ts:84-91",
+    "finding_entity_id": "msg_01KZ078GG6H7Y7KX83PTTVF1AM",
+    "quote": "  startLoopMcp(configPath, { checkLegacyOwner }).then(({ app, config: cfg }) => {\n    app.listen({ port: cfg.port, host: cfg.host }).then((address) => {\n      console.log(`loop-mcp listening on ${address}`)\n    })\n  }).catch((err) => {\n    console.error('failed to start loop-mcp:', err)\n    process.exit(1)\n  })",
+    "seq": 5,
+    "why_relevant": "This .catch covers startup only; there is no process.on('unhandledRejection') or 'uncaughtException' handler anywhere in main.ts, so a fire-time rejection is truly unhandled and under Node's default mode terminates the process."
+  },
+  {
+    "anchor": "src/loop-mcp/service.ts:65-66",
+    "finding_entity_id": "msg_01KZ078W67CV0PCV77SAPPXR3K",
+    "quote": "    const bindings = env_bindings ?? []\n    this.policy.validateEnvBindings(bindings)",
+    "seq": 1,
+    "why_relevant": "The env-binding whitelist is enforced only at callback registration; nothing re-validates it at fire time."
+  },
+  {
+    "anchor": "src/loop-mcp/processRunner.ts:40-48",
+    "finding_entity_id": "msg_01KZ078W67CV0PCV77SAPPXR3K",
+    "quote": "  const env: Record<string, string> = {\n    PATH: process.env.PATH ?? '',\n    HOME: process.env.HOME ?? '',\n  }\n  for (const name of env_binding_names) {\n    if (options.environmentBindings[name]) {\n      env[name] = options.environmentBindings[name]\n    }\n  }",
+    "seq": 2,
+    "why_relevant": "At fire, runCommand never calls validateEnvBindings and silently skips (the if-guard) any binding name whose value is absent/falsy in config.environmentBindings -- the callback runs degraded with no error. Values are injected verbatim, never resolved from an env-var indirection."
+  },
+  {
+    "anchor": "src/loop-mcp/commandPolicy.ts:43-45",
+    "finding_entity_id": "msg_01KZ078W67CV0PCV77SAPPXR3K",
+    "quote": "    if (cwd) {\n      this.validatePathIsUnderRoot(realpathSync(cwd), 'cwd')\n    }",
+    "seq": 3,
+    "why_relevant": "cwd root-confinement only runs when cwd is truthy; a null-cwd callback skips the allowedRoots check at both registration and fire."
+  },
+  {
+    "anchor": "src/loop-mcp/processRunner.ts:39",
+    "finding_entity_id": "msg_01KZ078W67CV0PCV77SAPPXR3K",
+    "quote": "  const cwd = callbackCwd ?? process.cwd()",
+    "seq": 4,
+    "why_relevant": "When callback.cwd is null the spawn falls back to the scheduler's own process.cwd() -- the directory that escaped the root check in the previous excerpt -- so the callback executes unconfined."
+  },
+  {
+    "anchor": "src/loop-mcp/scheduler.ts:307-309",
+    "finding_entity_id": "msg_01KZ078W67CV0PCV77SAPPXR3K",
+    "quote": "    const spec = trigger.spec_json as Record<string, unknown>\n    const command = Array.isArray(spec.command) ? spec.command as string[] : []\n    const cwd = typeof spec.cwd === 'string' ? spec.cwd : process.cwd()",
+    "seq": 5,
+    "why_relevant": "The watch path defaults cwd to process.cwd() too, but then passes it through validateWatchCommand (which DOES root-check it), so the identical null-cwd case is confined for watches yet unconfined for callbacks -- and if process.cwd() is outside an allowed root the watch probe throws and crashes per Finding 1."
+  },
+  {
+    "anchor": "loop-engine-supervisor-current/loop_engine_supervisor/supervision.py:62-67",
+    "finding_entity_id": "msg_01KZ078W67CV0PCV77SAPPXR3K",
+    "quote": "            callback_result = await self._client.callback_register(\n                description=f\"supervisor turn callback for unit {unit_id}\",\n                command=list(self._config.turn_command) + [\"--unit\", unit_id],\n                timeout_seconds=self._config.callback_timeout_seconds,\n                idempotency_key=f\"{unit_id}:callback\",\n            )",
+    "seq": 6,
+    "why_relevant": "The sole production consumer registers callbacks with NO cwd and NO env_bindings, so every fleet callback has cwd=null and runs in the scheduler's process.cwd() unconfined -- the bypass is the live production posture, not an edge case."
+  },
+  {
+    "anchor": "src/loop-mcp/commandPolicy.ts:7-15",
+    "finding_entity_id": "msg_01KZ078ZJ1PCQVPPYFXPXVXVKB",
+    "quote": "  constructor(\n    allowedExecutables: string[],\n    private allowedRoots: string[],\n    private allowedBindings: string[],\n  ) {\n    this.resolvedAllowedExecutables = allowedExecutables.map((exe) => {\n      try { return realpathSync(exe) } catch { return exe }\n    })\n  }",
+    "seq": 1,
+    "why_relevant": "Allowed executables are realpath-resolved once, in the constructor, and ENOENT is swallowed to the literal string -- the cache is fixed at construction time."
+  },
+  {
+    "anchor": "src/loop-mcp/main.ts:21-26",
+    "finding_entity_id": "msg_01KZ078ZJ1PCQVPPYFXPXVXVKB",
+    "quote": "  const store = new LoopStore(config.dbPath)\n  const policy = new CommandPolicy(\n    config.allowedExecutables,\n    config.allowedRoots,\n    Object.keys(config.environmentBindings),\n  )",
+    "seq": 2,
+    "why_relevant": "The CommandPolicy (and therefore the executable realpath cache) is built once at scheduler startup; there is no reload or refresh path."
+  },
+  {
+    "anchor": "src/loop-mcp/commandPolicy.ts:62-69",
+    "finding_entity_id": "msg_01KZ078ZJ1PCQVPPYFXPXVXVKB",
+    "quote": "  private resolveExecutable(name: string): string {\n    if (isAbsolute(name)) {\n      const resolved = realpathSync(name)\n      this.validateFile(resolved, 'executable')\n      if (!this.resolvedAllowedExecutables.includes(resolved)) {\n        throw new CommandValidationError(`executable \"${name}\" is not in the allowlist`)",
+    "seq": 3,
+    "why_relevant": "At fire, the executable is re-realpathed and compared for membership against the startup-cached set; a repointed allowed executable (e.g. /usr/bin/python3.14 after a version-bump symlink swap) resolves to a path absent from the stale cache and throws -- the throw then escapes per Finding 1."
+  },
+  {
+    "anchor": "src/loop-mcp/commandPolicy.ts:94-100",
+    "finding_entity_id": "msg_01KZ078ZJ1PCQVPPYFXPXVXVKB",
+    "quote": "  private validatePathIsUnderRoot(resolvedPath: string, label: string): void {\n    for (const root of this.allowedRoots) {\n      const rootResolved = realpathSync(root)\n      const rel = relative(rootResolved, resolvedPath)",
+    "seq": 4,
+    "why_relevant": "allowedRoots are re-realpathed on every invocation with no caching -- always fresh -- which contrasts directly with the startup-frozen executable cache and is the cache-freshness asymmetry."
+  },
+  {
+    "anchor": "src/loop-mcp/scheduler.ts:431-436",
+    "finding_entity_id": "msg_01KZ0798XYNH44SH5TTR4BHS4R",
+    "quote": "  private poll(): void {\n    if (!this.active) return\n    this.pollTimer = this.timer.setTimeout(() => this.poll(), this.pollingIntervalMs)\n\n    void this.worker.processOne()\n  }",
+    "seq": 2,
+    "why_relevant": "The 2s poll loop only reschedules itself and calls worker.processOne() (which claims one ready invocation); it never consults triggers, so polling cannot arm or catch up runtime-registered triggers."
+  },
+  {
+    "anchor": "src/loop-mcp/store.ts:427-439",
+    "finding_entity_id": "msg_01KZ0798XYNH44SH5TTR4BHS4R",
+    "quote": "  listActiveTriggers(): Trigger[] {\n    const rows = this.db.prepare(\n      \"SELECT * FROM triggers WHERE status = 'active' ORDER BY created_at, id\",\n    ).all() as TriggerRow[]\n    return rows.map((row) => this.rowToTrigger(row))\n  }\n\n  listDueTriggers(now: string): Trigger[] {\n    const rows = this.db.prepare(\n      \"SELECT * FROM triggers WHERE status = 'active' AND next_fire_at IS NOT NULL AND next_fire_at <= ? ORDER BY next_fire_at, id\",\n    ).all(now) as TriggerRow[]\n    return rows.map((row) => this.rowToTrigger(row))\n  }",
+    "seq": 3,
+    "why_relevant": "listActiveTriggers feeds rebuildTimers (start-time only). listDueTriggers is precisely the query a poll loop would use to sweep due/runtime triggers, but a repo-wide grep finds ZERO callers - dead code - confirming no runtime arming path exists."
+  },
+  {
+    "anchor": "src/loop-mcp/service.ts:396-407",
+    "finding_entity_id": "msg_01KZ0798XYNH44SH5TTR4BHS4R",
+    "quote": "      status: 'active',\n      next_fire_at: new Date(Date.now() + interval_seconds * 1_000).toISOString(),\n      fires: 0,\n      last_output_hash: null,\n      consecutive_probe_failures: 0,\n      created_at: now,\n      expires_at: expiresAt,\n    }\n\n    this.store.createTrigger(trigger)\n    return trigger\n  }",
+    "seq": 4,
+    "why_relevant": "Runtime cron registration builds a Trigger with status 'active' and a next_fire_at, then calls only store.createTrigger (a DB INSERT) and returns. wakeup:280 and watch:350 are identical; none notify the scheduler, and LoopMcpService holds no scheduler handle (main.ts:28)."
+  },
+  {
+    "anchor": "loop-engine-supervisor-current/loop_engine_supervisor/supervision.py:131-140",
+    "finding_entity_id": "msg_01KZ0798XYNH44SH5TTR4BHS4R",
+    "quote": "    async def wake(self, unit: sqlite3.Row, event_id: str, delay_seconds: int = 0) -> None:\n        loop_goal_id = unit[\"loop_goal_id\"]\n        loop_callback_id = unit[\"loop_callback_id\"]\n        await self._client.monitor_register_wakeup(\n            description=f\"wakeup for event {event_id}\",\n            delay_seconds=delay_seconds,\n            note=event_id,\n            goal_id=loop_goal_id if loop_goal_id else None,\n            callback_id=loop_callback_id if loop_callback_id else None,\n        )",
+    "seq": 5,
+    "why_relevant": "The sole consumer registers wakeup triggers at runtime (also loop_register at :73, monitor_register_watch at :85, httpapi.py:576, report_intake.py:176). Every trigger it creates is post-start - exactly the path the scheduler never arms, so the no-arm gap is hit in production."
+  },
+  {
+    "anchor": "src/loop-mcp/store.ts:685-703",
+    "finding_entity_id": "msg_01KZ07BPXE0K13B0HW26KDXK18",
+    "quote": "  acquireSchedulerLock(ownerId: string, lockTtlMs: number): boolean {\n    return this.db.transaction(() => {\n      const existing = this.db.prepare('SELECT * FROM scheduler_lock LIMIT 1').get() as SchedulerLockRow | undefined\n      const now = new Date()\n      if (existing && Date.parse(existing.expires_at) > now.getTime()) {\n        if (existing.owner_id !== ownerId) return false\n      }\n      this.db.prepare('DELETE FROM scheduler_lock').run()\n      const expiresAt = new Date(now.getTime() + lockTtlMs).toISOString()\n      this.db.prepare(\n        'INSERT INTO scheduler_lock(owner_id, acquired_at, expires_at) VALUES (?,?,?)',\n      ).run(ownerId, now.toISOString(), expiresAt)\n      return true\n    })()\n  }\n\n  releaseSchedulerLock(ownerId: string): void {\n    this.db.prepare('DELETE FROM scheduler_lock WHERE owner_id = ?').run(ownerId)\n  }",
+    "seq": 1,
+    "why_relevant": "Lock is a single row; acquire refuses only if a NON-expired lock is owned by another. An expired lock, no lock, or self-owned lock is overwritten with a fresh TTL - so refresh==re-acquire and stale takeover is automatic once expires_at<=now. release is an owner-scoped DELETE."
+  },
+  {
+    "anchor": "src/loop-mcp/scheduler.ts:55-74",
+    "finding_entity_id": "msg_01KZ07BPXE0K13B0HW26KDXK18",
+    "quote": "  async start(): Promise<void> {\n    this.active = true\n\n    if (this.checkLegacyOwner && this.checkLegacyOwner()) {\n      throw new Error('legacy scheduler owner is active; cannot start Loop MCP scheduler')\n    }\n\n    const acquired = this.store.acquireSchedulerLock(this.ownerId, this.lockTtlMs)\n    if (!acquired) {\n      throw new Error('failed to acquire scheduler lock; another owner may be running')\n    }\n\n    this.worker.start()\n\n    this.recoverExpiredLeases()\n    this.rebuildTimers()\n\n    this.lockRefreshTimer = this.timer.setTimeout(() => this.refreshLock(), this.lockRefreshIntervalMs)\n    this.pollTimer = this.timer.setTimeout(() => this.poll(), this.pollingIntervalMs)\n  }",
+    "seq": 2,
+    "why_relevant": "Lock acquired exactly once at start (throws if it cannot); recoverExpiredLeases + rebuildTimers run only here; refresh/poll timers seeded. checkLegacyOwner only READs the legacy file lock to refuse co-running with the old adapter."
+  },
+  {
+    "anchor": "src/loop-mcp/scheduler.ts:425-429",
+    "finding_entity_id": "msg_01KZ07BPXE0K13B0HW26KDXK18",
+    "quote": "  private refreshLock(): void {\n    if (!this.active) return\n    this.store.acquireSchedulerLock(this.ownerId, this.lockTtlMs)\n    this.lockRefreshTimer = this.timer.setTimeout(() => this.refreshLock(), this.lockRefreshIntervalMs)\n  }",
+    "seq": 3,
+    "why_relevant": "Refresh just re-runs acquireSchedulerLock (re-extending the TTL) every lockRefreshIntervalMs; its boolean return is ignored, so a lost lock (refresh delayed past TTL and another owner took over) is not detected or resolved here."
+  },
+  {
+    "anchor": "src/loop-mcp/scheduler.ts:76-87",
+    "finding_entity_id": "msg_01KZ07BPXE0K13B0HW26KDXK18",
+    "quote": "  async stop(): Promise<void> {\n    this.active = false\n    this.worker.stop()\n\n    for (const cleanup of this.timerCleanups) cleanup()\n    this.timerCleanups = []\n\n    if (this.lockRefreshTimer) { this.lockRefreshTimer(); this.lockRefreshTimer = null }\n    if (this.pollTimer) { this.pollTimer(); this.pollTimer = null }\n\n    this.store.releaseSchedulerLock(this.ownerId)\n  }",
+    "seq": 4,
+    "why_relevant": "releaseSchedulerLock (owner-scoped DELETE) is the ONLY release path and lives in stop(); if stop() never runs (crash/kill with no signal handler) the lock is left to expire by TTL instead of being freed."
+  },
+  {
+    "anchor": "src/loop-mcp/main.ts:53-66",
+    "finding_entity_id": "msg_01KZ07BPXE0K13B0HW26KDXK18",
+    "quote": "    lockRefreshIntervalMs: 5_000,\n    lockTtlMs: 15_000,\n    pollingIntervalMs: 2_000,\n    checkLegacyOwner: opts?.checkLegacyOwner,\n  })\n\n  await scheduler.start()\n\n  const app = buildMcpServer({ config, store, service, scheduler, capabilitySecret })\n\n  const stop = async () => {\n    await scheduler.stop()\n    store.close()\n  }",
+    "seq": 5,
+    "why_relevant": "refresh 5s vs TTL 15s (3x margin). stop() - the only release path - is just a returned closure; main.ts wires no SIGTERM/SIGINT to it (only process.exit(1) on startup failure), so an unclean exit relies on the 15s TTL for a new owner to take over."
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:805-826",
+    "finding_entity_id": "msg_01KZ08M6QCTAMENR1FKENPK2EM",
+    "quote": "  recordFiringAndCoalesce(\n    firing: Firing,\n    goalId: string | null,\n    triggerId: string,\n    scopeId: string,\n    callbackId: string,\n    maxAttempts: number,\n    now: string,\n  ): { firing: Firing; invocation: Invocation } {\n    return this.db.transaction(() => {\n      this.createFiring(firing)\n\n      let invocation: Invocation | undefined\n\n      if (goalId) {\n        const pending = this.getPendingInvocationForGoal(goalId, scopeId)\n        if (pending) {\n          this.linkFiringToInvocation(pending.id, firing.id)\n          pending.merged_count++\n          pending.updated_at = now\n          this.updateInvocation(pending)\n          invocation = pending",
+    "seq": 1,
+    "why_relevant": "固定先 createFiring 保证 fire 不丢审计行；pending 命中即合并(merged_count++)，去重查询 getPendingInvocationForGoal(goalId,scopeId) 与合并体里都没有 callback_id 维度、也不更新 invocation.callback_id——证明去重键是 (goal,scope) 而非 callback。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:901-921",
+    "finding_entity_id": "msg_01KZ08M6QCTAMENR1FKENPK2EM",
+    "quote": "      if (!invocation) {\n        invocation = {\n          id: randomUUID(),\n          scope_id: scopeId,\n          goal_id: goalId,\n          callback_id: callbackId,\n          status: 'pending',\n          attempt: 0,\n          max_attempts: maxAttempts,\n          not_before: now,\n          lease_until: null,\n          merged_count: 1,\n          created_at: now,\n          updated_at: now,\n        }\n        this.createInvocation(invocation)\n        this.linkFiringToInvocation(invocation.id, firing.id)\n      }\n\n      return { firing, invocation }",
+    "seq": 2,
+    "why_relevant": "无 pending/running 时的兜底恒建一条全新 pending(attempt 0/merged_count 1)并 linkFiring——证明无静默丢弃分支，fire 必物化为可被 claimInvocation 领取的 pending；函数恒返回 {firing,invocation}。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:536-548",
+    "finding_entity_id": "msg_01KZ08M6QCTAMENR1FKENPK2EM",
+    "quote": "  getPendingInvocationForGoal(goalId: string, scopeId: string): Invocation | undefined {\n    const row = this.db.prepare(\n      \"SELECT * FROM invocations WHERE goal_id = ? AND scope_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1\",\n    ).get(goalId, scopeId) as InvocationRow | undefined\n    return row ? this.rowToInvocation(row) : undefined\n  }\n\n  getRunningInvocationForGoal(goalId: string, scopeId: string): Invocation | undefined {\n    const row = this.db.prepare(\n      \"SELECT * FROM invocations WHERE goal_id = ? AND scope_id = ? AND status = 'running' LIMIT 1\",\n    ).get(goalId, scopeId) as InvocationRow | undefined\n    return row ? this.rowToInvocation(row) : undefined\n  }",
+    "seq": 3,
+    "why_relevant": "去重查询只认 pending/running 两种状态、键为 (goal_id,scope_id)——既不查 retry_wait 也不以 callback_id 过滤，去重维度与状态边界由此定型(getPending/RunningInvocationForTrigger 550-562 经 trigger_id join 同构)。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:828-837",
+    "finding_entity_id": "msg_01KZ08M6QCTAMENR1FKENPK2EM",
+    "quote": "        const running = this.getRunningInvocationForGoal(goalId, scopeId)\n        if (running) {\n          const existingSuccessor = this.getPendingInvocationForGoal(goalId, scopeId)\n          if (existingSuccessor) {\n            this.linkFiringToInvocation(existingSuccessor.id, firing.id)\n            existingSuccessor.merged_count++\n            existingSuccessor.updated_at = now\n            this.updateInvocation(existingSuccessor)\n            invocation = existingSuccessor\n          } else {",
+    "seq": 4,
+    "why_relevant": "同一事务内上一级 getPendingInvocationForGoal 已返回 undefined 才进 running 分支，此处重复同查询必仍为 undefined——if(existingSuccessor) 不可达、恒走 else 建后继，是死代码/潜在 bug 信号；trigger 分支(871-877)同构。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:266-283",
+    "finding_entity_id": "msg_01KZ08M6QCTAMENR1FKENPK2EM",
+    "quote": "    this.store.recordFiringAndCoalesce(\n      firing,\n      trigger.goal_id,\n      trigger.id,\n      trigger.scope_id,\n      callbackId,\n      this.config.maxAttempts,\n      now,\n    )\n\n    const intervalSeconds = typeof spec.interval_seconds === 'number'\n      ? spec.interval_seconds\n      : this.config.defaultFallbackIntervalSeconds\n\n    trigger.fires++\n    trigger.next_fire_at = new Date(this.clock.now() + intervalSeconds * 1_000).toISOString()\n    this.store.updateTrigger(trigger)\n    this.scheduleTrigger(trigger)",
+    "seq": 5,
+    "why_relevant": "收口签名 recordFiringAndCoalesce(firing, goal_id, trigger.id, scope_id, callbackId, maxAttempts, now) 三路一致(179/266/400)；fires++ 在调用之后无条件执行(watch 在调用前 362)，与 w-a1 finding 互证 max_iterations 计 interval 拍而非去重后执行数。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:585-600",
+    "finding_entity_id": "msg_01KZ08MHM8A24KNTK5RNQ51TX9",
+    "quote": "  claimInvocation(now: string, leaseMs: number): ClaimedInvocation | null {\n    return this.db.transaction(() => {\n      const row = this.db.prepare(\n        \"SELECT * FROM invocations WHERE status = 'pending' AND not_before <= ? ORDER BY created_at ASC LIMIT 1\",\n      ).get(now) as InvocationRow | undefined\n      if (!row) return null\n\n      const leaseUntil = new Date(Date.now() + leaseMs).toISOString()\n      const updatedAt = new Date().toISOString()\n      const attempt = row.attempt === 0 ? 1 : row.attempt",
+    "seq": 1,
+    "why_relevant": "claimInvocation 只领 status=pending 且 not_before<=now、跨 scope 全局取最老一条——retry_wait 永不被选；attempt = row.attempt===0?1:row.attempt 而新行恒 0，稳态恒走 0→1 分支，else 分支亦不可达。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:193-217",
+    "finding_entity_id": "msg_01KZ08MHM8A24KNTK5RNQ51TX9",
+    "quote": "      } else {\n        const newAttempt = invocation.attempt + 1\n        if (newAttempt > invocation.max_attempts) {\n          invocation.status = 'dead_letter'\n          invocation.lease_until = null\n          invocation.updated_at = now\n          this.store.updateInvocation(invocation)\n          this.store.createAuditEvent(\n            invocation.scope_id,\n            'invocation_dead_letter',\n            'invocation',\n            invocation.id,\n            { error_kind: result.errorKind ?? 'callback_failed', attempt: invocation.attempt },\n          )\n        } else {\n          const retryIdx = Math.min(invocation.attempt - 1, this.config.retryDelaysMs.length - 1)\n          const delayMs = this.config.retryDelaysMs[retryIdx]\n          invocation.status = 'retry_wait'\n          invocation.attempt = newAttempt\n          invocation.not_before = new Date(this.clock.now() + delayMs).toISOString()\n          invocation.lease_until = null\n          invocation.updated_at = now\n          this.store.updateInvocation(invocation)\n        }\n      }",
+    "seq": 2,
+    "why_relevant": "重试类失败把 invocation 置 retry_wait(attempt+1/not_before=now+delay)，仅 updateInvocation 自身——既不复位为 pending 也不创建后继，retry_wait 就此成为无人领取状态；retryDelaysMs/retryIdx 钳位机件(208)也随 retry_wait 沉没。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:221-248",
+    "finding_entity_id": "msg_01KZ08MHM8A24KNTK5RNQ51TX9",
+    "quote": "  private startSuccessor(completedInv: Invocation, hasGoal: boolean): void {\n    if (hasGoal && completedInv.goal_id) {\n      const successor = this.store.getPendingInvocationForGoal(completedInv.goal_id, completedInv.scope_id)\n      if (successor && successor.id !== completedInv.id) {\n        const now = this.clock.iso()\n        const goal = this.store.getGoal(completedInv.goal_id, completedInv.scope_id)\n        if (goal && goal.status === 'active') {\n          successor.status = 'pending'\n          successor.not_before = now\n          successor.updated_at = now\n          this.store.updateInvocation(successor)\n        }\n      }\n    } else if (!hasGoal) {\n      const firings = this.store.getFiringsForInvocation(completedInv.id)\n      if (firings.length > 0) {\n        const triggerId = firings[0].trigger_id\n        const successor = this.store.getPendingInvocationForTrigger(triggerId, completedInv.scope_id)\n        if (successor && successor.id !== completedInv.id) {\n          const now = this.clock.iso()\n          successor.status = 'pending'\n          successor.not_before = now\n          successor.updated_at = now\n          this.store.updateInvocation(successor)\n        }\n      }\n    }\n  }",
+    "seq": 3,
+    "why_relevant": "全仓唯一把 status 写回 pending 之处，但作用对象是另一条『已 pending 的后继』(getPending* 命中且 id≠completedInv)，且仅在某 invocation 成功(line 176-180 调用)时触发——它复位后继的 not_before，从不把 retry_wait 那条本身改回 pending，故 retry_wait 无复活路径。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/test/loop-mcp/store.test.ts:408-411",
+    "finding_entity_id": "msg_01KZ08MHM8A24KNTK5RNQ51TX9",
+    "quote": "      const recovered = store.recoverExpiredLeases(new Date().toISOString(), 3)\n      expect(recovered.length).toBe(1)\n      expect(recovered[0].status).toBe('retry_wait')\n      expect(recovered[0].attempt).toBe(2)",
+    "seq": 4,
+    "why_relevant": "测试只断言 recoverExpiredLeases 把过期 running 变成 retry_wait(attempt 2)，全测试集无任何 retry_wait→pending/running 复活或被 claimInvocation 再次领取的断言——佐证 retry_wait 是回收缺口而非已知会自愈的状态。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:67-73",
+    "finding_entity_id": "msg_01KZ08PTVD6GYB92ZH9PRDDMH2",
+    "quote": "    this.worker.start()\n\n    this.recoverExpiredLeases()\n    this.rebuildTimers()\n\n    this.lockRefreshTimer = this.timer.setTimeout(() => this.refreshLock(), this.lockRefreshIntervalMs)\n    this.pollTimer = this.timer.setTimeout(() => this.poll(), this.pollingIntervalMs)",
+    "seq": 1,
+    "why_relevant": "start() 中 recoverExpiredLeases 的唯一调用点(69)，紧随其后只建立 lockRefreshTimer 与 pollTimer 两个运行期定时器——证明回收只在启动期发生一次。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:425-436",
+    "finding_entity_id": "msg_01KZ08PTVD6GYB92ZH9PRDDMH2",
+    "quote": "  private refreshLock(): void {\n    if (!this.active) return\n    this.store.acquireSchedulerLock(this.ownerId, this.lockTtlMs)\n    this.lockRefreshTimer = this.timer.setTimeout(() => this.refreshLock(), this.lockRefreshIntervalMs)\n  }\n\n  private poll(): void {\n    if (!this.active) return\n    this.pollTimer = this.timer.setTimeout(() => this.poll(), this.pollingIntervalMs)\n\n    void this.worker.processOne()\n  }",
+    "seq": 2,
+    "why_relevant": "运行期仅有的两个回调 refreshLock 与 poll 的函数体：前者只刷锁，后者只 void worker.processOne()——两者都不调用 recoverExpiredLeases，运行期无任何 lease 回收路径。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:585-600",
+    "finding_entity_id": "msg_01KZ08PTVD6GYB92ZH9PRDDMH2",
+    "quote": "  claimInvocation(now: string, leaseMs: number): ClaimedInvocation | null {\n    return this.db.transaction(() => {\n      const row = this.db.prepare(\n        \"SELECT * FROM invocations WHERE status = 'pending' AND not_before <= ? ORDER BY created_at ASC LIMIT 1\",\n      ).get(now) as InvocationRow | undefined\n      if (!row) return null\n\n      const leaseUntil = new Date(Date.now() + leaseMs).toISOString()\n      const updatedAt = new Date().toISOString()\n      const attempt = row.attempt === 0 ? 1 : row.attempt\n\n      this.db.prepare(\n        \"UPDATE invocations SET status = 'running', attempt = ?, lease_until = ?, updated_at = ? WHERE id = ?\",\n      ).run(attempt, leaseUntil, updatedAt, row.id)\n\n      const invocation = this.rowToInvocation({ ...row, status: 'running', attempt, lease_until: leaseUntil, updated_at: updatedAt })",
+    "seq": 3,
+    "why_relevant": "claimInvocation 只 SELECT status='pending'(588)并把 lease_until 设为 now+leaseMs(592/597)——一个 'running' orphan 对这条唯一的运行期领取路径完全不可见。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:655-659",
+    "finding_entity_id": "msg_01KZ08PTVD6GYB92ZH9PRDDMH2",
+    "quote": "  recoverExpiredLeases(now: string, maxAttempts: number): Invocation[] {\n    return this.db.transaction(() => {\n      const rows = this.db.prepare(\n        \"SELECT * FROM invocations WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until <= ?\",\n      ).all(now) as InvocationRow[]",
+    "seq": 4,
+    "why_relevant": "recoverExpiredLeases 的查询只匹配 status='running' AND lease_until<=now；它只在 start() 跑，故 orphan 直到一次发生在 lease 过期后的重启才被命中。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:828-855",
+    "finding_entity_id": "msg_01KZ08PTVD6GYB92ZH9PRDDMH2",
+    "quote": "          const running = this.getRunningInvocationForGoal(goalId, scopeId)\n          if (running) {\n            const existingSuccessor = this.getPendingInvocationForGoal(goalId, scopeId)\n            if (existingSuccessor) {\n              this.linkFiringToInvocation(existingSuccessor.id, firing.id)\n              existingSuccessor.merged_count++\n              existingSuccessor.updated_at = now\n              this.updateInvocation(existingSuccessor)\n              invocation = existingSuccessor\n            } else {\n              const successor: Invocation = {\n                id: randomUUID(),\n                scope_id: scopeId,\n                goal_id: goalId,\n                callback_id: callbackId,\n                status: 'pending',\n                attempt: 0,\n                max_attempts: maxAttempts,\n                not_before: now,\n                lease_until: null,\n                merged_count: 1,\n                created_at: now,\n                updated_at: now,\n              }\n              this.createInvocation(successor)\n              this.linkFiringToInvocation(successor.id, firing.id)\n              invocation = successor\n            }",
+    "seq": 5,
+    "why_relevant": "修正停滞假设：goal 已有 'running' invocation 且无 'pending' 时，recordFiringAndCoalesce 会新建 attempt=0 的 'pending' 后继并挂 firing——orphan 不阻塞下一次烧 callback，goal loop 不静默停滞。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:655-683",
+    "finding_entity_id": "msg_01KZ08PTVWXHHK60J2MXKJT9QY",
+    "quote": "  recoverExpiredLeases(now: string, maxAttempts: number): Invocation[] {\n    return this.db.transaction(() => {\n      const rows = this.db.prepare(\n        \"SELECT * FROM invocations WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until <= ?\",\n      ).all(now) as InvocationRow[]\n      const recovered: Invocation[] = []\n      for (const row of rows) {\n        const inv = this.rowToInvocation(row)\n        const newAttempt = inv.attempt + 1\n        if (newAttempt > maxAttempts) {\n          inv.status = 'dead_letter'\n          inv.updated_at = new Date().toISOString()\n          inv.lease_until = null\n        } else {\n          const retryDelay = inv.attempt === 1 ? 5_000 : 30_000\n          inv.status = 'retry_wait'\n          inv.attempt = newAttempt\n          inv.not_before = new Date(Date.now() + retryDelay).toISOString()\n          inv.lease_until = null\n          inv.updated_at = new Date().toISOString()\n        }\n        this.db.prepare(\n          'UPDATE invocations SET status = ?, attempt = ?, not_before = ?, lease_until = ?, updated_at = ? WHERE id = ?',\n        ).run(inv.status, inv.attempt, inv.not_before, inv.lease_until ?? null, inv.updated_at, inv.id)\n        recovered.push(inv)\n      }\n      return recovered\n    })()\n  }",
+    "seq": 1,
+    "why_relevant": "recoverExpiredLeases 全函数体：不读 errorKind、一律 newAttempt=attempt+1，超 maxAttempts 才 dead_letter，否则 retry_wait 且退避硬编码 5_000/30_000——与 finalize 的分类法三点失配的根。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:181-217",
+    "finding_entity_id": "msg_01KZ08PTVWXHHK60J2MXKJT9QY",
+    "quote": "      } else if (result.errorKind === 'spawn_failed' || result.errorKind === 'callback_unavailable') {\n        invocation.status = 'dead_letter'\n        invocation.lease_until = null\n        invocation.updated_at = now\n        this.store.updateInvocation(invocation)\n        this.store.createAuditEvent(\n          invocation.scope_id,\n          'invocation_dead_letter',\n          'invocation',\n          invocation.id,\n          { error_kind: result.errorKind, attempt: invocation.attempt },\n        )\n      } else {\n        const newAttempt = invocation.attempt + 1\n        if (newAttempt > invocation.max_attempts) {\n          invocation.status = 'dead_letter'\n          invocation.lease_until = null\n          invocation.updated_at = now\n          this.store.updateInvocation(invocation)\n          this.store.createAuditEvent(\n            invocation.scope_id,\n            'invocation_dead_letter',\n            'invocation',\n            invocation.id,\n            { error_kind: result.errorKind ?? 'callback_failed', attempt: invocation.attempt },\n          )\n        } else {\n          const retryIdx = Math.min(invocation.attempt - 1, this.config.retryDelaysMs.length - 1)\n          const delayMs = this.config.retryDelaysMs[retryIdx]\n          invocation.status = 'retry_wait'\n          invocation.attempt = newAttempt\n          invocation.not_before = new Date(this.clock.now() + delayMs).toISOString()\n          invocation.lease_until = null\n          invocation.updated_at = now\n          this.store.updateInvocation(invocation)\n        }\n      }",
+    "seq": 2,
+    "why_relevant": "finalizeInvocation 的对照分类法：spawn_failed/callback_unavailable→立即 dead_letter(181-192)；其余按 retryDelaysMs[min(attempt-1,len-1)] 退避重试到 invocation.max_attempts(208)——证明 recover 忽略了 dead-letter-by-errorKind 规则、config 退避与 per-invocation max_attempts。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:71-86",
+    "finding_entity_id": "msg_01KZ08PTVWXHHK60J2MXKJT9QY",
+    "quote": "  async processOne(): Promise<boolean> {\n    if (!this.active || this.running) return false\n    this.running = true\n    try {\n      const now = this.clock.iso()\n      const claimed = this.store.claimInvocation(now, 30_000)\n      if (!claimed) return false\n\n      const result = await this.executeInvocation(claimed)\n      await this.finalizeInvocation(claimed.invocation, result, claimed.goal)\n\n      return true\n    } finally {\n      this.running = false\n    }\n  }",
+    "seq": 3,
+    "why_relevant": "processOne 是 try/finally 且无 catch：executeInvocation 的抛出会经 finally(仅复位 running)原样再抛，结合 scheduler.poll 的 void 无 .catch，构成 unhandledRejection。同时 76 行 claimInvocation(now,30_000) 即 30s lease 的来源。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/main.ts:71-91",
+    "finding_entity_id": "msg_01KZ08PTVWXHHK60J2MXKJT9QY",
+    "quote": "if (process.argv[1]?.endsWith('main.js') || process.argv[1]?.endsWith('main.ts')) {\n  const configPath = process.argv[2] ?? './loop-mcp-config.json'\n  const raw = JSON.parse(readFileSync(configPath, 'utf8'))\n  const config = parseLoopMcpConfig(raw)\n  const checkLegacyOwner = () => {\n    if (!existsSync(config.schedulerOwnerLockPath)) return false\n    try {\n      const data = JSON.parse(readFileSync(config.schedulerOwnerLockPath, 'utf8')) as { ownerId: string; expiresAt: string }\n      return Date.now() < Date.parse(data.expiresAt)\n    } catch {\n      return true\n    }\n  }\n  startLoopMcp(configPath, { checkLegacyOwner }).then(({ app, config: cfg }) => {\n    app.listen({ port: cfg.port, host: cfg.host }).then((address) => {\n      console.log(`loop-mcp listening on ${address}`)\n    })\n  }).catch((err) => {\n    console.error('failed to start loop-mcp:', err)\n    process.exit(1)\n  })",
+    "seq": 4,
+    "why_relevant": "入口无 process.on('unhandledRejection')、无 SIGTERM/SIGINT handler，仅有启动 .catch→process.exit(1)：逃逸抛出直接杀进程，且优雅 SIGTERM 重启也不会跑 stop() 释放锁/收尾在飞 invocation——两种重启都退化为 TTL+下次recoverExpiredLeases 恢复。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:101-115",
+    "finding_entity_id": "msg_01KZ08S72GT1PY8DXTQKCQTGRD",
+    "quote": "  private scheduleTrigger(trigger: Trigger): void {\n    if (trigger.status !== 'active') return\n    if (!trigger.next_fire_at) return\n\n    const nextFireMs = Date.parse(trigger.next_fire_at)\n    const delayMs = Math.max(0, nextFireMs - this.clock.now())\n\n    const cleanup = this.timer.setTimeout(() => {\n      return this.fireTrigger(trigger.id)\n    }, delayMs)\n    this.timerCleanups.push(cleanup)\n  }\n\n  private async fireTrigger(triggerId: string): Promise<void> {\n    if (!this.active) return",
+    "seq": 1,
+    "why_relevant": "fire* 的唯一入口 fireTrigger 只在 scheduleTrigger 的 setTimeout 回调里被调度；scheduleTrigger 是 private，运行期注册路径无法调用它——故 post-start trigger 不 arm 就永不进 fire*。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:198-213",
+    "finding_entity_id": "msg_01KZ08S72GT1PY8DXTQKCQTGRD",
+    "quote": "    const expiresAt = Date.parse(trigger.expires_at)\n    if (expiresAt <= this.clock.now()) {\n      trigger.status = 'expired'\n      trigger.next_fire_at = null\n      this.store.updateTrigger(trigger)\n      this.store.createAuditEvent(\n        trigger.scope_id, 'trigger_expired', 'trigger', trigger.id,\n        { reason: 'ttl' },\n      )\n\n      if (trigger.goal_id) {\n        this.store.terminateGoal(\n          trigger.scope_id, trigger.goal_id, 'expired', 'TTL expired', null, 'ttl',\n        )\n      }\n      return\n    }",
+    "seq": 2,
+    "why_relevant": "TTL 终止分支物理上写在 fireCron 内、且依赖本函数被调到——trigger 不 arm 则 fireCron 不执行、expires_at 过期也不会触发 terminateGoal。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:227-241",
+    "finding_entity_id": "msg_01KZ08S72GT1PY8DXTQKCQTGRD",
+    "quote": "    if (maxIterations !== undefined && trigger.fires >= maxIterations) {\n      trigger.status = 'expired'\n      trigger.next_fire_at = null\n      this.store.updateTrigger(trigger)\n      this.store.createAuditEvent(\n        trigger.scope_id, 'trigger_expired', 'trigger', trigger.id,\n        { reason: 'iteration_limit' },\n      )\n\n      if (trigger.goal_id) {\n        this.store.terminateGoal(\n          trigger.scope_id, trigger.goal_id, 'expired', 'Iteration limit reached', null, 'iteration_limit',\n        )\n      }\n      return\n    }",
+    "seq": 3,
+    "why_relevant": "max_iterations 终止分支同样在 fireCron 内、依赖 fires 自增（只在本函数通过三道闸后 ++）——不 arm 则 fires 永不增长、iteration_limit 不可达。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:431-436",
+    "finding_entity_id": "msg_01KZ08S72GT1PY8DXTQKCQTGRD",
+    "quote": "  private poll(): void {\n    if (!this.active) return\n    this.pollTimer = this.timer.setTimeout(() => this.poll(), this.pollingIntervalMs)\n\n    void this.worker.processOne()\n  }",
+    "seq": 4,
+    "why_relevant": "周期性 poll() 只 pump invocationWorker.processOne()，既不 arm trigger 也不调 fire*——不存在轮询式兜底去烧运行期 trigger 或回收过期 goal。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:789-802",
+    "finding_entity_id": "msg_01KZ08S72GT1PY8DXTQKCQTGRD",
+    "quote": "      const now = new Date().toISOString()\n      goal.status = outcome\n      goal.completion_summary = summary\n      goal.completion_evidence_json = evidence\n      goal.terminal_reason = reason\n      goal.terminal_at = now\n      goal.updated_at = now\n\n      this.updateGoalStatus(goal)\n      this.disableGoalTriggers(goalId, scopeId, now)\n      this.cancelPendingInvocations(goalId, scopeId)",
+    "seq": 5,
+    "why_relevant": "goal 状态向终态的迁移(updateGoalStatus)、停 trigger、撤 invocation 全部收口在 terminateGoal 内；updateGoalStatus 除此处外无调用者——store 层无独立 goal TTL 扫描/看门狗。"
+  },
+  {
+    "anchor": "/data/code/self/loop-engine-supervisor-current/loop_engine_supervisor/supervision.py:142-152",
+    "finding_entity_id": "msg_01KZ08W567YQ65A5HEP54X9PWC",
+    "quote": "    async def retire_goal(\n        self, unit: sqlite3.Row, outcome: str, summary: str\n    ) -> None:\n        loop_goal_id = unit[\"loop_goal_id\"]\n        if not loop_goal_id:\n            return\n        await self._client.loop_complete(\n            loop_id=loop_goal_id,\n            summary=summary,\n            outcome=outcome,\n        )",
+    "seq": 1,
+    "why_relevant": "retire_goal 是 consumer 唯一调 loop_complete 的地方；但 grep 整个 loop_engine_supervisor/*.py 显示它在生产模块零调用、仅 tests/ 与 README 引用——即 consumer 驱动终止在生产里是死代码，goal 无法靠 loop_complete 兜底。"
+  },
+  {
+    "anchor": "/data/code/self/loop-engine-supervisor-current/loop_engine_supervisor/supervision.py:70-81",
+    "finding_entity_id": "msg_01KZ08W567YQ65A5HEP54X9PWC",
+    "quote": "            description = f\"supervision loop for unit {unit_id}\"\n            goal_text = f\"Supervise development for unit {unit_id}\"\n            completion_criteria = f\"Development for unit {unit_id} reaches terminal state\"\n            loop_result = await self._client.loop_register(\n                description=description,\n                goal=goal_text,\n                completion_criteria=completion_criteria,\n                default_callback_id=callback_id,\n                fallback_interval_seconds=self._config.fallback_interval_seconds,\n                idempotency_key=f\"{unit_id}:goal\",\n            )\n            goal_id = loop_result.get(\"goal\", {}).get(\"id\", \"\")",
+    "seq": 2,
+    "why_relevant": "consumer 经 loop_register 在运行期创建 goal 并产出那条 cron fallback trigger——属 post-start trigger，按 F1 不会被 arm，只能靠重启。completion_criteria 仅作透传字符串、服务端不求值。"
+  },
+  {
+    "anchor": "/data/code/self/loop-engine-supervisor-current/loop_engine_supervisor/supervision.py:108-120",
+    "finding_entity_id": "msg_01KZ08W567YQ65A5HEP54X9PWC",
+    "quote": "                interval_seconds=self._config.watch_interval_seconds,\n                fire_mode=\"on_change\",\n                goal_id=goal_id,\n                callback_id=callback_id,\n                idempotency_key=f\"{unit_id}:watch\",\n            )\n            watch_trigger_id = watch_result.get(\"id\", \"\")\n\n            con.execute(\n                \"UPDATE units SET loop_goal_id = ?, loop_callback_id = ?, \"\n                \"loop_watch_trigger_id = ?, updated_at = ? WHERE unit_id = ?\",\n                (goal_id, callback_id, watch_trigger_id, self._now(), unit_id),\n            )",
+    "seq": 3,
+    "why_relevant": "同一 goal 还绑了一条 watch trigger(同样 post-start 注册、不会 arm)，二者都依赖 fire 才能烧 callback 驱动 supervisor 推进——形成『回调链本身依赖 fire』的形态，正是 clue 关切的永久挂起结构。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:425-429",
+    "finding_entity_id": "msg_01KZ095QCRSFJCF5PTPTKYNW82",
+    "quote": "  private refreshLock(): void {\n    if (!this.active) return\n    this.store.acquireSchedulerLock(this.ownerId, this.lockTtlMs)\n    this.lockRefreshTimer = this.timer.setTimeout(() => this.refreshLock(), this.lockRefreshIntervalMs)\n  }",
+    "seq": 1,
+    "why_relevant": "refreshLock 调用 acquireSchedulerLock 但完全不接收其返回值；丢锁后既不翻 this.active=false 也不调 stop()，只把自身 timer 重 arm——这是活跃 owner 永不感知丢锁、split-brain 不可自愈的精确根因。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:62-65",
+    "finding_entity_id": "msg_01KZ095QCRSFJCF5PTPTKYNW82",
+    "quote": "    const acquired = this.store.acquireSchedulerLock(this.ownerId, this.lockTtlMs)\n    if (!acquired) {\n      throw new Error('failed to acquire scheduler lock; another owner may be running')\n    }",
+    "seq": 2,
+    "why_relevant": "全仓唯一检查 acquireSchedulerLock 返回值之处是 start()（line 63 `if (!acquired)`）；证明实现明知 false 语义=锁被他人持有，而 refreshLock 复用了同一次调用却漏抄同一检查——属遗漏而非有意放弃。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:685-699",
+    "finding_entity_id": "msg_01KZ095QCRSFJCF5PTPTKYNW82",
+    "quote": "  acquireSchedulerLock(ownerId: string, lockTtlMs: number): boolean {\n    return this.db.transaction(() => {\n      const existing = this.db.prepare('SELECT * FROM scheduler_lock LIMIT 1').get() as SchedulerLockRow | undefined\n      const now = new Date()\n      if (existing && Date.parse(existing.expires_at) > now.getTime()) {\n        if (existing.owner_id !== ownerId) return false\n      }\n      this.db.prepare('DELETE FROM scheduler_lock').run()\n      const expiresAt = new Date(now.getTime() + lockTtlMs).toISOString()\n      this.db.prepare(\n        'INSERT INTO scheduler_lock(owner_id, acquired_at, expires_at) VALUES (?,?,?)',\n      ).run(ownerId, now.toISOString(), expiresAt)\n      return true\n    })()\n  }",
+    "seq": 3,
+    "why_relevant": "锁仍 live(expires_at>now) 且 owner_id 不同时返回 false（line 690）——这正是旧 owner 停顿恢复后 refreshLock 收到却被丢弃的值；返回 false 时事务在 return 前不执行 DELETE/INSERT，故旧 owner 也不再续期，但调用方无从知晓。ownerId=`${pid}-${Date.now()}`(main.ts:44) 保证新旧进程 owner_id 必不同。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:431-436",
+    "finding_entity_id": "msg_01KZ095QCRSFJCF5PTPTKYNW82",
+    "quote": "  private poll(): void {\n    if (!this.active) return\n    this.pollTimer = this.timer.setTimeout(() => this.poll(), this.pollingIntervalMs)\n\n    void this.worker.processOne()\n  }",
+    "seq": 4,
+    "why_relevant": "poll 的唯一闸门是进程本地 this.active（fireTrigger:115 是同一句），从不查 ownerId/锁归属；`void this.worker.processOne()` 无 .catch，所以 demoted owner 每 pollingIntervalMs(2s) 仍向共享库 claimInvocation。fireTrigger:115 守卫同形——热路径三处(this.active×3)无一复查锁。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:585-598",
+    "finding_entity_id": "msg_01KZ095QCRSFJCF5PTPTKYNW82",
+    "quote": "  claimInvocation(now: string, leaseMs: number): ClaimedInvocation | null {\n    return this.db.transaction(() => {\n      const row = this.db.prepare(\n        \"SELECT * FROM invocations WHERE status = 'pending' AND not_before <= ? ORDER BY created_at ASC LIMIT 1\",\n      ).get(now) as InvocationRow | undefined\n      if (!row) return null\n\n      const leaseUntil = new Date(Date.now() + leaseMs).toISOString()\n      const updatedAt = new Date().toISOString()\n      const attempt = row.attempt === 0 ? 1 : row.attempt\n\n      this.db.prepare(\n        \"UPDATE invocations SET status = 'running', attempt = ?, lease_until = ?, updated_at = ? WHERE id = ?\",\n      ).run(attempt, leaseUntil, updatedAt, row.id)",
+    "seq": 5,
+    "why_relevant": "claimInvocation 的 UPDATE 只有 `WHERE id = ?`、无 `AND status='pending'` 守卫（line 597）；SELECT-then-UPDATE 跨进程非原子。WAL 下若 B 的读快照早于 A 的提交，B 会把 A 已 claim 的同一条再次置 running/覆盖 lease——双 owner 各自 processOne(每 worker 独立 this.running，invocationWorker.ts:51/72) 可对同一 invocation 双执行。WAL 序列化写者但无 busy_timeout(store.ts:133-134)，碰撞即抛 SQLITE_BUSY 经 processOne 无 catch 链杀进程。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:193-216",
+    "finding_entity_id": "msg_01KZ09A76QZ13ZMKTC54Q07VAE",
+    "quote": "    } else {\n      const newAttempt = invocation.attempt + 1\n      if (newAttempt > invocation.max_attempts) {\n        invocation.status = 'dead_letter'\n        invocation.lease_until = null\n        invocation.updated_at = now\n        this.store.updateInvocation(invocation)\n        this.store.createAuditEvent(\n          invocation.scope_id,\n          'invocation_dead_letter',\n          'invocation',\n          invocation.id,\n          { error_kind: result.errorKind ?? 'callback_failed', attempt: invocation.attempt },\n        )\n      } else {\n        const retryIdx = Math.min(invocation.attempt - 1, this.config.retryDelaysMs.length - 1)\n        const delayMs = this.config.retryDelaysMs[retryIdx]\n        invocation.status = 'retry_wait'\n        invocation.attempt = newAttempt\n        invocation.not_before = new Date(this.clock.now() + delayMs).toISOString()\n        invocation.lease_until = null\n        invocation.updated_at = now\n        this.store.updateInvocation(invocation)\n      }\n    }",
+    "seq": 1,
+    "why_relevant": "失败 callback 的 else 分支：要么 attempt 耗尽→dead_letter，否则置 status='retry_wait' 等延迟后重试——但下面的 excerpt 证明 retry_wait 永不再被 claim，故这个 else 分支事实上是单向出口。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:585-590",
+    "finding_entity_id": "msg_01KZ09A76QZ13ZMKTC54Q07VAE",
+    "quote": "  claimInvocation(now: string, leaseMs: number): ClaimedInvocation | null {\n    return this.db.transaction(() => {\n      const row = this.db.prepare(\n        \"SELECT * FROM invocations WHERE status = 'pending' AND not_before <= ? ORDER BY created_at ASC LIMIT 1\",\n      ).get(now) as InvocationRow | undefined\n      if (!row) return null",
+    "seq": 2,
+    "why_relevant": "worker 唯一的 claim 入口只选 status='pending'——retry_wait 既非 pending，not_before 再怎么过期也不会被选中，重试因此无法被二次拉起。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:472-486",
+    "finding_entity_id": "msg_01KZ09A76QZ13ZMKTC54Q07VAE",
+    "quote": "  cancelPendingInvocations(goalId: string, scopeId: string): Invocation[] {\n    return this.db.transaction(() => {\n      const rows = this.db.prepare(\n        \"SELECT * FROM invocations WHERE goal_id = ? AND scope_id = ? AND status IN ('pending','retry_wait')\",\n      ).all(goalId, scopeId) as InvocationRow[]\n      const update = this.db.prepare(\n        \"UPDATE invocations SET status = 'cancelled', updated_at = ? WHERE id = ?\",\n      )\n      const now = new Date().toISOString()\n      for (const row of rows) {\n        update.run(now, row.id)\n      }\n      return rows.map((row) => this.rowToInvocation(row))\n    })()\n  }",
+    "seq": 3,
+    "why_relevant": "全仓唯一把 retry_wait 纳入查询的代码就是这里，且只用于 goal 终止时把它 cancel——证明运行期无任何路径把 retry_wait 迁回 pending 或重新 claim，retry_wait 在 goal 存活期内是不可回收的死状态。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:655-675",
+    "finding_entity_id": "msg_01KZ09A76QZ13ZMKTC54Q07VAE",
+    "quote": "  recoverExpiredLeases(now: string, maxAttempts: number): Invocation[] {\n    return this.db.transaction(() => {\n      const rows = this.db.prepare(\n        \"SELECT * FROM invocations WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until <= ?\",\n      ).all(now) as InvocationRow[]\n      const recovered: Invocation[] = []\n      for (const row of rows) {\n        const inv = this.rowToInvocation(row)\n        const newAttempt = inv.attempt + 1\n        if (newAttempt > maxAttempts) {\n          inv.status = 'dead_letter'\n          inv.updated_at = new Date().toISOString()\n          inv.lease_until = null\n        } else {\n          const retryDelay = inv.attempt === 1 ? 5_000 : 30_000\n          inv.status = 'retry_wait'\n          inv.attempt = newAttempt\n          inv.not_before = new Date(Date.now() + retryDelay).toISOString()\n          inv.lease_until = null\n          inv.updated_at = new Date().toISOString()\n        }",
+    "seq": 4,
+    "why_relevant": "recoverExpiredLeases 把崩溃后遗留的 running invocation 也置成 retry_wait——与 finalize 同样落入不可回收终态，互证并修正 finding msg_01KZ08PTVWXHHK60J2MXKJT9QY 关于 recover 后会被再 claim 的描述。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/processRunner.ts:50-63",
+    "finding_entity_id": "msg_01KZ09CRX78GQT9CHBG0DQ1F4F",
+    "quote": "  const stdinPayload = JSON.stringify(stdinJson)\n  if (Buffer.byteLength(stdinPayload) > options.maxStdinPayloadBytes) {\n    return {\n      invocationId: '',\n      attempt: 0,\n      exitCode: null,\n      errorKind: 'stdin_too_large',\n      durationMs: 0,\n      stdoutTail: null,\n      stderrTail: null,\n      truncated: false,\n      signal: null,\n    }\n  }",
+    "seq": 1,
+    "why_relevant": "stdin_too_large 在 spawn 之前的同步检查里产生，payload 大小跨 attempt 不变——是确定性永久错误，却被 finalize 归入重试分支，证明分类把永久错误判成了可重试。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/processRunner.ts:67-89",
+    "finding_entity_id": "msg_01KZ09CRX78GQT9CHBG0DQ1F4F",
+    "quote": "  return new Promise<RunResult>((resolve) => {\n    let proc: ChildProcess\n    try {\n      proc = spawn(resolvedExecutable, command_argv.slice(1), {\n        cwd,\n        env,\n        stdio: ['pipe', 'pipe', 'pipe'],\n        detached: true,\n      })\n    } catch (err: unknown) {\n      const message = err instanceof Error ? err.message : String(err)\n      return resolve({\n        invocationId: '',\n        attempt: 0,\n        exitCode: null,\n        errorKind: 'spawn_failed',\n        durationMs: Date.now() - startedAt,\n        stdoutTail: null,\n        stderrTail: null,\n        truncated: false,\n        signal: null,\n      })\n    }",
+    "seq": 2,
+    "why_relevant": "spawn 同步抛错统一映射为 spawn_failed——覆盖 ENOENT/EAGAIN/EACCES 等含瞬态错误的集合，finalize 却把它整体判死不重试，把瞬态可恢复失败判成永久。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/processRunner.ts:141-158",
+    "finding_entity_id": "msg_01KZ09CRX78GQT9CHBG0DQ1F4F",
+    "quote": "    proc.once('error', (err) => {\n      finish(null, null, 'spawn_failed')\n    })\n\n    proc.once('close', (code, signal) => {\n      if (code === 0) {\n        finish(0, null, null)\n      } else if (signal) {\n        finish(null, signal, 'killed')\n      } else {\n        finish(code, null, 'callback_failed')\n      }\n    })\n\n    const timer = setTimeout(() => {\n      try { process.kill(-proc.pid!, 'SIGKILL') } catch { try { proc.kill('SIGKILL') } catch { /* ignore */ } }\n      finish(null, 'SIGKILL', 'callback_timeout')\n    }, timeout_seconds * 1_000)",
+    "seq": 3,
+    "why_relevant": "枚举 processRunner 实际产生的全部 errorKind：spawn_failed/killed/callback_failed/callback_timeout——注意没有 callback_unavailable，它只在 finalize 的分类里被引用却从不被生产。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:181-192",
+    "finding_entity_id": "msg_01KZ09CRX78GQT9CHBG0DQ1F4F",
+    "quote": "    } else if (result.errorKind === 'spawn_failed' || result.errorKind === 'callback_unavailable') {\n      invocation.status = 'dead_letter'\n      invocation.lease_until = null\n      invocation.updated_at = now\n      this.store.updateInvocation(invocation)\n      this.store.createAuditEvent(\n        invocation.scope_id,\n        'invocation_dead_letter',\n        'invocation',\n        invocation.id,\n        { error_kind: result.errorKind, attempt: invocation.attempt },\n      )",
+    "seq": 4,
+    "why_relevant": "直达 dead_letter 的判死分支只认 spawn_failed 与 callback_unavailable——前者把瞬态 spawn 错误一并判死，后者是 processRunner 从不产生的死分支；同时该 audit 仅写 loop-mcp 私有表、不通知 consumer（支撑 F3）。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/mcpServer.ts:81-89",
+    "finding_entity_id": "msg_01KZ09E0QVVGN7GFB546775T3K",
+    "quote": "    if (method === 'tools/list') {\n      reply.send({\n        jsonrpc: '2.0',\n        id,\n        result: {\n          tools: [\n            {\n              name: 'callback_register',\n              description: 'Register a callback command',",
+    "seq": 1,
+    "why_relevant": "tools/list 数组的开端——整个服务端工具面是 register/complete/list-monitors/cancel 的只写集，不存在任何 invocation/dead_letter/audit 读工具，证明协议层就不可观测 outcome。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/mcpServer.ts:175-185",
+    "finding_entity_id": "msg_01KZ09E0QVVGN7GFB546775T3K",
+    "quote": "            {\n              name: 'monitor_list',\n              description: 'List monitors, goals, and triggers',\n              inputSchema: {\n                type: 'object',\n                properties: {\n                  loop_id: { type: 'string' },\n                  status: { type: 'string' },\n                },\n              },\n            },",
+    "seq": 2,
+    "why_relevant": "唯一的 list 类工具 monitor_list 只列 monitors/goals/triggers，不列 invocation——dead_letter/retry_wait invocation 状态在协议上无处可查。"
+  },
+  {
+    "anchor": "/data/code/self/loop-engine-supervisor-current/loop_engine_supervisor/loopmcp.py:289-319",
+    "finding_entity_id": "msg_01KZ09E0QVVGN7GFB546775T3K",
+    "quote": "    async def loop_complete(\n        self,\n        loop_id: str,\n        summary: str,\n        evidence: str | None = None,\n        outcome: str | None = None,\n    ) -> dict:\n        args: dict[str, Any] = {\n            \"loop_id\": loop_id,\n            \"summary\": summary,\n        }\n        if evidence is not None:\n            args[\"evidence\"] = evidence\n        if outcome is not None:\n            args[\"outcome\"] = outcome\n        return await self._call_tool(\"loop_complete\", args)\n\n    async def monitor_list(\n        self,\n        loop_id: str | None = None,\n        status: str | None = None,\n    ) -> dict:\n        args: dict[str, Any] = {}\n        if loop_id is not None:\n            args[\"loop_id\"] = loop_id\n        if status is not None:\n            args[\"status\"] = status\n        return await self._call_tool(\"monitor_list\", args)\n\n    async def monitor_cancel(self, monitor_id: str) -> dict:\n        return await self._call_tool(\"monitor_cancel\", {\"monitor_id\": monitor_id})",
+    "seq": 3,
+    "why_relevant": "唯一 consumer 的 LoopMcpClient 终端方法全是写/注册/complete/list-monitors——无任何读 invocation 状态/dead_letter/audit 的方法，consumer 镜像了服务端的只写面。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:712-728",
+    "finding_entity_id": "msg_01KZ09E0QVVGN7GFB546775T3K",
+    "quote": "  ): void {\n    this.db.prepare(\n      'INSERT INTO audit_events(id, scope_id, event_type, entity_type, entity_id, payload_json, created_at) VALUES (?,?,?,?,?,?,?)',\n    ).run(\n      randomUUID(),\n      scopeId,\n      eventType,\n      entityType,\n      entityId,\n      JSON.stringify(payload),\n      new Date().toISOString(),\n    )\n  }",
+    "seq": 4,
+    "why_relevant": "createAuditEvent 是纯本地 INSERT 进 audit_events 表——dead_letter 的 invocation_dead_letter 事件只落 loop-mcp 私有库，无 emit/webhook/notify，consumer 永远收不到。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:71-86",
+    "finding_entity_id": "msg_01KZ09F71A724CC96MS6Q4ZE06",
+    "quote": "  async processOne(): Promise<boolean> {\n    if (!this.active || this.running) return false\n    this.running = true\n    try {\n      const now = this.clock.iso()\n      const claimed = this.store.claimInvocation(now, 30_000)\n      if (!claimed) return false\n\n      const result = await this.executeInvocation(claimed)\n      await this.finalizeInvocation(claimed.invocation, result, claimed.goal)\n\n      return true\n    } finally {\n      this.running = false\n    }\n  }",
+    "seq": 1,
+    "why_relevant": "processOne 以 running 布尔做非重入互斥——同一时刻整个 worker 只能有一个 invocation 在 executeInvocation 里跑，这是单线程 backpressure 的根。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:431-436",
+    "finding_entity_id": "msg_01KZ09F71A724CC96MS6Q4ZE06",
+    "quote": "  private poll(): void {\n    if (!this.active) return\n    this.pollTimer = this.timer.setTimeout(() => this.poll(), this.pollingIntervalMs)\n\n    void this.worker.processOne()\n  }",
+    "seq": 2,
+    "why_relevant": "poll 每个 tick 恰调一次 processOne 且用 void(无 .catch)——worker 处理速率被这个 2s 串行泵限定，长 callback 期间的 poll 都因 running=true 空转，其他 goal 排队。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/main.ts:44-55",
+    "finding_entity_id": "msg_01KZ09F71A724CC96MS6Q4ZE06",
+    "quote": "  const ownerId = `${process.pid}-${Date.now()}`\n  const scheduler = new Scheduler({\n    store,\n    config,\n    worker,\n    policy,\n    clock,\n    timer,\n    ownerId,\n    lockRefreshIntervalMs: 5_000,\n    lockTtlMs: 15_000,\n    pollingIntervalMs: 2_000,\n    checkLegacyOwner: opts?.checkLegacyOwner,\n  })",
+    "seq": 3,
+    "why_relevant": "运行态把 pollingIntervalMs 固定为 2s——即 worker 串行泵的节拍，决定了长 callback 期间其他 invocation 被延后的粒度。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/domain.ts:131-141",
+    "finding_entity_id": "msg_01KZ09F71A724CC96MS6Q4ZE06",
+    "quote": "  MAX_ATTEMPTS: 3,\n  DEFAULT_RETRY_DELAYS_MS: [5_000, 30_000] as [number, number],\n  DEFAULT_TIMEOUT_SECONDS: 30,\n  MAX_TIMEOUT_SECONDS: 300,\n  MIN_WATCH_INTERVAL_SECONDS: 10,\n  MIN_RECURRING_INTERVAL_SECONDS: 60,\n  DEFAULT_FALLBACK_INTERVAL_SECONDS: 1_800,\n  DEFAULT_MAX_ITERATIONS: 20,\n  DEFAULT_TTL_SECONDS: 604_800,\n  MAX_FIRING_PAYLOAD_BYTES: 4 * 1024,\n  MAX_CONCURRENT_FIRINGS: 32,",
+    "seq": 4,
+    "why_relevant": "量化上界所依赖的默认值：max_attempts=3、callback 超时 30s、max_iterations=20、TTL 7d、并发 firing 上限 32(但 invocation 执行始终=1)，据此算出坏 goal 最坏约 20 fire × 30s 的 worker 占用。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:901-918",
+    "finding_entity_id": "msg_01KZ0A9SSSY4EXHM9E6G9K7FDP",
+    "quote": "      if (!invocation) {\n        invocation = {\n          id: randomUUID(),\n          scope_id: scopeId,\n          goal_id: goalId,\n          callback_id: callbackId,\n          status: 'pending',\n          attempt: 0,\n          max_attempts: maxAttempts,\n          not_before: now,\n          lease_until: null,\n          merged_count: 1,\n          created_at: now,\n          updated_at: now,\n        }\n        this.createInvocation(invocation)\n        this.linkFiringToInvocation(invocation.id, firing.id)\n      }",
+    "seq": 1,
+    "why_relevant": "Phase C：当事务内 SELECT 俱未命中 pending/running 时无条件 createInvocation 全新 pending。WAL 下两 owner 同 tick 各自事务的读快照可俱早于对端提交→两 owner 都落在此分支→两条独立可 claim 的 pending→同一 callback 双执行（子问1）。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:585-598",
+    "finding_entity_id": "msg_01KZ0A9SSSY4EXHM9E6G9K7FDP",
+    "quote": "  claimInvocation(now: string, leaseMs: number): ClaimedInvocation | null {\n    return this.db.transaction(() => {\n      const row = this.db.prepare(\n        \"SELECT * FROM invocations WHERE status = 'pending' AND not_before <= ? ORDER BY created_at ASC LIMIT 1\",\n      ).get(now) as InvocationRow | undefined\n      if (!row) return null\n\n      const leaseUntil = new Date(Date.now() + leaseMs).toISOString()\n      const updatedAt = new Date().toISOString()\n      const attempt = row.attempt === 0 ? 1 : row.attempt\n\n      this.db.prepare(\n        \"UPDATE invocations SET status = 'running', attempt = ?, lease_until = ?, updated_at = ? WHERE id = ?\",\n      ).run(attempt, leaseUntil, updatedAt, row.id)",
+    "seq": 2,
+    "why_relevant": "SELECT 带 status='pending' 守卫但 UPDATE 只 WHERE id=? 无 status='pending'——子问3。快照早于对端提交者会把对端已置 running 的同一行再次置 running 并覆盖 lease_until/attempt，两 owner 各返回同一 ClaimedInvocation→双执行；若 UPDATE 带 AND status='pending' 则影响 0 行可被检测，缺失即静默。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:276-283",
+    "finding_entity_id": "msg_01KZ0A9SSSY4EXHM9E6G9K7FDP",
+    "quote": "    const intervalSeconds = typeof spec.interval_seconds === 'number'\n      ? spec.interval_seconds\n      : this.config.defaultFallbackIntervalSeconds\n\n    trigger.fires++\n    trigger.next_fire_at = new Date(this.clock.now() + intervalSeconds * 1_000).toISOString()\n    this.store.updateTrigger(trigger)\n    this.scheduleTrigger(trigger)",
+    "seq": 3,
+    "why_relevant": "fireCron 的 RMW 写侧：trigger 对象早在 fireTrigger:117 由 getTriggerById 读入并跨 await 持有，此处内存 ++ 后整对象回写。两 owner 同 tick 俱读到同一旧 fires 值→各自 +1 回写→一次自增丢失→fires 低估→子问2（fireWatch 同构于 :362/:419）。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:441-455",
+    "finding_entity_id": "msg_01KZ0A9SSSY4EXHM9E6G9K7FDP",
+    "quote": "  updateTrigger(trg: Trigger): void {\n    this.db.prepare(\n      `UPDATE triggers SET status = ?, next_fire_at = ?, fires = ?, last_output_hash = ?, consecutive_probe_failures = ?, spec_json = ?\n       WHERE id = ? AND scope_id = ?`,\n    ).run(\n      trg.status,\n      trg.next_fire_at ?? null,\n      trg.fires,\n      trg.last_output_hash ?? null,\n      trg.consecutive_probe_failures,\n      JSON.stringify(trg.spec_json),\n      trg.id,\n      trg.scope_id,\n    )\n  }",
+    "seq": 4,
+    "why_relevant": "整列回写且 WHERE 只按 id——是子问2 lost-update 的物化点：不仅 fires 整列覆盖（后写者用 stale fires 覆盖先写者），status 也整列覆盖，故对端把已 expired 的行用 stale 的 active 整列复活，构成比 fires 低估更严重的状态发散。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/mcpServer.ts:33-37",
+    "finding_entity_id": "msg_01KZ0A9SSSY4EXHM9E6G9K7FDP",
+    "quote": "  app.get('/healthz', async (_request, reply) => {\n    const lock = store.getSchedulerLock()\n    const dbReady = true\n    const ownership = lock !== null\n    const recovery = true",
+    "seq": 5,
+    "why_relevant": "围栏证据：getSchedulerLock 的唯一调用方是 /healthz，且只取布尔 ownership 写进响应——纯诊断。全仓 grep 确认 recordFiringAndCoalesce/claimInvocation/updateTrigger/recordAttempt/createAuditEvent 任何写前都不读 scheduler_lock，证明热路径无锁围栏（围栏问题答案=无）。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:131-136",
+    "finding_entity_id": "msg_01KZ0A9STCTESNJ301MZH6KC87",
+    "quote": "  constructor(dbPath: string) {\n    this.db = new Database(dbPath)\n    this.db.pragma('journal_mode = WAL')\n    this.db.pragma('foreign_keys = ON')\n    this.runMigrations()\n  }",
+    "seq": 1,
+    "why_relevant": "构造期仅设 journal_mode 与 foreign_keys 两个 pragma，无 busy_timeout——全仓与 config 均无该键（grep 互证）。WAL 下写者仍互斥，busy_timeout=0 意味着第二写者立即拿 SQLITE_BUSY 而非等待，是子问4 的根因。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:71-86",
+    "finding_entity_id": "msg_01KZ0A9STCTESNJ301MZH6KC87",
+    "quote": "  async processOne(): Promise<boolean> {\n    if (!this.active || this.running) return false\n    this.running = true\n    try {\n      const now = this.clock.iso()\n      const claimed = this.store.claimInvocation(now, 30_000)\n      if (!claimed) return false\n\n      const result = await this.executeInvocation(claimed)\n      await this.finalizeInvocation(claimed.invocation, result, claimed.goal)\n\n      return true\n    } finally {\n      this.running = false\n    }\n  }",
+    "seq": 2,
+    "why_relevant": "逃逸链第一环：try/finally 只复位 this.running，无 catch。claimInvocation 是同步 db.transaction，其抛出的 SQLITE_BUSY 直传成 rejected promise 逸出 processOne（finalizeInvocation 内的 store.transaction 同理）。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:431-436",
+    "finding_entity_id": "msg_01KZ0A9STCTESNJ301MZH6KC87",
+    "quote": "  private poll(): void {\n    if (!this.active) return\n    this.pollTimer = this.timer.setTimeout(() => this.poll(), this.pollingIntervalMs)\n\n    void this.worker.processOne()\n  }",
+    "seq": 3,
+    "why_relevant": "逃逸链第二环：`void this.worker.processOne()` 丢弃返回的 promise 且不挂 .catch——processOne 逸出的 rejection 没有任何消费者。poll 每 pollingIntervalMs(2s) 重排，单 owner 假设下 processOne 不抛，故此 void 在并发写入出现前是惰性的。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/main.ts:84-91",
+    "finding_entity_id": "msg_01KZ0A9STCTESNJ301MZH6KC87",
+    "quote": "  startLoopMcp(configPath, { checkLegacyOwner }).then(({ app, config: cfg }) => {\n    app.listen({ port: cfg.port, host: cfg.host }).then((address) => {\n      console.log(`loop-mcp listening on ${address}`)\n    })\n  }).catch((err) => {\n    console.error('failed to start loop-mcp:', err)\n    process.exit(1)\n  })",
+    "seq": 4,
+    "why_relevant": "逃逸链终点：全文唯一的错误处理是 startup 阶段的 .catch(process.exit(1))，main.ts 无任何 process.on('unhandledRejection'/'uncaughtException')（grep 互证）——故 poll 逸出的 unhandledRejection 无 handler 接，Node 默认杀进程。与 finding seq39 互证。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:655-675",
+    "finding_entity_id": "msg_01KZ0AAZXA0T0TMXMTEPXF3DX9",
+    "quote": "  recoverExpiredLeases(now: string, maxAttempts: number): Invocation[] {\n    return this.db.transaction(() => {\n      const rows = this.db.prepare(\n        \"SELECT * FROM invocations WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until <= ?\",\n      ).all(now) as InvocationRow[]\n      const recovered: Invocation[] = []\n      for (const row of rows) {\n        const inv = this.rowToInvocation(row)\n        const newAttempt = inv.attempt + 1\n        if (newAttempt > maxAttempts) {\n          inv.status = 'dead_letter'\n          inv.updated_at = new Date().toISOString()\n          inv.lease_until = null\n        } else {\n          const retryDelay = inv.attempt === 1 ? 5_000 : 30_000\n          inv.status = 'retry_wait'\n          inv.attempt = newAttempt\n          inv.not_before = new Date(Date.now() + retryDelay).toISOString()\n          inv.lease_until = null\n          inv.updated_at = new Date().toISOString()\n        }",
+    "seq": 1,
+    "why_relevant": "recoverExpiredLeases 的唯一产物是把 running orphan 改写成 retry_wait(或超限 dead_letter)、清 lease_until、attempt+1——它从不写回 'pending'。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:587-590",
+    "finding_entity_id": "msg_01KZ0AAZXA0T0TMXMTEPXF3DX9",
+    "quote": "      const row = this.db.prepare(\n        \"SELECT * FROM invocations WHERE status = 'pending' AND not_before <= ? ORDER BY created_at ASC LIMIT 1\",\n      ).get(now) as InvocationRow | undefined\n      if (!row) return null",
+    "seq": 2,
+    "why_relevant": "claimInvocation 选取条件硬性限定 status='pending'——retry_wait 行永不被领取，故 recoverExpiredLeases 写出的 retry_wait 不会被再次 claim/spawn。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:472-479",
+    "finding_entity_id": "msg_01KZ0AAZXA0T0TMXMTEPXF3DX9",
+    "quote": "  cancelPendingInvocations(goalId: string, scopeId: string): Invocation[] {\n    return this.db.transaction(() => {\n      const rows = this.db.prepare(\n        \"SELECT * FROM invocations WHERE goal_id = ? AND scope_id = ? AND status IN ('pending','retry_wait')\",\n      ).all(goalId, scopeId) as InvocationRow[]\n      const update = this.db.prepare(\n        \"UPDATE invocations SET status = 'cancelled', updated_at = ? WHERE id = ?\",\n      )",
+    "seq": 3,
+    "why_relevant": "全仓 retry_wait 的唯一读取者是 cancelPendingInvocations，它把行改成 'cancelled'(仅 terminateGoal 调用)而非回 'pending'——证明 retry_wait 是不可回收终态，与 seq53 互证。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:67-74",
+    "finding_entity_id": "msg_01KZ0AAZXEQM2W96BVDG2A2G8V",
+    "quote": "    this.worker.start()\n\n    this.recoverExpiredLeases()\n    this.rebuildTimers()\n\n    this.lockRefreshTimer = this.timer.setTimeout(() => this.refreshLock(), this.lockRefreshIntervalMs)\n    this.pollTimer = this.timer.setTimeout(() => this.poll(), this.pollingIntervalMs)",
+    "seq": 1,
+    "why_relevant": "recoverExpiredLeases 只在 start() 启动期调用一次；之后只装了 refreshLock 与 poll 两个定时器——运行期没有任何再调用 recoverExpiredLeases 的路径。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/scheduler.ts:431-436",
+    "finding_entity_id": "msg_01KZ0AAZXEQM2W96BVDG2A2G8V",
+    "quote": "  private poll(): void {\n    if (!this.active) return\n    this.pollTimer = this.timer.setTimeout(() => this.poll(), this.pollingIntervalMs)\n\n    void this.worker.processOne()\n  }",
+    "seq": 2,
+    "why_relevant": "poll 每 2s 只调 worker.processOne()，不调 recoverExpiredLeases——证实运行期无周期性 lease sweep，orphan 只能等下一次重启。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:75-77",
+    "finding_entity_id": "msg_01KZ0AAZXEQM2W96BVDG2A2G8V",
+    "quote": "      const now = this.clock.iso()\n      const claimed = this.store.claimInvocation(now, 30_000)\n      if (!claimed) return false",
+    "seq": 3,
+    "why_relevant": "lease 硬编码 30_000ms 字面量、直接传给 claimInvocation，不来自 config 或 callback.timeout_seconds——与可配到 300s 的 callback timeout 失配。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/domain.ts:133-134",
+    "finding_entity_id": "msg_01KZ0AAZXEQM2W96BVDG2A2G8V",
+    "quote": "  DEFAULT_TIMEOUT_SECONDS: 30,\n  MAX_TIMEOUT_SECONDS: 300,",
+    "seq": 4,
+    "why_relevant": "单个 callback 的 timeout_seconds 注册时可高达 300s，远超固定 30s lease——任何 timeout>30s 的合法长 callback 跨重启时 lease 必先过期。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/processRunner.ts:69-75",
+    "finding_entity_id": "msg_01KZ0AAZXGEFH7BXSMNRQBPZHQ",
+    "quote": "    try {\n      proc = spawn(resolvedExecutable, command_argv.slice(1), {\n        cwd,\n        env,\n        stdio: ['pipe', 'pipe', 'pipe'],\n        detached: true,\n      })",
+    "seq": 1,
+    "why_relevant": "callback 子进程以 detached:true 启动(独立进程组)，且全仓无 proc.unref()——父进程被信号杀死时该子进程不受信号、继续运行(被 init 收养)。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/processRunner.ts:155-158",
+    "finding_entity_id": "msg_01KZ0AAZXGEFH7BXSMNRQBPZHQ",
+    "quote": "    const timer = setTimeout(() => {\n      try { process.kill(-proc.pid!, 'SIGKILL') } catch { try { proc.kill('SIGKILL') } catch { /* ignore */ } }\n      finish(null, 'SIGKILL', 'callback_timeout')\n    }, timeout_seconds * 1_000)",
+    "seq": 2,
+    "why_relevant": "timeout 强杀完全靠父进程内的 setTimeout+process.kill(-pid)；父进程一死该定时器即失效——detached orphan 不再受 timeout_seconds 约束。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/main.ts:63-91",
+    "finding_entity_id": "msg_01KZ0AAZXGEFH7BXSMNRQBPZHQ",
+    "quote": "  const stop = async () => {\n    await scheduler.stop()\n    store.close()\n  }\n\n  return { app, scheduler, config, stop }\n}",
+    "seq": 3,
+    "why_relevant": "stop() 定义了却从未绑定到任何信号(全仓 grep SIGTERM/SIGINT/process.on 零命中，入口 main.ts:84-91 直接 app.listen)；SIGTERM 走 Node 默认硬退出——scheduler.stop()/store.close() 不执行，在飞 runCommand 与 detached 子进程被遗弃。"
+  },
+  {
+    "anchor": "/data/code/self/loop-engine-supervisor-current/loop_engine_supervisor/supervision.py:62-67",
+    "finding_entity_id": "msg_01KZ0AAZXK34JTZQEBG9GFFST1",
+    "quote": "            callback_result = await self._client.callback_register(\n                description=f\"supervisor turn callback for unit {unit_id}\",\n                command=list(self._config.turn_command) + [\"--unit\", unit_id],\n                timeout_seconds=self._config.callback_timeout_seconds,\n                idempotency_key=f\"{unit_id}:callback\",\n            )",
+    "seq": 1,
+    "why_relevant": "consumer 回调命令是 turn_command --unit <id>；idempotency_key 是 callback_register 注册 RPC 的去重键，不进入 envelope、不参与 invocation 级执行去重。"
+  },
+  {
+    "anchor": "/data/code/self/loop-engine-supervisor-current/loop_engine_supervisor/config.py:147-148",
+    "finding_entity_id": "msg_01KZ0AAZXK34JTZQEBG9GFFST1",
+    "quote": "    callback_timeout_seconds = _bounded_int(\n        loop_mcp_cfg, \"callback_timeout_seconds\", 30, 1, 300",
+    "seq": 2,
+    "why_relevant": "consumer 可把 callback timeout 配到上限 300s(默认 30)，与 loop-mcp 固定 30s lease 的失配在 consumer 侧可被触发。"
+  },
+  {
+    "anchor": "/data/code/self/loop-engine-supervisor-current/loop_engine_supervisor/supervision.py:108-112",
+    "finding_entity_id": "msg_01KZ0AAZXK34JTZQEBG9GFFST1",
+    "quote": "                interval_seconds=self._config.watch_interval_seconds,\n                fire_mode=\"on_change\",\n                goal_id=goal_id,\n                callback_id=callback_id,\n                idempotency_key=f\"{unit_id}:watch\",",
+    "seq": 3,
+    "why_relevant": "consumer 唯一的执行级去重是 watch 的 fire_mode='on_change' 哈希，仅在 watch 路径生效，不覆盖 cron/wakeup 与重启路径。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:176-180",
+    "finding_entity_id": "msg_01KZ0AFM7R9MFVJQA8SR0XB8Z4",
+    "quote": "        if (goal && goal.status !== 'active') {\n          this.startSuccessor(invocation, false)\n        } else {\n          this.startSuccessor(invocation, goal !== null)\n        }",
+    "seq": 1,
+    "why_relevant": "被疑“反转”的调度本体：goal 终止→startSuccessor(inv,false)走 trigger-level；active→startSuccessor(inv,true)走 goal-level；无 goal→startSuccessor(inv,false)走 trigger-level。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:221-247",
+    "finding_entity_id": "msg_01KZ0AFM7R9MFVJQA8SR0XB8Z4",
+    "quote": "  private startSuccessor(completedInv: Invocation, hasGoal: boolean): void {\n    if (hasGoal && completedInv.goal_id) {\n      const successor = this.store.getPendingInvocationForGoal(completedInv.goal_id, completedInv.scope_id)\n      if (successor && successor.id !== completedInv.id) {\n        const now = this.clock.iso()\n        const goal = this.store.getGoal(completedInv.goal_id, completedInv.scope_id)\n        if (goal && goal.status === 'active') {\n          successor.status = 'pending'\n          successor.not_before = now\n          successor.updated_at = now\n          this.store.updateInvocation(successor)\n        }\n      }\n    } else if (!hasGoal) {\n      const firings = this.store.getFiringsForInvocation(completedInv.id)\n      if (firings.length > 0) {\n        const triggerId = firings[0].trigger_id\n        const successor = this.store.getPendingInvocationForTrigger(triggerId, completedInv.scope_id)\n        if (successor && successor.id !== completedInv.id) {\n          const now = this.clock.iso()\n          successor.status = 'pending'\n          successor.not_before = now\n          successor.updated_at = now\n          this.store.updateInvocation(successor)\n        }\n      }\n    }\n  }",
+    "seq": 2,
+    "why_relevant": "两条后继路径不对称：goal-level(222-233)在 226 fresh getGoal、227 再判 active 才复活，对运行期终止的过期 goal 自洽 no-op；trigger-level(234-247)仅按 trigger_id 找 pending 即复活，无状态自检——line-176 特例正把终止 goal 导离前者塞进后者。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/invocationWorker.ts:76-80",
+    "finding_entity_id": "msg_01KZ0AFM7R9MFVJQA8SR0XB8Z4",
+    "quote": "      const claimed = this.store.claimInvocation(now, 30_000)\n      if (!claimed) return false\n\n      const result = await this.executeInvocation(claimed)\n      await this.finalizeInvocation(claimed.invocation, result, claimed.goal)",
+    "seq": 3,
+    "why_relevant": "finalizeInvocation 收到的 goal 是 claim 时刻(claimInvocation 事务内)读的快照，可早于 finalize 时真实 goal 状态——这是 goal-level 路径需在 226 fresh 重读的根因，也说明 line-176 用快照 goal.status 分流本身即依赖可能过期的判定。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:472-486",
+    "finding_entity_id": "msg_01KZ0AHMYF8FDYJ7SEXR488VNZ",
+    "quote": "  cancelPendingInvocations(goalId: string, scopeId: string): Invocation[] {\n    return this.db.transaction(() => {\n      const rows = this.db.prepare(\n        \"SELECT * FROM invocations WHERE goal_id = ? AND scope_id = ? AND status IN ('pending','retry_wait')\",\n      ).all(goalId, scopeId) as InvocationRow[]\n      const update = this.db.prepare(\n        \"UPDATE invocations SET status = 'cancelled', updated_at = ? WHERE id = ?\",\n      )\n      const now = new Date().toISOString()\n      for (const row of rows) {\n        update.run(now, row.id)\n      }\n      return rows.map((row) => this.rowToInvocation(row))\n    })()\n  }",
+    "seq": 1,
+    "why_relevant": "取消面覆盖 pending 与 retry_wait 两态、按 goal_id 精确取消——这是终止 goal 的 pending 后继不复存在、getPendingInvocationForTrigger join 落空的直接原因。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:797-801",
+    "finding_entity_id": "msg_01KZ0AHMYF8FDYJ7SEXR488VNZ",
+    "quote": "      this.updateGoalStatus(goal)\n      this.disableGoalTriggers(goalId, scopeId, now)\n      this.cancelPendingInvocations(goalId, scopeId)\n\n      return goal",
+    "seq": 2,
+    "why_relevant": "terminateGoal 写完非 active status 后无条件连调 disableGoalTriggers + cancelPendingInvocations——任一 goal 终止必先清空其 pending invocation 与活跃 trigger，使 line-176 前提不可达。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:587-590",
+    "finding_entity_id": "msg_01KZ0AHMYF8FDYJ7SEXR488VNZ",
+    "quote": "      const row = this.db.prepare(\n        \"SELECT * FROM invocations WHERE status = 'pending' AND not_before <= ? ORDER BY created_at ASC LIMIT 1\",\n      ).get(now) as InvocationRow | undefined\n      if (!row) return null",
+    "seq": 3,
+    "why_relevant": "claimInvocation 只挑 status='pending'——被 cancelPendingInvocations 置 cancelled 的 invocation 不会被领取，故非 active goal 无 invocation 可达 processOne/finalizeInvocation。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/store.ts:607-613",
+    "finding_entity_id": "msg_01KZ0AHMYF8FDYJ7SEXR488VNZ",
+    "quote": "      let goal: Goal | null = null\n      if (invocation.goal_id) {\n        const goalRow = this.db.prepare(\n          'SELECT * FROM goals WHERE id = ? AND scope_id = ?',\n        ).get(invocation.goal_id, invocation.scope_id) as GoalRow | undefined\n        if (goalRow) goal = this.rowToGoal(goalRow)\n      }",
+    "seq": 4,
+    "why_relevant": "claimed.goal 在 claimInvocation 事务内 fresh 读取——若 goal 已终止且其 invocation 已被取消，则根本不会被 claim；能被 claim 的必然 goal 仍 active(或运行期才终止、走 F1 的 stale-active 路径)。"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/domain.ts:1",
+    "finding_entity_id": "msg_01KZ0AHMYF8FDYJ7SEXR488VNZ",
+    "quote": "export type GoalStatus = 'active' | 'completed' | 'cancelled' | 'expired'",
+    "seq": 5,
+    "why_relevant": "active 之外只有三种终态、且仅由 terminateGoal 写入——不存在“非 active 又未触发 cancelPendingInvocations”的中间状态可让 line-176 在未清场时被触达。"
+  },
+  {
+    "anchor": "docs/specs/SPEC-agent-bus.md:112-121",
+    "finding_entity_id": "msg_01KYY4JX47WW62TQWDY5WMTW70",
+    "quote": "### 判断 4：fanout 与 queue 在同一张 `deliveries` 表 —— 靠一个唯一索引换意义\n\n```sql\nCREATE UNIQUE INDEX idx_deliveries_claim ON deliveries(message_id, claim_key);\n```\n\n- `delivery_mode='queue'` → `claim_key=''`：每条消息**最多一行** delivery → 抢单互斥在结构上不可违反\n- `delivery_mode='fanout'` → `claim_key=agent_id`：每 `(消息, agent)` 一行 → 每个订阅者独立的 at-least-once 生命周期\n\n同一套 `consume`/`ack`/`nack` 代码路径。用触发器强制（`CHECK` 不能子查询 `channels`）。重新 claim 是 **UPDATE 既有行**而非插新行 —— delivery 行就是「claim 槽位」，与 `store.ts::_tryReclaimStale()` 同构。",
+    "seq": 1,
+    "why_relevant": "语义定义与设计动机的原点：两种模式不是两套机制，而是同一 deliveries 表上 claim_key 取值不同，由唯一索引把「互斥」与「各自一份」变成结构不变量。"
+  },
+  {
+    "anchor": "docs/specs/SPEC-agent-bus.md:291-298",
+    "finding_entity_id": "msg_01KYY4JX47WW62TQWDY5WMTW70",
+    "quote": "CREATE TRIGGER IF NOT EXISTS deliveries_queue_claim_key BEFORE INSERT ON deliveries\nWHEN (SELECT delivery_mode FROM channels WHERE channel_id=NEW.channel_id)='queue'\n     AND NEW.claim_key <> ''\nBEGIN SELECT RAISE(ABORT, 'CLAIM_KEY_MODE_MISMATCH'); END;\nCREATE TRIGGER IF NOT EXISTS deliveries_fanout_claim_key BEFORE INSERT ON deliveries\nWHEN (SELECT delivery_mode FROM channels WHERE channel_id=NEW.channel_id)='fanout'\n     AND NEW.claim_key <> NEW.agent_id\nBEGIN SELECT RAISE(ABORT, 'CLAIM_KEY_MODE_MISMATCH'); END;",
+    "seq": 2,
+    "why_relevant": "delivery_mode 与 claim_key 的绑定由数据库触发器强制（附 immutable_channel_mode：模式建后不可改），说明模式差异被固化在存储层而非调用方约定。"
+  },
+  {
+    "anchor": "agent_bus/db.py:641-655",
+    "finding_entity_id": "msg_01KYY4JX47WW62TQWDY5WMTW70",
+    "quote": "    def select_claimable_fanout(self, channel_id: str, agent_id: str, cursor_floor: int,\n                                 max_attempts: int, max_messages: int, now: str) -> list[dict[str, Any]]:\n        sql = \"\"\"\n            SELECT m.message_id, m.channel_seq, m.payload_json, m.kind, m.entity_id,\n                   d.delivery_id, d.state, d.attempt\n              FROM messages m\n              LEFT JOIN deliveries d ON d.message_id=m.message_id AND d.claim_key=:caller\n             WHERE m.channel_id=:cid AND m.available_at<=:now\n               AND m.channel_seq > :cursor_floor",
+    "seq": 3,
+    "why_relevant": "实现层的两处唯一差异：fanout 的 LEFT JOIN 用 claim_key=:caller（对比 select_claimable_queue 的 claim_key=''，db.py:624），且多一条 channel_seq > :cursor_floor 的游标下界；其余候选条件与排序完全相同。"
+  },
+  {
+    "anchor": "agent_bus/bus.py:519-532",
+    "finding_entity_id": "msg_01KYY4JX47WW62TQWDY5WMTW70",
+    "quote": "        with self.db.transaction():\n            if channel[\"delivery_mode\"] == \"queue\":\n                candidates = self.db.select_claimable_queue(channel_id, max_attempts, max_messages, now)\n            else:\n                candidates = self.db.select_claimable_fanout(\n                    channel_id, agent_id, cursor_floor,\n                    max_attempts, max_messages, now,\n                )\n\n            for candidate in candidates:\n                delivery_id = new_ulid(\"del\")\n                lease_token = new_ulid(\"lse\")\n                message_id = candidate[\"message_id\"]\n                claim_key = \"\" if channel[\"delivery_mode\"] == \"queue\" else agent_id",
+    "seq": 4,
+    "why_relevant": "consume 的模式分叉只在候选选取与 claim_key 赋值两行；租约、重投、attempt/max_attempts、事件写入之后共用同一段代码 —— 印证 spec「同一套 consume/ack/nack 代码路径」。"
+  },
+  {
+    "anchor": "docs/specs/SPEC-agent-bus.md:136-139",
+    "finding_entity_id": "msg_01KYY4KETQDDJ0GHD6NQ9P26EG",
+    "quote": "### 判断 6：租约回收 = 惰性回收为主，reaper 为辅\n\n- **惰性**（`select_claimable` 的候选条件里包含 `state='leased' AND lease_expires_at <= now`）是**权威路径**。正确性不能依赖后台线程存活：惰性方案里 reaper 死了下次 consume 照样重投；reaper-only 方案里 reaper 死了队列静默停摆。\n- **reaper 线程**（2s tick，daemon，仿 `_reconciler_loop`）只做惰性做不到的：发 `expired` 事件供观测、把 `attempt >= max_attempts` 提升为 `state='dead'` 使耗尽的活不再被投递。**永不在正确性路径上**。",
+    "seq": 1,
+    "why_relevant": "spec 直接规定租约超时重投的权威机制是 consume 时的惰性回收，reaper 只补观测事件与 dead 提升。"
+  },
+  {
+    "anchor": "agent_bus/db.py:618-639",
+    "finding_entity_id": "msg_01KYY4KETQDDJ0GHD6NQ9P26EG",
+    "quote": "        sql = \"\"\"\n            SELECT m.message_id, m.channel_seq, m.payload_json, m.kind, m.entity_id,\n                   d.delivery_id, d.state, d.attempt\n              FROM messages m\n              LEFT JOIN deliveries d ON d.message_id=m.message_id AND d.claim_key=''\n             WHERE m.channel_id=:cid AND m.available_at<=:now\n               AND (m.expires_at IS NULL OR m.expires_at>:now)\n               AND ( d.delivery_id IS NULL\n                  OR (d.state='nacked' AND d.attempt<:max_attempts\n                      AND (d.next_available_at_ms=0 OR d.next_available_at_ms<=:now_ms))\n                  OR (d.state='leased' AND d.lease_expires_at<=:now) )\n             ORDER BY m.channel_seq ASC LIMIT :max_messages\n        \"\"\"",
+    "seq": 2,
+    "why_relevant": "queue 候选查询实证惰性回收：claim_key='' 使每条消息至多一行 delivery，过期 leased 与未耗尽 nacked 均重新可 claim。"
+  },
+  {
+    "anchor": "agent_bus/bus.py:534-566",
+    "finding_entity_id": "msg_01KYY4KETQDDJ0GHD6NQ9P26EG",
+    "quote": "                if candidate[\"delivery_id\"]:\n                    observed_state = candidate[\"state\"]\n                    if candidate[\"attempt\"] >= max_attempts and observed_state == \"leased\":\n                        self.db.reclaim_delivery_dead(\n                            candidate[\"delivery_id\"], agent_id, now,\n                        )",
+    "seq": 3,
+    "why_relevant": "consume 路径自身在重 claim 前判 attempt>=max_attempts 并直接转 dead，说明耗尽判定不依赖 reaper 存活。"
+  },
+  {
+    "anchor": "agent_bus/db.py:720-749",
+    "finding_entity_id": "msg_01KYY4KETQDDJ0GHD6NQ9P26EG",
+    "quote": "    def nack_delivery(self, delivery_id: str, lease_token: str, agent_id: str,\n                      reason: str = \"\", retry_in_ms: int = 0) -> tuple[bool, int, bool]:\n        now = utcnow()\n        from agent_bus.models import utcnow_ms\n        now_ms = utcnow_ms()\n        next_available = now_ms + retry_in_ms if retry_in_ms > 0 else 0\n        rows = self.execute(\n            \"UPDATE deliveries SET state=?, nack_reason=?, next_available_at_ms=?, updated_at=? \"\n            \"WHERE delivery_id=? AND lease_token=? AND state=? AND agent_id=? AND lease_expires_at > ?\",",
+    "seq": 4,
+    "why_relevant": "nack 的 SQL 同时用 lease_token、agent_id 与未过期条件围栏，并用 retry_in_ms 写入 next_available_at_ms 实现退避重投。"
+  },
+  {
+    "anchor": "docs/specs/SPEC-agent-bus.md:790",
+    "finding_entity_id": "msg_01KZ01NNGGPM1Y462J7R1VYYRG",
+    "quote": "Fanout cursor是“连续已 ack/终止水位”，不是 `MAX(acked_seq)`。Ack seq 3时若seq 2未ack，cursor不能越过2；补ack2后可一次推进。推进与ack在同一transaction。允许跳过已经TTL terminal的gap，但不能跳过future-available或仍可投递的gap。Queue不使用per-agent cursor推进。",
+    "seq": 1,
+    "why_relevant": "spec 对 fanout cursor 语义的权威定义：连续已 ack/终止水位而非 MAX(acked_seq)，并明确 queue 不使用 per-agent cursor 推进。"
+  },
+  {
+    "anchor": "agent_bus/bus.py:624-680",
+    "finding_entity_id": "msg_01KZ01NNGGPM1Y462J7R1VYYRG",
+    "quote": "    def _advance_fanout_cursor(self, channel_id: str, agent_id: str, message_id: str) -> None:\n        message = self.db.get_message_by_id(message_id)\n        if message is None:\n            return\n        seq = message[\"channel_seq\"]\n        sub = self.db.get_subscription(channel_id, agent_id)\n        if sub is None:\n            return\n        current = sub[\"cursor_seq\"]\n        if seq <= current:\n            return\n        if seq == current + 1:\n            self.db.advance_cursor(channel_id, agent_id, seq)\n            target = seq\n            while True:\n                target += 1\n                next_msg = self.db.execute(\n                    \"SELECT m.message_id, m.channel_seq FROM messages m \"\n                    \"WHERE m.channel_id = ? AND m.channel_seq = ?\",\n                    (channel_id, target),\n                ).fetchone()\n                if next_msg is None:\n                    break\n                next_del = self.db.execute(\n                    \"SELECT 1 FROM deliveries d WHERE d.message_id = ? \"\n                    \"AND d.agent_id = ? AND d.state IN ('acked','dead')\",\n                    (next_msg[\"message_id\"], agent_id),\n                ).fetchone()\n                if next_del is not None:\n                    self.db.advance_cursor(channel_id, agent_id, target)\n                else:\n                    break\n        else:\n            all_acked = True\n            for check_seq in range(current + 1, seq):\n                check_msg = self.db.execute(\n                    \"SELECT m.message_id FROM messages m WHERE m.channel_id = ? AND m.channel_seq = ?\",\n                    (channel_id, check_seq),\n                ).fetchone()\n                if check_msg is None:\n                    continue\n                check_del = self.db.execute(\n                    \"SELECT 1 FROM deliveries d WHERE d.message_id = ? \"\n                    \"AND d.agent_id = ? AND d.state IN ('acked','dead')\",\n                    (check_msg[\"message_id\"], agent_id),\n                ).fetchone()\n                if check_del is None:\n                    all_acked = False\n                    break\n            if all_acked:\n                self.db.advance_cursor(channel_id, agent_id, seq)",
+    "seq": 2,
+    "why_relevant": "实现 _advance_fanout_cursor：相邻推进（seq==current+1 时向后递推跳过已 acked/dead）与 gap 判定（current+1..seq 全 acked/dead 才推进），正是 spec 连续水位语义的落地。"
+  },
+  {
+    "anchor": "agent_bus/bus.py:613-614",
+    "finding_entity_id": "msg_01KZ01NNGGPM1Y462J7R1VYYRG",
+    "quote": "            channel = self.db.get_channel(delivery[\"channel_id\"])\n            if channel and channel[\"delivery_mode\"] == \"fanout\":\n                self._advance_fanout_cursor(delivery[\"channel_id\"], agent_id, delivery[\"message_id\"])",
+    "seq": 3,
+    "why_relevant": "ack 路径仅以 delivery_mode==\"fanout\" 触发 cursor 推进，正是 spec Q1 第2条要求修复后的形态（删除 startswith(\"queue:\") 误判）；该前缀误判由 verify-quality-scope 机械禁止。"
+  },
+  {
+    "anchor": "tests/test_fanout.py:53-80",
+    "finding_entity_id": "msg_01KZ01NNGGPM1Y462J7R1VYYRG",
+    "quote": "    r = bus.consume(\"board:ooo\", alice_agent[\"agent_id\"], max_messages=10)\n    assert len(r[\"deliveries\"]) == 3\n\n    deliveries = r[\"deliveries\"]\n    bus.ack(deliveries[2][\"delivery_id\"], deliveries[2][\"lease_token\"], alice_agent[\"agent_id\"])\n\n    sub = db.get_subscription(\"board:ooo\", alice_agent[\"agent_id\"])\n    assert sub[\"cursor_seq\"] == 0\n\n    bus.ack(deliveries[0][\"delivery_id\"], deliveries[0][\"lease_token\"], alice_agent[\"agent_id\"])\n\n    sub2 = db.get_subscription(\"board:ooo\", alice_agent[\"agent_id\"])\n    assert sub2[\"cursor_seq\"] == 1\n\n    bus.ack(deliveries[1][\"delivery_id\"], deliveries[1][\"lease_token\"], alice_agent[\"agent_id\"])\n\n    sub3 = db.get_subscription(\"board:ooo\", alice_agent[\"agent_id\"])\n    assert sub3[\"cursor_seq\"] == 3",
+    "seq": 4,
+    "why_relevant": "out-of-order ack 回归测试：先 ack seq3 cursor 仍为 0，再 ack seq1 推进到 1，最后 ack seq2 一次推进到 3，证明连续水位而非 MAX。"
+  },
+  {
+    "anchor": "scripts/verify-quality-scope.py:88-96",
+    "finding_entity_id": "msg_01KZ01NNGGPM1Y462J7R1VYYRG",
+    "quote": "    for p in [\"in err_msg\", '\"UNIQUE constraint failed\" in', 'startswith(\"queue:\")',\n              \"in exc_str\", \"in str(exc)\",\n              '\"VERSION_CHAIN_MISMATCH\" in', '\"messages.\" in']:\n        if p in text:\n            print(f\"FAIL: bus.py contains forbidden pattern: {p!r}\", file=sys.stderr)\n            ok = False\n    return ok",
+    "seq": 5,
+    "why_relevant": "机械验收强制 bus.py 不得含 startswith(\"queue:\")，把 spec Q1 第2条 ack 判定缺陷的修复固化为不可回归的 invariant。"
+  },
+  {
+    "anchor": "docs/specs/SPEC-agent-bus.md:718-719",
+    "finding_entity_id": "msg_01KZ03JDGR395D2WYHPD76C6HJ",
+    "quote": "718: - public channel：任意 authenticated caller 可 read/publish；只有 active subscriber 可 consume。\n719: - reserved private inbox `agent:<owner>`：固定 `delivery_mode=queue`；任意 authenticated caller 可 publish；仅 owner或admin可 read；仅 owner可 consume。agent 创建时原子创建 inbox与 owner active subscription，所以 owner 无需显式 subscribe。\n",
+    "seq": 1,
+    "why_relevant": "适用场景的判定原点：私有 inbox 在 spec 层被强制 queue（claim_key=''→单收件人互斥），并配以 owner-only consume，使 agent:<id> 成为真信箱；这是『单收件人必须用 queue』的直接陈述。"
+  },
+  {
+    "anchor": "docs/specs/SPEC-agent-bus.md:723",
+    "finding_entity_id": "msg_01KZ03JDGR395D2WYHPD76C6HJ",
+    "quote": "723: - revoke普通agent必须在一个transaction内设置revoked_at、关闭其inbox、deactivate subscriptions并 fencing-invalidate 该agent的既有lease。该transaction内：inbox/fanout的所有非terminal delivery直接转dead并各发exact一次dead event；共享queue中由该agent持有的live lease等价于立即 `retry_in_ms=0` 的nack，`attempt<max_attempts` 时转eligible nacked供其它agent reclaim，已到final attempt时转dead。每条transition只发一次相应event，旧lease token立即409；不得留下无人可认证、又永远不能reclaim的eligible inbox/fanout row。closed inbox拒绝新publish/consume，但历史仍按ACL可审计；重复revoke幂等且不重复发event。\n",
+    "seq": 2,
+    "why_relevant": "revoke 终结分叉的设计契约：inbox/fanout 转 dead（无人可 reclaim），共享 queue 转 eligible nack 供他人 reclaim，判据是 attempt<max_attempts；与实现 revoke_agent 的两条 _batch 路径一一对应。"
+  },
+  {
+    "anchor": "agent_bus/db.py:305-327",
+    "finding_entity_id": "msg_01KZ03JDGR395D2WYHPD76C6HJ",
+    "quote": "305:     def insert_agent(self, agent_id: str, display_name: str, kind: str, token_sha256: str,\n306:                      is_admin: bool = False, can_delegate: bool = False,\n307:                      can_register_agents: bool = False, metadata_json: str = \"{}\") -> str:\n308:         now = utcnow()\n309:         inbox_id = f\"agent:{agent_id}\"\n310:         self.execute(\n311:             \"INSERT INTO agents (agent_id, display_name, kind, token_sha256, is_admin, can_delegate, \"\n312:             \"can_register_agents, metadata_json, created_at) \"\n313:             \"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\",\n314:             (agent_id, display_name, kind, token_sha256, int(is_admin), int(can_delegate),\n315:              int(can_register_agents), metadata_json, now),\n316:         )\n317:         self.execute(\n318:             \"INSERT INTO channels (channel_id, delivery_mode, visibility, owner_agent_id, created_at) \"\n319:             \"VALUES (?, ?, ?, ?, ?)\",\n320:             (inbox_id, \"queue\", \"private\", agent_id, now),\n321:         )\n322:         self.execute(\n323:             \"INSERT OR IGNORE INTO subscriptions (channel_id, agent_id, cursor_seq, subscribed_at) \"\n324:             \"VALUES (?, ?, ?, ?)\",\n325:             (inbox_id, agent_id, 0, now),\n326:         )\n327:         return inbox_id\n",
+    "seq": 3,
+    "why_relevant": "实现侧 inbox=queue 的强制：insert_agent 在建 agent 的同一 transaction 内以 ('agent:<id>','queue','private',...) 建 inbox channel 并自动插 owner subscription——delivery_mode 硬编码 queue，无 fanout 分支。"
+  },
+  {
+    "anchor": "agent_bus/db.py:353-389",
+    "finding_entity_id": "msg_01KZ03JDGR395D2WYHPD76C6HJ",
+    "quote": "353:             def _term(d: sqlite3.Row, ev_type: str) -> None:\n354:                 self.execute(\"UPDATE deliveries SET state = ?, updated_at = ? WHERE delivery_id = ?\",\n355:                              (DeliveryState.DEAD.value, now, d[\"delivery_id\"]))\n356:                 self.execute(\"INSERT INTO bus_events (type, channel_id, message_id, delivery_id, \"\n357:                              \"agent_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)\",\n358:                              (ev_type, d[\"channel_id\"], d[\"message_id\"], d[\"delivery_id\"],\n359:                               agent_id, json.dumps({\"delivery_id\": d[\"delivery_id\"]}), now))\n360: \n361:             def _batch(rows: list[sqlite3.Row], is_queue: bool) -> None:\n362:                 for d in rows:\n363:                     if is_queue:\n364:                         ch = self.execute(\"SELECT max_attempts FROM channels WHERE channel_id = ?\",\n365:                                           (d[\"channel_id\"],)).fetchone()\n366:                         if ch and d[\"attempt\"] < ch[\"max_attempts\"]:\n367:                             self.execute(\"UPDATE deliveries SET state = 'nacked', updated_at = ?, \"\n368:                                          \"next_available_at_ms = 0, nack_reason = 'agent_revoked' \"\n369:                                          \"WHERE delivery_id = ?\", (now, d[\"delivery_id\"]))\n370:                             self.execute(\"INSERT INTO bus_events (type, channel_id, message_id, \"\n371:                                          \"delivery_id, agent_id, payload_json, created_at) \"\n372:                                          \"VALUES (?, ?, ?, ?, ?, ?, ?)\",\n373:                                          (\"nacked\", d[\"channel_id\"], d[\"message_id\"], d[\"delivery_id\"],\n374:                                           agent_id, json.dumps({\"delivery_id\": d[\"delivery_id\"],\n375:                                                                 \"reason\": \"agent_revoked\"}), now))\n376:                             continue\n377:                     _term(d, \"dead\")\n378: \n379:             for s in (\"leased\", \"nacked\"):\n380:                 _batch(self.execute(\"SELECT * FROM deliveries WHERE agent_id = ? AND state = ? \"\n381:                                     \"AND channel_id = ?\", (agent_id, s, inbox_id)).fetchall(),\n382:                        is_queue=False)\n383:             for mode in (\"fanout\", \"queue\"):\n384:                 _batch(self.execute(\"SELECT d.* FROM deliveries d JOIN channels c \"\n385:                                     \"ON d.channel_id = c.channel_id \"\n386:                                     \"WHERE d.agent_id = ? AND d.state IN ('leased','nacked') \"\n387:                                     \"AND c.delivery_mode = ? AND d.channel_id != ?\",\n388:                                     (agent_id, mode, inbox_id)).fetchall(),\n389:                        is_queue=(mode == \"queue\"))\n",
+    "seq": 4,
+    "why_relevant": "终结分叉的实现核心：_batch 依 is_queue 决定——inbox（被 is_queue=False）与 fanout 直走 _term→dead；只有共享 queue（is_queue=True）在 attempt<max_attempts 时转 nacked('agent_revoked') 供 reclaim，否则 dead。inbox 显式排除在 reclaim 之外，因为它已随 agent 关闭。"
+  }
+]
