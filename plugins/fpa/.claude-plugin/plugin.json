@@ -1,7 +1,7 @@
 {
   "name": "fpa",
-  "description": "First Principles Analysis — enforced four-step reasoning (deconstruct/challenge/reconstruct/validate) with adversarial Workflow verification, mechanical acceptance hooks, and a three-artifact paper trail; plus a lightweight inline calibration skill",
-  "version": "0.1.0",
+  "description": "First Principles Analysis — commit to an artifact-independent baseline before looking at the incumbent, separate real constraints from habits, and ask the user only the questions that would flip the conclusion",
+  "version": "0.2.0",
   "author": { "name": "Dandi007" },
   "license": "MIT"
 }

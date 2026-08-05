@@ -1,7 +1,7 @@
 {
   "name": "fpa",
-  "version": "0.1.0",
-  "description": "First Principles Analysis workflow with structured reasoning and validation.",
+  "version": "0.2.0",
+  "description": "First Principles Analysis — baseline-first reasoning that separates real constraints from habits.",
   "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
   "repository": "https://github.com/Dandi007/katana",
   "license": "MIT",
@@ -10,10 +10,10 @@
   "interface": {
     "displayName": "Katana FPA",
     "shortDescription": "First Principles Analysis.",
-    "longDescription": "Structured first-principles reasoning workflow with analysis artifacts and validation guidance.",
+    "longDescription": "Derive an artifact-independent baseline before evaluating the incumbent, make every claimed hard constraint falsifiable, and surface only the decisions that would change the answer.",
     "developerName": "Dandi007",
     "category": "Productivity",
     "capabilities": ["Skills"],
-    "defaultPrompt": ["Use fpa to analyze this from first principles."]
+    "defaultPrompt": ["Use first-principles to analyze this."]
   }
 }
