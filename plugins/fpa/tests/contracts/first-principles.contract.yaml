@@ -1,0 +1,17 @@
+skill: fpa:first-principles
+setup:
+  fixture: kb
+trigger:
+  prompt: "请用 first-principles 分析：我们这个 3 人维护的内部工具，打算拆成 microservices，因为现代系统都这么做、以后也方便扩展。把分析写到 ./fp-result.md（正文推导 + 文末 receipt）。"
+  tools: [Read, Grep, Glob, Write, Edit, Bash]
+expect:
+  process:
+    - skill_loaded: fpa:first-principles
+  filesystem:
+    - created: "fp-result.md"
+    - content: {path: "fp-result.md", matches: "基准量"}
+    - content: {path: "fp-result.md", matches: "被推翻"}
+    - content: {path: "fp-result.md", matches: "未决与假设"}
+    - content: {path: "fp-result.md", matches: "给用户的决定"}
+    - content: {path: "fp-result.md", matches: "停在哪"}
+    - unchanged_outside: true

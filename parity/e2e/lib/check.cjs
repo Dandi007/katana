@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Verdict: end-to-end parity between Claude Code and OpenCode on the same harness.
-// Three deterministic layers, each PASS only when CC and OC agree:
-//   1. INJECTION-PARITY — the 4 katana session-start segments reached the LLM
+// Two deterministic layers, each PASS only when CC and OC agree:
+//   1. INJECTION-PARITY   — the katana session-start segments reached the LLM
 //      (forensic, from ccs payload recording, per-side time window; whole-body).
-//   2. FPA-PARITY        — the fpa PostToolUse hook fired on the FPA-named write
-//      on both sides (validate_fpa.py appears in both run logs).
-//   3. OUTPUT-PARITY     — both sides completed the task (reply contains DONE).
+//   2. TOOL-EFFECT-PARITY — both sides produced the shared write side effect.
+// NOTE: PostToolUse parity had a third layer until the fpa validator hook was
+// retired (fpa became prompt-only). The adapter still supports postToolUse but
+// no katana plugin registers one, so there is nothing live to compare.
 // usage: node check.js <scenarioPath> <sandbox>
 'use strict';
 
@@ -39,24 +40,9 @@ if (injDiff.error) {
     missing.length === 0 ? `all ${segs.length} segments present on both sides` : `missing ${missing.join(', ')}`);
 }
 
-// ---- Layer 2: fpa hook parity (forensic — fpa exit-2 feedback fed back to model) ----
-// injection-diff exposes cc_fpa/oc_fpa: the validate_fpa failure phrase present
-// in each side's ccs payloads. CC feeds PostToolUse exit-2 stderr to the model;
-// OC's adapter throws from tool.execute.after — both land '机械验收失败' in a
-// subsequent request body. Same forensic channel as injection.
-if (injDiff.error) {
-  record('FPA-PARITY', false, injDiff.error);
-} else {
-  const ccFpa = !!injDiff.cc_fpa;
-  const ocFpa = !!injDiff.oc_fpa;
-  record('FPA-PARITY', ccFpa && ocFpa,
-    ccFpa === ocFpa ? `both sides fpa-fed-back=${ccFpa}` : `mismatch cc=${ccFpa} oc=${ocFpa}`);
-}
-
-// ---- Layer 3: tool-effect parity (deterministic shared side effect) ----
-// The model's final prose diverges by design once fpa blocks (CC asks a
-// question, OC retries) — that's non-deterministic and not a parity signal.
-// The deterministic shared effect is the test.md write, present in both projs.
+// ---- Layer 2: tool-effect parity (deterministic shared side effect) ----
+// Final prose is non-deterministic and not a parity signal. The deterministic
+// shared effect is the test.md write, present in both projs.
 const fs2 = require('fs');
 const ccWrote = fs2.existsSync(path.join(sandbox, 'cc', 'proj', 'test.md'));
 const ocWrote = fs2.existsSync(path.join(sandbox, 'oc', 'proj', 'test.md'));

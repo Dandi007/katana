@@ -12,7 +12,7 @@ installable — take only what you need.
 | `obsidian-md` | Obsidian Markdown writing rules grounded in official docs (`obsidian-writing`) — wikilinks, headings, frontmatter, embeds, callouts; every rule cites obsidian.md/help |
 | `wiki` | LLM-maintained wiki engine — schema-driven zones, provenance-enforced ingest, deterministic query ladder, adversarial lint (Karpathy pattern: compile not re-derive; governance: immutable raw, provenance, adversarial lint, human gate) |
 | `retrieval` | Multi-source information retrieval — intent→source routing, credibility ladder, fallback chains; web/reddit/twitter/code/github/gitlab/linear/feishu/search-note adapters |
-| `fpa` | First Principles Analysis — enforced four-step reasoning (deconstruct/challenge/reconstruct/validate) with adversarial Workflow verification, mechanical acceptance hooks (`FPA-*.md` structure + three-artifact suite), and an inline calibration skill (`first-principles-thinking`) |
+| `fpa` | First Principles Analysis (`first-principles`) — commit to an artifact-independent baseline before looking at the incumbent; every claimed hard constraint must name the event that would break it; ask the user only the questions that would flip the conclusion |
 
 ## Install (Claude Code)
 
@@ -49,8 +49,9 @@ Or for development, add the local path to your `opencode.json`:
 
 The adapter maps OpenCode events to Claude Code hook semantics, spawning the
 same `plugins/*/hooks/*` scripts. SessionStart hooks inject context (guide,
-work-folder, retrieval, wiki), PostToolUse hooks validate FPA documents, and
-all skills are exposed to OpenCode's skill discovery.
+work-folder, retrieval, wiki), and all skills are exposed to OpenCode's skill
+discovery. No katana plugin currently registers a PostToolUse hook; the adapter
+still supports the event, but that path has no live consumer or test.
 
 **Configuration:**
 
@@ -119,10 +120,8 @@ Claude Code-specific features degrade gracefully elsewhere:
   in your `.katana` file.
 - `deep-research` orchestration uses Claude Code's Workflow tool; other tools
   can follow the SKILL.md flow manually.
-- `fpa` mechanical acceptance uses a Claude Code PostToolUse hook and its
-  adversarial verification uses the Workflow tool. On other tools, run
-  `python3 skills/fpa/scripts/validate_fpa.py <file>` manually and dispatch
-  skeptic subagents per the SKILL.md prompts.
+- `fpa` is prompt-only — no hooks, no scripts, no Workflow orchestration. It
+  runs identically on any tool that can load a SKILL.md.
 
 ## Configuration
 

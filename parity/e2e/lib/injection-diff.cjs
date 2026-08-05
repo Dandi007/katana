@@ -27,11 +27,6 @@ const FINGERPRINTS = {
   memory: '<memory-index>',
 };
 
-// fpa PostToolUse exit-2 stderr is fed back to the model, so it lands in a
-// SUBSEQUENT request body within the same window — same forensic channel as
-// injection. validate_fpa.py emits this exact phrase on structure failure.
-const FPA_FINGERPRINT = '机械验收失败';
-
 // Pull the concatenated request bodies whose created_at falls in [t0,t1].
 // sqlite3 CLI keeps this dependency-free (no better-sqlite3).
 function bodiesInWindow(t0, t1) {
@@ -80,10 +75,9 @@ function diff(sandbox) {
     if (got.error) return { error: `${side}: ${got.error}` };
     if (!got.text.trim()) return { error: `${side}: no ccs payloads recorded in window [${win[0]},${win[1]}]` };
     result[side] = segmentsFor(got.text);
-    result[`${side}_fpa`] = got.text.includes(FPA_FINGERPRINT);
     result[`${side}_bytes`] = got.text.length;
   }
   return result;
 }
 
-module.exports = { diff, segmentsFor, FINGERPRINTS, FPA_FINGERPRINT };
+module.exports = { diff, segmentsFor, FINGERPRINTS };
