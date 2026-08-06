@@ -1,7 +1,7 @@
 {
   "name": "fpa",
   "description": "First Principles Analysis — decompose the goal into effect-level needs before touching the incumbent, put every claimed hard constraint on trial, and rebuild only from the constraints that survive",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": { "name": "Dandi007" },
   "license": "MIT"
 }
