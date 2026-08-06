@@ -1,7 +1,7 @@
 {
   "name": "fpa",
-  "version": "0.2.0",
-  "description": "First Principles Analysis — baseline-first reasoning that separates real constraints from habits.",
+  "version": "0.3.0",
+  "description": "First Principles Analysis — goal-first decomposition that puts every claimed hard constraint on trial.",
   "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
   "repository": "https://github.com/Dandi007/katana",
   "license": "MIT",
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Katana FPA",
     "shortDescription": "First Principles Analysis.",
-    "longDescription": "Derive an artifact-independent baseline before evaluating the incumbent, make every claimed hard constraint falsifiable, and surface only the decisions that would change the answer.",
+    "longDescription": "Decompose the goal into effect-level needs before touching the incumbent, make every claimed hard constraint name the event that would break it, and rebuild only from the constraints that survive.",
     "developerName": "Dandi007",
     "category": "Productivity",
     "capabilities": ["Skills"],

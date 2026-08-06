@@ -12,7 +12,7 @@ installable — take only what you need.
 | `obsidian-md` | Obsidian Markdown writing rules grounded in official docs (`obsidian-writing`) — wikilinks, headings, frontmatter, embeds, callouts; every rule cites obsidian.md/help |
 | `wiki` | LLM-maintained wiki engine — schema-driven zones, provenance-enforced ingest, deterministic query ladder, adversarial lint (Karpathy pattern: compile not re-derive; governance: immutable raw, provenance, adversarial lint, human gate) |
 | `retrieval` | Multi-source information retrieval — intent→source routing, credibility ladder, fallback chains; web/reddit/twitter/code/github/gitlab/linear/feishu/search-note adapters |
-| `fpa` | First Principles Analysis (`first-principles`) — commit to an artifact-independent baseline before looking at the incumbent; every claimed hard constraint must name the event that would break it; ask the user only the questions that would flip the conclusion |
+| `fpa` | First Principles Analysis (`first-principles`) — decompose the goal into effect-level needs before touching the incumbent; every claimed hard constraint must name the event that would break it; rebuild only from the constraints that survive |
 
 ## Install (Claude Code)
 
