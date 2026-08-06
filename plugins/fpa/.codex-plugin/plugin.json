@@ -1,6 +1,6 @@
 {
   "name": "fpa",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "First Principles Analysis — goal-first decomposition that puts every claimed hard constraint on trial.",
   "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
   "repository": "https://github.com/Dandi007/katana",
