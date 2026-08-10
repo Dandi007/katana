@@ -24,7 +24,7 @@ description: 未迁本地知识子树的只读检索源；已迁 wiki/work-folde
 
 | 范围 | 检索方式 |
 |------|----------|
-| `Zettelkasten/`、`DeepThought/`、`转换文档/`、`WIKI.md`、`inbox/` | `wiki_search`（深读用 wiki MCP `fs_read`） |
+| wiki 域（根知识页 `*.md`、`DeepThought/`、`转换文档/`、`WIKI.md`）| `wiki_search`（深读用 wiki MCP `fs_read`） |
 | `智元工作/工作记录/` | `wf_search`（深读用 work-folder MCP `fs_read`） |
 | `智元工作/op/`、`智元工作/具身中心工程OKR/` | 本 source 的本地只读检索 |
 | `Ideas/`、`Templates/`、`Incubator/`、`docs/`、`.runtime/` 及其它未迁子树 | 本 source 的本地只读检索 |

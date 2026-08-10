@@ -13,7 +13,7 @@ from katana_wiki_mcp.pages import parse_page
 
 DEFAULT_EXCLUDE_DIRS: set[str] = {
     ".git", ".obsidian", ".wiki", ".trash", "转换文档", "DeepThought",
-    # 非知识页：工具产物与 agent 状态，不受 Zettelkasten schema 约束
+    # 非知识页：工具产物与 agent 状态，不受知识页 schema 约束
     ".audit",        # lint/audit 自己的报告输出
     "checkpoints",   # work-folder 式的 goal/progress/findings 状态文件
 }

@@ -46,7 +46,7 @@ argument-hint: "[file_path ...] | evolve [type] | distill <type> <语料...>"
 
 | type | 适用判定锚点 | pattern |
 |---|---|---|
-| `atomic-note` | `Zettelkasten/` 下原子卡、有 frontmatter + References + wikilink | 当前项目 writing_dir 下的 patterns/atomic-note.md |
+| `atomic-note` | wiki 根原子卡（`类型: 卡片`）、有 frontmatter + References + wikilink | 当前项目 writing_dir 下的 patterns/atomic-note.md |
 | `tech-spec` | 技术设计/spec、SPEC-NNN、work folder `spec.md` | 当前项目 writing_dir 下的 patterns/tech-spec.md |
 | `work-brief` | 工作汇报 / One Page / 周报 / 状态报告，`智元工作/` 下 | 当前项目 writing_dir 下的 patterns/work-brief.md |
 

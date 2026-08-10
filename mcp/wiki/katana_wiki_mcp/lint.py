@@ -72,7 +72,7 @@ def lint_mechanical(
     offset: int = 0, limit: int | None = None,
 ) -> dict:
     """机械体检：逐页 invariants + 跨页 orphan/broken_link。raw zone 由枚举层豁免。
-    Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "Zettelkasten"），跨页基线只在该 zone 内算；offset/limit 对 findings 分页（默认返回全部）。"""
+    Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "DeepThought"），跨页基线只在该 zone 内算；offset/limit 对 findings 分页（默认返回全部）。"""
     docs = enumerate_docs(wiki_root, exclude_dirs=exclude_dirs)
     all_docs_count = len(docs)
     if zone:
@@ -145,7 +145,7 @@ def lint_mechanical(
     by_code: dict[str, int] = {}
     for f in findings:
         by_code[f["code"]] = by_code.get(f["code"], 0) + 1
-    # A full-zone lint yields thousands of findings (~80k tokens on Zettelkasten),
+    # A full-zone lint yields thousands of findings (~80k tokens on the full corpus),
     # which is unusable as a single tool response. Always report the aggregate and
     # let the caller page through the detail.
     page = findings[offset:] if limit is None else findings[offset:offset + limit]
