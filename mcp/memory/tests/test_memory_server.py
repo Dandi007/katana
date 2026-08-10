@@ -144,3 +144,29 @@ def test_memory_edit_error_is_tool_error(srv):
                  "body": "## Fact\nx\n\n## How to Verify\ny"})["id"]
     with pytest.raises(Exception):
         _call(mcp, "memory_edit", {"id": cid, "old_string": "absent", "new_string": "z"})
+
+
+# ── v2: memory_get 命中记账 + pinned 传参 ──────────────────────────────────────
+
+def test_memory_get_appends_access_log(srv, tmp_path):
+    mcp, tdir, repo = srv
+    cid = _call(mcp, "memory_create", {"name": "log-card", "description": "d",
+                                       "body": "## Fact\nx\n\n## How to Verify\ny"})["id"]
+    _call(mcp, "memory_get", {"id": cid})
+    _call(mcp, "memory_get", {"id": cid})
+    import json as _json
+    log = tmp_path / ".katana" / "memory-access-log.jsonl"
+    recs = [_json.loads(l) for l in log.read_text().splitlines()]
+    assert sum(1 for r in recs if r["id"] == cid and r["tenant"] == "uther") == 2
+
+
+def test_memory_update_pinned_roundtrip(srv):
+    mcp, tdir, repo = srv
+    cid = _call(mcp, "memory_create", {"name": "pin-card", "description": "d",
+                                       "body": "## Fact\nx\n\n## How to Verify\ny"})["id"]
+    upd = _call(mcp, "memory_update", {"id": cid, "pinned": True})
+    assert upd["pinned"] is True
+    idx = _call(mcp, "memory_index")
+    assert [c["pinned"] for c in idx["cards"] if c["id"] == cid] == [True]
+    upd2 = _call(mcp, "memory_update", {"id": cid, "pinned": False})
+    assert upd2["pinned"] is False
