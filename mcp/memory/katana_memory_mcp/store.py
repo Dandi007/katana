@@ -96,7 +96,9 @@ def _today() -> str:
 
 
 def _l1(meta: dict) -> dict:
-    return {k: meta.get(k) for k in ("id", "name", "description", "status", "type", "last_verified")}
+    out = {k: meta.get(k) for k in ("id", "name", "description", "status", "type", "last_verified")}
+    out["pinned"] = bool((meta.get("metadata_extra") or {}).get("pinned"))
+    return out
 
 
 def _validate(name=None, status=None, type=None, description=None, last_verified=None) -> None:
@@ -197,6 +199,7 @@ class MemoryStore:
                     description: str | None = None, body: str | None = None,
                     status: str | None = None, type: str | None = None,
                     last_verified: str | None = None,
+                    pinned: bool | None = None,
                     expected_base_sha: str | None = None) -> dict:
         _validate(name=name, status=status, type=type, description=description, last_verified=last_verified)
         if description is not None and not description:
@@ -215,6 +218,12 @@ class MemoryStore:
                          ("type", type), ("last_verified", last_verified)):
                 if v is not None:
                     cur[k] = v
+            if pinned is not None:
+                mx = cur.setdefault("metadata_extra", {})
+                if pinned:
+                    mx["pinned"] = True
+                else:
+                    mx.pop("pinned", None)
             new_body = body if body is not None else cur["body"]
             new_path = store._card_path(tenant, cur["name"])
             if new_path != old_path:
@@ -229,7 +238,8 @@ class MemoryStore:
 
         return self._call_mutate("update", {
             "id": card_id, "name": name, "description": description, "body": body,
-            "status": status, "type": type, "last_verified": last_verified, "tenant": tenant,
+            "status": status, "type": type, "last_verified": last_verified,
+            "pinned": pinned, "tenant": tenant,
         }, _write, expected_base_sha,
             f"chore(memory): [{tenant}] update {card_id} ({cur['name']})")
 

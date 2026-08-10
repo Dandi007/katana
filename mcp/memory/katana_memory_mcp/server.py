@@ -7,6 +7,8 @@
 - 治理：所有 mutation 经 GovernedKernel.mutate（CAS + policy + VFS + ledger + manifest + git）。
 """
 import contextlib
+import datetime
+import json
 import os
 import re
 from pathlib import Path
@@ -106,6 +108,19 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str,
         kernel.bind("memory", policy, vfs, ledger, manifest, repo_root)
     store = MemoryStore(kernel)
     fs_tools = FSTools(kernel, tenant, repo_root)
+    access_log_path = os.path.join(repo_root, ".katana", "memory-access-log.jsonl")
+
+    def _log_access(card_id: str) -> None:
+        # 命中记账（供 index 渲染的 hit 加权）。记账失败绝不影响读路径。
+        try:
+            os.makedirs(os.path.dirname(access_log_path), exist_ok=True)
+            with open(access_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                    "tenant": tenant, "id": card_id,
+                }, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
 
     @m.tool()
     async def memory_index() -> dict:
@@ -117,6 +132,7 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str,
         if c is None:
             raise ValueError(f"card not found: {id}")
         c.pop("path", None)
+        _log_access(id)
         return c
 
     @m.tool()
@@ -134,11 +150,13 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str,
     async def memory_update(id: str, name: str | None = None, description: str | None = None,
                             body: str | None = None, status: str | None = None,
                             type: str | None = None, last_verified: str | None = None,
+                            pinned: bool | None = None,
                             expected_base_sha: str | None = None) -> dict:
         return _server_mutation(
             lambda: store.update_card(
                 tenant, id, name=name, description=description, body=body,
                 status=status, type=type, last_verified=last_verified,
+                pinned=pinned,
                 expected_base_sha=expected_base_sha,
             )
         )
@@ -296,19 +314,49 @@ def build_app(data_root: str) -> Starlette:
         from katana_memory_mcp import store as _raw_store
         return _raw_store.list_cards(os.path.join(data_root, tenant))["cards"]
 
+    def _load_hits(tenant: str) -> dict[str, int]:
+        path = os.path.join(data_root, ".katana", "memory-access-log.jsonl")
+        hits: dict[str, int] = {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("tenant") == tenant and rec.get("id"):
+                        hits[rec["id"]] = hits.get(rec["id"], 0) + 1
+        except OSError:
+            return {}
+        return hits
+
+    def _budget(request) -> int | None:
+        raw = request.query_params.get("budget_bytes")
+        if raw is None:
+            return index_mod.DEFAULT_BUDGET_BYTES
+        try:
+            n = int(raw)
+        except ValueError:
+            return index_mod.DEFAULT_BUDGET_BYTES
+        return None if n <= 0 else n
+
+    def _render_kwargs(request, tenant: str) -> dict:
+        return {"budget_bytes": _budget(request), "hits": _load_hits(tenant),
+                "today": datetime.date.today()}
+
     async def index_endpoint(request):
         tenant = request.path_params["tenant"]
         cards = _tenant_cards(tenant)
         if cards is None:
             return JSONResponse({"error": f"unknown tenant: {tenant}"}, status_code=404)
-        return JSONResponse(index_mod.hook_payload(cards, tenant))
+        return JSONResponse(index_mod.hook_payload(cards, tenant, **_render_kwargs(request, tenant)))
 
     async def index_md_endpoint(request):
         tenant = request.path_params["tenant"]
         cards = _tenant_cards(tenant)
         if cards is None:
             return PlainTextResponse(f"unknown tenant: {tenant}", status_code=404)
-        return PlainTextResponse(index_mod.render_index(cards, tenant))
+        return PlainTextResponse(index_mod.render_index(cards, tenant, **_render_kwargs(request, tenant)))
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
