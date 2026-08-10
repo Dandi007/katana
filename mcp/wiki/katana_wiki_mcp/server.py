@@ -224,7 +224,7 @@ async def wiki_list_docs(zone: str | None = None) -> list[dict]:
     """枚举 wiki 全部可写文档（自动排除 raw/干扰目录），返回带路径的清单。
 
     返回每条含 path/类型/frontmatter/mtime/hash。拿到 path 后可自行 read/grep/顺 wikilink 深挖。
-    Args: zone 可选，限定子目录前缀（如 "Zettelkasten/Index"）。
+    Args: zone 可选，限定子目录前缀（如 "DeepThought"）。
     """
     docs = _enumerate.enumerate_docs(_wiki_root or ".")
     if zone:
@@ -239,7 +239,7 @@ async def wiki_lint_mechanical(path: str | None = None, zone: str | None = None,
 
     返回 {findings, skipped, scanned, total_findings, by_code, affected_pages, offset, truncated}。
     raw zone 自动豁免；若 zone 落在排除区，skipped 会说明「未做检查」而非静默报干净。
-    Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "Zettelkasten"），跨页基线只在该 zone 内算；
+    Args: path 可选，限定单页逐页检查（跨页基线仍扫全 zone）；zone 可选，限定子目录前缀（如 "DeepThought"），跨页基线只在该 zone 内算；
       offset/limit 对 findings 分页（默认每页 200；全库 findings 可达数千条，勿一次全取）。先看 by_code 汇总再按需翻页。
     """
     return _lint.lint_mechanical(_wiki_root or ".", path, zone=zone,

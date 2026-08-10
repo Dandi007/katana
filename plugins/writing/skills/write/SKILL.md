@@ -61,7 +61,7 @@ description: 统一文档写作入口。当用户想要写 spec、方案、会�
 
 - 判断当前任务是否属于文档写作
 - 识别文档类型，如 `spec`、`meeting-notes`、`email`、`readme`、`note`、`generic`
-- 识别目标目录规范，如 `智元工作/`、`Zettelkasten/` 等
+- 识别目标目录规范，如 `智元工作/`、wiki 根知识页等
 
 ### 3. 检索改进卡片
 
