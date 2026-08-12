@@ -383,7 +383,27 @@ def main():
     if not contracts:
         if args.case:
             sys.exit(f"ERROR: --case {args.case!r} matched no contracts")
+        # 零选中也必须出报告：G0 要求 PR 带一份新鲜 sweep 报告，而只改 mcp/ 或
+        # tests/ 的 PR 不触及任何 plugin 契约。此处直接 return 会让这类 PR 永远
+        # 卡在 "no sweep report is fresh"，无路可走（除非伪造一份报告）。
+        # 报告如实记录「本次选中 0 个契约」，不冒充跑过用例。
+        branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        sha = git(repo, "rev-parse", "--short", "HEAD")
+        md = (
+            "# Contract Sweep Report\n\n"
+            f"- branch: `{branch}` @ `{sha}`\n"
+            f"- date: {time.strftime('%Y-%m-%d %H:%M')}\n"
+            "- jobs: 0 / total: 0s\n"
+            "- **PASS 0 / FAIL 0 / SKIP 0 / NEEDS-REVIEW 0**\n\n"
+            "本次改动未触及任何 plugin 契约（`--touched` 选中 0 个 case），"
+            "因此没有契约被执行。本报告仅用于记录「已跑 sweep 且选中为空」，"
+            "不代表任何契约通过。\n"
+        )
+        out = repo / "tests/reports" / f"{branch.replace('/', '-')}-{sha}.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(md, encoding="utf-8")
         print("no contracts selected (no touched plugins)")
+        print(f"report: {out}")
         return
 
     claude_bin = os.environ.get("CLAUDE_BIN", "claude")

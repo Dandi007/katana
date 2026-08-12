@@ -85,6 +85,27 @@ def _resolve_data_root() -> str:
     )
 
 
+def _access_log_path() -> str:
+    """命中记账日志的落点——必须在治理仓库之外。
+
+    这份日志由**读**路径（memory_get）写入。若落在数据仓内，每次读卡都会让
+    仓库变脏，而治理事务要求仓库干净，于是读操作会阻塞随后的写操作
+    （memory_create/update 报 "repository has tracked, staged, or untracked
+    changes"，加 .gitignore 后转为 "ignored untracked payload outside runtime
+    state"，两条路都堵死）。runtime telemetry 不属于事务边界内的资产。
+    """
+    base = os.environ.get("KATANA_MEMORY_STATE_DIR") or os.path.join(
+        os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+        "katana", "memory",
+    )
+    return os.path.join(base, "memory-access-log.jsonl")
+
+
+def _legacy_access_log_path(data_root: str) -> str:
+    """迁移期回退：老版本把日志写在数据仓内，历史命中数仍并入统计。"""
+    return os.path.join(data_root, ".katana", "memory-access-log.jsonl")
+
+
 def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str,
                          kernel: GovernedKernel | None = None) -> FastMCP:
     m = FastMCP(
@@ -108,10 +129,10 @@ def build_tenant_server(tenant: str, tenant_dir: str, repo_root: str,
         kernel.bind("memory", policy, vfs, ledger, manifest, repo_root)
     store = MemoryStore(kernel)
     fs_tools = FSTools(kernel, tenant, repo_root)
-    access_log_path = os.path.join(repo_root, ".katana", "memory-access-log.jsonl")
-
     def _log_access(card_id: str) -> None:
         # 命中记账（供 index 渲染的 hit 加权）。记账失败绝不影响读路径。
+        # 路径每次解析，不在构建时固化，便于按环境重定向。
+        access_log_path = _access_log_path()
         try:
             os.makedirs(os.path.dirname(access_log_path), exist_ok=True)
             with open(access_log_path, "a", encoding="utf-8") as f:
@@ -315,19 +336,20 @@ def build_app(data_root: str) -> Starlette:
         return _raw_store.list_cards(os.path.join(data_root, tenant))["cards"]
 
     def _load_hits(tenant: str) -> dict[str, int]:
-        path = os.path.join(data_root, ".katana", "memory-access-log.jsonl")
         hits: dict[str, int] = {}
-        try:
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        rec = json.loads(line)
-                    except ValueError:
-                        continue
-                    if rec.get("tenant") == tenant and rec.get("id"):
-                        hits[rec["id"]] = hits.get(rec["id"], 0) + 1
-        except OSError:
-            return {}
+        # 现落点在仓外；老落点仍读，保证迁移期历史命中不丢
+        for path in (_access_log_path(), _legacy_access_log_path(data_root)):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            rec = json.loads(line)
+                        except ValueError:
+                            continue
+                        if rec.get("tenant") == tenant and rec.get("id"):
+                            hits[rec["id"]] = hits.get(rec["id"], 0) + 1
+            except OSError:
+                continue
         return hits
 
     def _budget(request) -> int | None:
