@@ -1,4 +1,5 @@
 import asyncio
+import pathlib
 import subprocess
 
 import pytest
@@ -148,16 +149,44 @@ def test_memory_edit_error_is_tool_error(srv):
 
 # ── v2: memory_get 命中记账 + pinned 传参 ──────────────────────────────────────
 
-def test_memory_get_appends_access_log(srv, tmp_path):
+def test_memory_get_appends_access_log(srv, tmp_path_factory, monkeypatch):
+    state = tmp_path_factory.mktemp("state")   # 必须在治理仓之外
+    monkeypatch.setenv("KATANA_MEMORY_STATE_DIR", str(state))
     mcp, tdir, repo = srv
     cid = _call(mcp, "memory_create", {"name": "log-card", "description": "d",
                                        "body": "## Fact\nx\n\n## How to Verify\ny"})["id"]
     _call(mcp, "memory_get", {"id": cid})
     _call(mcp, "memory_get", {"id": cid})
     import json as _json
-    log = tmp_path / ".katana" / "memory-access-log.jsonl"
+    log = state / "memory-access-log.jsonl"
     recs = [_json.loads(l) for l in log.read_text().splitlines()]
     assert sum(1 for r in recs if r["id"] == cid and r["tenant"] == "uther") == 2
+
+
+def test_access_log_stays_out_of_governed_repo(srv, tmp_path_factory, monkeypatch):
+    """读路径的 telemetry 不得落进数据仓——否则它会弄脏仓库并阻塞写路径。"""
+    monkeypatch.setenv("KATANA_MEMORY_STATE_DIR", str(tmp_path_factory.mktemp("state")))
+    mcp, tdir, repo = srv
+    cid = _call(mcp, "memory_create", {"name": "iso-card", "description": "d",
+                                       "body": "## Fact\nx\n\n## How to Verify\ny"})["id"]
+    _call(mcp, "memory_get", {"id": cid})
+    assert not (pathlib.Path(repo) / ".katana" / "memory-access-log.jsonl").exists()
+
+
+def test_read_then_write_is_not_self_locked(srv, tmp_path_factory, monkeypatch):
+    """回归：memory_get 之后必须还能 memory_create。
+
+    历史 bug：_log_access 把日志写进治理仓，读操作使仓库变脏，
+    随后的写操作被 "repository has tracked, staged, or untracked changes" 拒绝。
+    """
+    monkeypatch.setenv("KATANA_MEMORY_STATE_DIR", str(tmp_path_factory.mktemp("state")))
+    mcp, tdir, repo = srv
+    first = _call(mcp, "memory_create", {"name": "lock-a", "description": "d",
+                                         "body": "## Fact\nx\n\n## How to Verify\ny"})["id"]
+    _call(mcp, "memory_get", {"id": first})
+    second = _call(mcp, "memory_create", {"name": "lock-b", "description": "d",
+                                          "body": "## Fact\nx\n\n## How to Verify\ny"})
+    assert second["git"]["committed"] is True
 
 
 def test_memory_update_pinned_roundtrip(srv):
