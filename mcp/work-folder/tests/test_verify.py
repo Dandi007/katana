@@ -1,11 +1,14 @@
 """test_verify.py — verify.py 的测试套件（TDD：先写测试，再实现）。"""
 from __future__ import annotations
 
+import os
+
 import pytest
 
 # 测试目标：mcp/work-folder/katana_work_folder_mcp/verify.py
 from katana_work_folder_mcp.verify import (
-    MATCH, DRIFT, BROKEN,
+    MATCH, DRIFT, BROKEN, INFO,
+    LOCAL_PATH, ENDPOINT, REPO_REF, UNKNOWN,
     Resource, ResourceVerdict,
     parse_context_paths,
     classify,
@@ -286,6 +289,185 @@ class TestOverallLevel:
             ResourceVerdict("b", "/b", BROKEN, "不存在"),
         ]
         assert overall_level(verdicts) == BROKEN
+
+
+# ---------------------------------------------------------------------------
+# G3 分型回归（dev_katana_wf_verify_typing_01，spec 3.1）
+# ---------------------------------------------------------------------------
+
+class TestG3ResourceTyping:
+    """先红三条（反引号 / HTTP 端点 / ~ 记法）不得再被当成本地路径 stat 判死。"""
+
+    def _md(self, rows):
+        return (
+            "## 关键路径\n"
+            "| 资源 | 路径 | 分支 |\n"
+            "|------|------|------|\n"
+            + rows
+        )
+
+    def test_backtick_wrapped_existing_path_matches(self, tmp_path):
+        # 3.1.1 反引号包裹的存在路径 → MATCH（先红为 BROKEN）
+        real = tmp_path / "real"
+        real.mkdir()
+        md = self._md("| 反引号目录 | `%s` | - |\n" % real)
+        resources = parse_context_paths(md)
+        assert len(resources) == 1
+        assert resources[0].kind == LOCAL_PATH
+        assert resources[0].path == str(real)  # 装饰已剥，path 是真实目录
+
+        def probe(path):
+            assert path == str(real)
+            return {"exists": True, "is_git": False, "branch": "", "dirty": False}
+
+        verdicts = verify_env(resources, probe_fn=probe)
+        assert verdicts[0].level == MATCH
+        assert overall_level(verdicts) == MATCH
+
+    def test_http_endpoint_not_probed_and_not_broken(self):
+        # 3.1.2 http(s):// → 不调用 fs 探测，且不产生 BROKEN
+        md = self._md("| dd MCP | http://127.0.0.1:5606/mcp | - |\n")
+        resources = parse_context_paths(md)
+        assert len(resources) == 1
+        assert resources[0].kind == ENDPOINT
+
+        def probe(path):  # 若被调用则测试失败
+            raise AssertionError(f"endpoint 不应走 fs 探测: {path}")
+
+        verdicts = verify_env(resources, probe_fn=probe)
+        assert verdicts[0].level == INFO
+        assert verdicts[0].level != BROKEN
+        assert overall_level(verdicts) != BROKEN
+        assert overall_level(verdicts) == MATCH
+
+    def test_https_endpoint_not_probed(self):
+        md = self._md("| 端点 | https://example.com/mcp | - |\n")
+        resources = parse_context_paths(md)
+        assert resources[0].kind == ENDPOINT
+
+        def probe(path):
+            raise AssertionError(f"endpoint 不应走 fs 探测: {path}")
+
+        verdicts = verify_env(resources, probe_fn=probe)
+        assert verdicts[0].level != BROKEN
+
+    def test_tilde_existing_dir_expands_then_matches(self, tmp_path, monkeypatch):
+        # 3.1.3 ~/<存在目录> → expanduser 后 MATCH
+        real = tmp_path / "claude"
+        real.mkdir()
+        # 让 ~ 展开到 tmp_path，避免依赖真实 HOME
+        monkeypatch.setattr(os.path, "expanduser",
+                            lambda p: p.replace("~", str(tmp_path), 1))
+
+        md = self._md("| 家目录 | ~/claude | - |\n")
+        resources = parse_context_paths(md)
+        assert resources[0].kind == LOCAL_PATH
+
+        def probe(path):
+            assert path == str(real)
+            return {"exists": True, "is_git": False, "branch": "", "dirty": False}
+
+        verdicts = verify_env(resources, probe_fn=probe)
+        assert verdicts[0].level == MATCH
+
+    def test_missing_bare_path_still_broken(self, tmp_path):
+        # 3.1.4 不存在的裸路径 → 仍 BROKEN（回归护栏）
+        missing = tmp_path / "nope"
+        md = self._md("| 裸路径 | %s | - |\n" % missing)
+        resources = parse_context_paths(md)
+        assert resources[0].kind == LOCAL_PATH
+
+        verdicts = verify_env(resources, probe_fn=lambda p: {
+            "exists": False, "is_git": False, "branch": "", "dirty": False,
+        })
+        assert verdicts[0].level == BROKEN
+        assert overall_level(verdicts) == BROKEN
+
+    def test_mixed_table_overall_only_affected_by_local_path(self, tmp_path):
+        # 3.1.5 混合表 → overall_level 只受 local-path 影响
+        existing = tmp_path / "ok"
+        existing.mkdir()
+        md = self._md(
+            "| 本地存在 | %s | - |\n" % existing
+            + "| dd MCP | http://127.0.0.1:5606/mcp | - |\n"
+            + "| 家目录 | ~/whatever | - |\n"
+            + "| 裸缺 | /no/such/path/xyz | - |\n"
+        )
+        resources = parse_context_paths(md)
+        kinds = {r.kind for r in resources}
+        assert LOCAL_PATH in kinds
+        assert ENDPOINT in kinds
+
+        def probe(path):
+            return {
+                "exists": os.path.exists(path),
+                "is_git": False, "branch": "", "dirty": False,
+            }
+
+        verdicts = verify_env(resources, probe_fn=probe)
+        # 存在一条 local-path 缺失 → BROKEN（endpoint/unknown 不得稀释）
+        assert overall_level(verdicts) == BROKEN
+
+        # 去掉缺失的 local-path，endpoint + 家目录仍在 → 不再 BROKEN
+        md2 = self._md(
+            "| 本地存在 | %s | - |\n" % existing
+            + "| dd MCP | http://127.0.0.1:5606/mcp | - |\n"
+        )
+        resources2 = parse_context_paths(md2)
+        verdicts2 = verify_env(resources2, probe_fn=probe)
+        assert overall_level(verdicts2) == MATCH
+
+    def test_repo_ref_not_probed_marked_client_verified(self):
+        md = self._md("| 仓引用 | repo:owner/project | - |\n")
+        resources = parse_context_paths(md)
+        assert resources[0].kind == REPO_REF
+
+        def probe(path):
+            raise AssertionError(f"repo-ref 不应走 fs 探测: {path}")
+
+        verdicts = verify_env(resources, probe_fn=probe)
+        assert verdicts[0].level == MATCH
+        assert "client-verified" in verdicts[0].detail
+
+    def test_unknown_type_info_not_broken(self):
+        md = self._md("| 未知 | 一段普通说明文字 | - |\n")
+        resources = parse_context_paths(md)
+        assert resources[0].kind == UNKNOWN
+
+        def probe(path):
+            raise AssertionError(f"unknown 不应走 fs 探测: {path}")
+
+        verdicts = verify_env(resources, probe_fn=probe)
+        assert verdicts[0].level == INFO
+        assert overall_level(verdicts) == MATCH
+
+    def test_markdown_bold_and_inline_link_stripped(self):
+        # 2.2 装饰字符归一：加粗与行内链接也剥
+        md = self._md(
+            "| 加粗 | **/tmp/path/bold** | - |\n"
+            "| 链接 | [真实目录](/tmp/path/link) | - |\n"
+        )
+        resources = parse_context_paths(md)
+        assert resources[0].kind == LOCAL_PATH
+        assert resources[0].path == "/tmp/path/bold"
+        assert resources[1].kind == LOCAL_PATH
+        assert resources[1].path == "/tmp/path/link"
+
+    def test_endpoint_with_backticks_stripped(self):
+        # 反引号包裹的 http 端点 → 剥装饰后仍是 endpoint
+        md = self._md("| 端点 | `http://127.0.0.1:1/mcp` | - |\n")
+        resources = parse_context_paths(md)
+        assert resources[0].kind == ENDPOINT
+
+        def probe(path):
+            raise AssertionError("不应被探测")
+
+        assert verify_env(resources, probe_fn=probe)[0].level != BROKEN
+
+    def test_ws_scheme_is_endpoint(self):
+        md = self._md("| 端点 | ws://127.0.0.1:9000/sock | - |\n")
+        resources = parse_context_paths(md)
+        assert resources[0].kind == ENDPOINT
 
 
 # ---------------------------------------------------------------------------
