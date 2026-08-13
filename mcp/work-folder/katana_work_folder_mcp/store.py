@@ -243,6 +243,8 @@ class WorkFolderStore:
         *,
         idempotency_key: str | None = None,
         idempotency_payload: dict | None = None,
+        scope_prefixes: list[str] | None = None,
+        control_paths: list[str] | None = None,
     ) -> dict:
         return self._kernel.mutate(
             "work-folder", op, args,
@@ -253,7 +255,21 @@ class WorkFolderStore:
             idempotency_payload=(
                 idempotency_payload if idempotency_key is not None else None
             ),
+            scope_prefixes=scope_prefixes,
+            control_paths=control_paths,
         )
+
+    def _folder_scope(
+        self,
+        folder_id: str,
+        *,
+        control_paths: list[str] = ("INDEX.md",),
+    ) -> dict:
+        """Return the scope kwargs for a folder-level governed mutation."""
+        return {
+            "scope_prefixes": [folder_id],
+            "control_paths": list(control_paths),
+        }
 
     def _folder_path(self, folder_id: str) -> str:
         """O(1) 校验 flat folder identity，并返回 repo-relative 目录名。"""
@@ -505,6 +521,7 @@ class WorkFolderStore:
                 "golden_order_additions": golden_order_additions,
                 "findings_addition": findings_addition,
             },
+            **self._folder_scope(folder_id),
         )
 
     def resume(
@@ -666,6 +683,7 @@ class WorkFolderStore:
             "work-folder: resume",
             idempotency_key=idempotency_key,
             idempotency_payload=replay_args,
+            **self._folder_scope(folder_id),
         )
 
     def append_progress(
@@ -896,6 +914,7 @@ class WorkFolderStore:
                     "work-folder: append progress",
                     idempotency_key=idempotency_key,
                     idempotency_payload=idempotency_payload,
+                    **self._folder_scope(folder_id),
                 )
             except IdempotencyConflictError:
                 return _append_error(

@@ -1665,3 +1665,162 @@ def test_kernel_rejects_sqlite_ledger_with_default_tracked_manifest(
             git_repo,
             mutation_ledger=mutation_ledger,
         )
+
+
+def _scope_write(binding, args):
+    binding.vfs.write("folder-a/card.md", args["content"], op="create", args=args)
+    return {
+        "id": "m-test01",
+        "name": "card",
+        "changed_paths": ["folder-a/card.md"],
+    }
+
+
+def test_kernel_scope_prefixes_ignores_out_of_scope_dirt(
+    git_repo, memory_domain_policy,
+):
+    kernel = _bound_kernel(git_repo, memory_domain_policy)
+    b_dir = os.path.join(git_repo, "folder-b")
+    os.makedirs(b_dir)
+    b_tracked = os.path.join(b_dir, "tracked.md")
+    with open(b_tracked, "w") as f:
+        f.write("b v1\n")
+    subprocess.run(
+        ["git", "add", "folder-b/tracked.md"], cwd=git_repo, check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "seed folder-b"],
+        cwd=git_repo, check=True, capture_output=True,
+    )
+    with open(b_tracked, "a") as f:
+        f.write("b dirty edit\n")
+    b_untracked = os.path.join(b_dir, "untracked.md")
+    with open(b_untracked, "w") as f:
+        f.write("b untracked\n")
+    b_tracked_before = open(b_tracked, "rb").read()
+    b_untracked_before = open(b_untracked, "rb").read()
+
+    sha = head_sha(git_repo)
+    result = kernel.mutate(
+        "memory", "create", _valid_args(),
+        expected_base_sha=sha,
+        write_fn=_scope_write,
+        commit_msg="test: scoped create",
+        scope_prefixes=["folder-a"],
+        control_paths=["INDEX.md"],
+    )
+
+    assert result["git"]["committed"] is True
+    committed = subprocess.run(
+        [
+            "git", "diff-tree", "--no-commit-id", "--name-only", "-r",
+            result["git"]["detail"],
+        ],
+        cwd=git_repo, check=True, capture_output=True, text=True,
+    ).stdout.splitlines()
+    assert "folder-a/card.md" in committed
+    assert not any(path.startswith("folder-b/") for path in committed)
+    assert open(b_tracked, "rb").read() == b_tracked_before
+    assert open(b_untracked, "rb").read() == b_untracked_before
+
+
+def test_kernel_scope_prefixes_rejects_in_scope_dirt(
+    git_repo, memory_domain_policy,
+):
+    kernel = _bound_kernel(git_repo, memory_domain_policy)
+    a_dir = os.path.join(git_repo, "folder-a")
+    os.makedirs(a_dir)
+    with open(os.path.join(a_dir, "dirty.md"), "w") as f:
+        f.write("dirty in scope\n")
+    called = False
+
+    def _write(binding, args):
+        nonlocal called
+        called = True
+        return {"id": "m-test01", "changed_paths": ["folder-a/card.md"]}
+
+    with pytest.raises(DirtyWorkTreeError):
+        kernel.mutate(
+            "memory", "create", _valid_args(),
+            write_fn=_write,
+            scope_prefixes=["folder-a"],
+        )
+    assert called is False
+
+
+def test_kernel_scope_prefixes_none_keeps_whole_repo_semantics(
+    git_repo, memory_domain_policy,
+):
+    kernel = _bound_kernel(git_repo, memory_domain_policy)
+    b_dir = os.path.join(git_repo, "folder-b")
+    os.makedirs(b_dir)
+    with open(os.path.join(b_dir, "dirty.md"), "w") as f:
+        f.write("dirty\n")
+    called = False
+
+    def _write(binding, args):
+        nonlocal called
+        called = True
+        return {"id": "m-test01", "changed_paths": ["folder-a/card.md"]}
+
+    with pytest.raises(DirtyWorkTreeError):
+        kernel.mutate(
+            "memory", "create", _valid_args(), write_fn=_write,
+        )
+    assert called is False
+
+
+def test_kernel_scope_prefixes_control_path_dirty_rejects(
+    git_repo, memory_domain_policy,
+):
+    kernel = _bound_kernel(git_repo, memory_domain_policy)
+    with open(os.path.join(git_repo, "INDEX.md"), "w") as f:
+        f.write("stale index\n")
+    called = False
+
+    def _write(binding, args):
+        nonlocal called
+        called = True
+        return {"id": "m-test01", "changed_paths": ["folder-a/card.md"]}
+
+    with pytest.raises(DirtyWorkTreeError):
+        kernel.mutate(
+            "memory", "create", _valid_args(),
+            write_fn=_write,
+            scope_prefixes=["folder-a"],
+            control_paths=["INDEX.md"],
+        )
+    assert called is False
+
+
+def test_kernel_scope_prefixes_ledger_control_path_dirty_rejects(
+    git_repo, memory_domain_policy,
+):
+    kernel = _bound_kernel(git_repo, memory_domain_policy)
+    ledger_path = os.path.join(git_repo, ".katana", "tombstones.json")
+    os.makedirs(os.path.dirname(ledger_path), exist_ok=True)
+    with open(ledger_path, "w") as f:
+        f.write('{"tombstones": []}\n')
+    subprocess.run(
+        ["git", "add", ".katana/tombstones.json"], cwd=git_repo, check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "seed ledger"],
+        cwd=git_repo, check=True, capture_output=True,
+    )
+    with open(ledger_path, "w") as f:
+        f.write('{"tombstones": ["m-deadbe"]}\n')
+    called = False
+
+    def _write(binding, args):
+        nonlocal called
+        called = True
+        return {"id": "m-test01", "changed_paths": ["folder-a/card.md"]}
+
+    with pytest.raises(DirtyWorkTreeError):
+        kernel.mutate(
+            "memory", "create", _valid_args(),
+            write_fn=_write,
+            scope_prefixes=["folder-a"],
+        )
+    assert called is False

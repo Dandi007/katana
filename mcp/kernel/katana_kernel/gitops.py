@@ -99,11 +99,15 @@ def is_working_tree_clean(
     repo_root: str,
     *,
     allowed_ignored_paths: list[str] | None = None,
+    scope_prefixes: list[str] | None = None,
+    control_paths: list[str] | None = None,
 ) -> bool:
     try:
         require_clean_working_tree(
             repo_root,
             allowed_ignored_paths=allowed_ignored_paths,
+            scope_prefixes=scope_prefixes,
+            control_paths=control_paths,
         )
         return True
     except (DirtyWorkTreeError, subprocess.SubprocessError, OSError):
@@ -396,12 +400,78 @@ def _ignored_untracked_paths(repo_root: str) -> list[str]:
     return [path for path in result.stdout.split("\0") if path]
 
 
+def _normalize_scope_prefixes(
+    repo_root: str,
+    paths: list[str] | None,
+) -> list[str]:
+    """Return repo-relative, normalized scope/control prefixes.
+
+    Scope prefixes are repo-root-relative path prefixes.  They must stay inside
+    the repository and must never target Git internals or the repository root.
+    """
+    root = Path(repo_root).resolve()
+    normalized: list[str] = []
+    for raw_path in paths or []:
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            relative = candidate.resolve(strict=False).relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise DirtyWorkTreeError(
+                f"scope prefix escapes repository: {raw_path!r}"
+            ) from exc
+        if (
+            relative in {Path("."), Path("")}
+            or not relative.parts
+            or relative.parts[0] == ".git"
+        ):
+            raise DirtyWorkTreeError(
+                f"invalid scope prefix: {raw_path!r}"
+            )
+        value = relative.as_posix().rstrip("/")
+        if value not in normalized:
+            normalized.append(value)
+    return normalized
+
+
+def _path_within(path: str, prefixes: list[str]) -> bool:
+    for prefix in prefixes:
+        prefix = prefix.rstrip("/")
+        if path == prefix or path.startswith(f"{prefix}/"):
+            return True
+    return False
+
+
+def _porcelain_paths(status_output: str) -> list[str]:
+    """Parse the changed paths out of `-z` porcelain v1 status output."""
+    paths: list[str] = []
+    for raw in status_output.split("\0"):
+        if len(raw) < 4:
+            continue
+        paths.append(raw[3:])
+    seen: set[str] = set()
+    result: list[str] = []
+    for path in paths:
+        if path and path not in seen:
+            seen.add(path)
+            result.append(path)
+    return result
+
+
 def require_clean_working_tree(
     repo_root: str,
     *,
     allowed_ignored_paths: list[str] | None = None,
+    scope_prefixes: list[str] | None = None,
+    control_paths: list[str] | None = None,
 ) -> str:
     """Fail closed unless tracked, staged, and untracked state is clean.
+
+    With ``scope_prefixes=None`` the whole repository must be clean (legacy
+    behavior).  With a non-empty scope, only dirt under ``scope_prefixes`` or
+    ``control_paths`` (governance surfaces such as ledgers and INDEX files)
+    blocks; dirty content elsewhere is preserved and never touched.
 
     Returns the base HEAD used by the transaction fail-stop guard.
     """
@@ -411,7 +481,9 @@ def require_clean_working_tree(
     base_sha = head_sha(repo_root)
     try:
         status_result = _run(
-            repo_root, "status", "--porcelain=v1", "--untracked-files=all",
+            repo_root,
+            "status", "--porcelain=v1", "-z", "--no-renames",
+            "--untracked-files=all",
         )
     except (subprocess.SubprocessError, OSError) as exc:
         raise DirtyWorkTreeError(
@@ -422,23 +494,44 @@ def require_clean_working_tree(
         raise DirtyWorkTreeError(
             f"cannot verify governed repository cleanliness: {detail}"
         )
-    if status_result.stdout:
+
+    scopes = _normalize_scope_prefixes(repo_root, scope_prefixes)
+    controls = _normalize_scope_prefixes(repo_root, control_paths)
+    if scopes:
+        offending = [
+            path
+            for path in _porcelain_paths(status_result.stdout)
+            if _path_within(path, scopes + controls)
+        ]
+        if offending:
+            raise DirtyWorkTreeError(
+                "governed mutation rejected: repository has tracked, staged, "
+                "or untracked changes within scope"
+            )
+    elif status_result.stdout:
         raise DirtyWorkTreeError(
             "governed mutation rejected: repository has tracked, staged, "
             "or untracked changes"
         )
+
     allowances = _normalize_ignored_allowances(
         repo_root,
         allowed_ignored_paths,
     )
-    unexpected_ignored = [
-        path
-        for path in _ignored_untracked_paths(repo_root)
-        if not any(
-            path == allowed or path.startswith(f"{allowed}/")
-            for allowed in allowances
-        )
-    ]
+    ignored_scope = scopes + controls
+    if scopes:
+        unexpected_ignored = [
+            path
+            for path in _ignored_untracked_paths(repo_root)
+            if not _path_within(path, allowances)
+            and _path_within(path, ignored_scope)
+        ]
+    else:
+        unexpected_ignored = [
+            path
+            for path in _ignored_untracked_paths(repo_root)
+            if not _path_within(path, allowances)
+        ]
     if unexpected_ignored:
         raise DirtyWorkTreeError(
             "governed mutation rejected: repository has ignored untracked "

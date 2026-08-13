@@ -308,6 +308,8 @@ class FSTools:
         *,
         idempotency_key: str | None = None,
         idempotency_payload: dict | None = None,
+        scope_prefixes: list[str] | None = None,
+        control_paths: list[str] | None = None,
     ) -> dict:
         return self._kernel.mutate(
             "work-folder",
@@ -320,7 +322,41 @@ class FSTools:
             idempotency_payload=(
                 idempotency_payload if idempotency_key is not None else None
             ),
+            scope_prefixes=scope_prefixes,
+            control_paths=control_paths,
         )
+
+    def _folder_scope(
+        self,
+        *folder_ids: str,
+        control_paths: list[str] = ("INDEX.md",),
+    ) -> dict:
+        """Return scope kwargs for a folder-level governed mutation."""
+        prefixes: list[str] = []
+        for folder_id in folder_ids:
+            if folder_id and folder_id not in prefixes:
+                prefixes.append(folder_id)
+        return {
+            "scope_prefixes": prefixes,
+            "control_paths": list(control_paths),
+        }
+
+    def _batch_scope(self, operations: list[dict]) -> dict:
+        """Union the folder scopes touched by a batch mutation."""
+        folder_ids: list[str] = []
+        for spec in operations:
+            op_args = spec.get("args") or {}
+            if spec.get("op") in ("fs_copy", "fs_rename"):
+                candidates = (
+                    op_args.get("source_folder_id"),
+                    op_args.get("dest_folder_id"),
+                )
+            else:
+                candidates = (op_args.get("folder_id"),)
+            for folder_id in candidates:
+                if folder_id and folder_id not in folder_ids:
+                    folder_ids.append(folder_id)
+        return self._folder_scope(*folder_ids)
 
     def _mutation_error(
         self,
@@ -935,6 +971,7 @@ class FSTools:
                 f"chore(wf): create {folder_id}:{filename}",
                 idempotency_key=idempotency_key,
                 idempotency_payload=args,
+                **self._folder_scope(folder_id),
             )
         except Exception as exc:
             return self._mutation_error(
@@ -1052,6 +1089,7 @@ class FSTools:
                 f"chore(wf): write {folder_id}:{filename}",
                 idempotency_key=idempotency_key,
                 idempotency_payload=args,
+                **self._folder_scope(folder_id),
             )
         except Exception as exc:
             return self._mutation_error(
@@ -1199,6 +1237,7 @@ class FSTools:
                 f"chore(wf): edit {folder_id}:{filename}",
                 idempotency_key=idempotency_key,
                 idempotency_payload=args,
+                **self._folder_scope(folder_id),
             )
         except Exception as exc:
             return self._mutation_error(
@@ -1330,6 +1369,7 @@ class FSTools:
                 ),
                 idempotency_key=idempotency_key,
                 idempotency_payload=args,
+                **self._folder_scope(dest_folder_id),
             )
         except Exception as exc:
             return self._mutation_error(
@@ -1410,6 +1450,7 @@ class FSTools:
                 ),
                 idempotency_key=idempotency_key,
                 idempotency_payload=args,
+                **self._folder_scope(source_folder_id, dest_folder_id),
             )
         except Exception as exc:
             return self._mutation_error(
@@ -1500,6 +1541,7 @@ class FSTools:
                 f"chore(wf): delete {folder_id}:{filename}",
                 idempotency_key=idempotency_key,
                 idempotency_payload=args,
+                **self._folder_scope(folder_id),
             )
         except Exception as exc:
             return self._mutation_error(
@@ -1778,6 +1820,7 @@ class FSTools:
                 "chore(wf): batch",
                 idempotency_key=idempotency_key,
                 idempotency_payload=args,
+                **self._batch_scope(operations),
             )
         except Exception as exc:
             return self._mutation_error(
