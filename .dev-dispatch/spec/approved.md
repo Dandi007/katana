@@ -1,135 +1,68 @@
-# N2b —— `anchor-check` 解析的锚点格式，真实数据里一条都没有
+# dev_katana_kernel_guard_scope_01 — governed mutation 守卫按 scope 收窄（消除多 client 互锁）
 
-> 上游依据：`wf-dc0c15` `plan.md` §3 链 B N2；`spec.md` §5.2。
-> **全部依据来自 2026-08-05 对真实 bus 的普查，不是推测。**
+status: approved
+date: 2026-08-13
+upstream: 监督线（用户拍板 2026-08-13：「可共用同一仓库，但绝对不要互相阻塞，这是最基本的」）；实施以本文为准
 
----
+## 1. 背景（真机实锤，两处独立复现）
 
-## 0　实测：校验器与生产者对不上，且校验器那一侧是空集
+katana kernel 的 governed mutation 在写前要求**整仓** clean：
+`kernel.py:631 require_clean_working_tree(binding.repo_root, ...)`——仓里**任何**
+tracked/staged/untracked 改动都会让**一切** governed mutation 被拒
+（`governed mutation rejected: repository has tracked, staged, or untracked changes`）。
 
-`plugins/deep-research/skills/deep-research/loop-orchestration/tools/anchor-check.py`
-自述 `v2 (2026-08-04 N2): 支持带版本 URI`，其正则：
-```python
-VERSIONED_URI_RE = re.compile(r'^code://([^@]+)@([^:]+):(.+)#L(\d+)(?:-L?(\d+))?$')
-# 期望：code://<repo-name>@<commit>:<relpath>#L<start>[-<end>]
-```
+后果（2026-08-13 双泵实测）：work-records 仓同时承载多个 work folder（wf-87e23d 与
+wf-3c3dba 两条 goal-driven 线），A 线 worker 直写盘尚未提交时，B 线（以及任何第三方
+session）的 `wf_save`/`fs_write`/`wf_append_progress` 全部失败——**两条互不相干的
+工作线经共享仓互锁**。同类先例：memory 域 access-log 自锁（`test_memory_server.py:180`、
+PR #114 fix/memory-access-log-self-lock），说明该全仓守卫已多次造成跨作用域误伤。
 
-**而流水线真实产出的锚点**（`agent-runtime` 的 `composeAnchor(source, locator, revision, range)`
-组装为 `<source>://<locator>@<revision>#<range>`）长这样：
-```
-code://src/tick.ts@a592276892f5e93a5e37d800a52dd48436639c0b#L202-L211
-```
+## 2. 变更契约
 
-实测该正则对它 **NO MATCH**（缺 `:`，且 path 在 `@` 之前）。
+给 kernel 的 governed mutation 引入**作用域化清洁检查**（scope-aware clean guard）：
 
-### 0.1 全 bus 普查：校验器期望的那个格式，**零实例**
+1. **kernel API**：`GovernedKernel.mutate`（及同用该守卫的读路径，如 `kernel.py:177`）
+   新增可选参数 `scope_prefixes: list[str] | None`（repo-root 相对前缀）。
+   - `None`（默认）= 现行为，整仓 clean 检查，**完全向后兼容**；
+   - 非空 = 清洁检查只覆盖：`scope_prefixes` 之下的路径 + 本次事务必然触碰的治理面
+     （mutation ledger、manifest/INDEX 等由 binding 声明的 control paths）。
+     作用域**之外**的 dirty 条目不阻塞本次 mutation。
+2. **提交隔离（硬性）**：mutation 的 git commit 只允许包含事务 journal 声明的路径
+   （现有 `validate_transaction_paths` / `changed_paths` 校验保持）；作用域外的
+   dirty 内容**绝不可被顺手 add/commit/stash/checkout**——不属于本事务的现场一个
+   字节不碰。rollback 同样只回滚 journal 路径（现行为已是，回归测试固化）。
+3. **base_sha/CAS 语义不变**：`base_sha` 仍取 repo HEAD；作用域外 dirt 不影响 CAS。
+4. **work-folder domain 采用**：work-folder MCP server 对 folder 级操作
+   （`wf_save`/`wf_append_progress`/`fs_write`/`fs_edit`/`fs_create` 等）传
+   `scope_prefixes=[<folder 目录>]`（+该 server 声明的顶层 INDEX/brief 等 control
+   paths）。跨 folder 的生命周期操作（如 `wf_reindex`）可自行选择整仓语义。
+5. **memory / wiki domain 本单不改**（保持默认整仓语义），仅保证 kernel 参数对其
+   透明兼容；后续单独评估采用。
 
-| 格式 | 真实条数 |
-|---|---|
-| `code://<repo>@<sha>:<path>#L..`（**anchor-check 期望**） | **0** |
-| `code://<path>@<sha>#<range>`（**流水线实产**） | **6**（`research:v1-tick-reclaim.evidence`，2026-08-05 V1 真跑） |
-| 裸 `path:line`（历史） | **131**（`loop-mcp-semantics` 114 + `smoke-bus-semantics` 17） |
+## 3. 非目标
 
-⇒ **`anchor-check` 目前解析不了任何真实存在的锚点。**
-它不会报错，只会把全部锚点归为「不可解析 / 旧格式」⇒ **零功率校验器**。
+- 不改 mutation ledger / journal / VFS 事务机制本身
+- 不做多 client 并发写同一 folder 的锁（另议；本单只解「异 folder 互锁」）
+- 不改 MCP 工具的对外 schema（纯 server 内部行为变更）
 
-> ### ⛔ 判据（本线第二次付同样的学费）：
-> **一个格式/契约在写出来之后、被消费之前，必须拿真实产物原样喂一遍。**
-> 上一次是 `research.*.v2` 设计七轮公示后拿真产物一喂 **0/141 通过**；
-> 这次是 `anchor-check v2` 写完后对真实锚点 **0/6 可解析**。
-> **两次都是「照着自己脑子里的格式写，没拿真东西对」。**
+## 4. 验收标准
 
-### 0.2 ⛔ 零功率校验器比没有校验器更坏
-它会输出「N 条锚点，全部旧格式/不可校验」这种**看起来像正常结论**的报告，
-而真相是「校验从未发生」。本 folder 已记：**零功率的检查制造一个看起来被验证过的空位。**
+`bash mcp/run-tests.sh` 全绿，其中新增/扩展测试覆盖：
 
----
+- [ ] 仓内存在 folder-B 的 tracked 改动 + untracked 新文件时，folder-A 的 governed
+      mutation（经 `scope_prefixes=[folder-A]`）**成功**，且产生的 commit diff 中
+      **不含任何 folder-B 路径**；folder-B 的 dirty 现场在 mutation 前后逐字节不变
+- [ ] folder-A 自身 dirty 时，folder-A 的 mutation 仍被拒（守卫语义保留，只是收窄）
+- [ ] `scope_prefixes=None` 路径行为与现行为完全一致（回归：任意 dirt 均拒）
+- [ ] control paths（ledger/INDEX 等）dirty 时，即使不在 folder 前缀下也拒
+      （治理面不受作用域豁免）
+- [ ] work-folder server 的 folder 级工具实际传入 scope（集成用例：模拟姊妹 folder
+      dirty，`wf_append_progress` 成功）
+- [ ] 既有全部测试保持绿
 
-## 1　交付
+## 5. 参考
 
-### 1.1 ⛔ 以**生产者的实际格式**为准，不是以校验器为准
-权威格式 = `composeAnchor` 产出的 `<source>://<locator>@<revision>#<range>`。
-理由：**该格式的 6 条实例已经不可回退地写在 append-only 的 bus 上**
-（`research:v1-tick-reclaim.evidence`），且 `worker.result.v1` / `research.evidence.v2`
-两个协议**已永久冻结**。⛔ **不得为了迁就校验器去改生产者格式。**
-
-### 1.2 ⛔ 三种格式都必须被**显式**分类，不得静默归堆
-| 输入 | 要求 |
-|---|---|
-| `code://<path>@<sha>#L<a>-L<b>`（现行） | **必须解析并真正校验**（取该 revision 的文件、比对 quote） |
-| 裸 `path:line`（历史 131 条） | **显式标为「旧格式，不可校验 revision」**，计入独立计数；⛔ 不得与「校验通过」混在一起 |
-| 其它 | **显式标为不可解析**，计入独立计数 |
-⛔ 三类计数必须分别输出；⛔ 任何一类都不得被静默丢弃。
-
-### 1.3 ⛔ repo 归属必须外部提供，且缺失时响亮失败
-现行格式的 `locator` 是**仓内相对路径**（`src/tick.ts`），**不含仓名**
-⇒ 单看锚点无法确定是哪个仓。
-⛔ 必须由调用方显式提供仓根（如 `--repo-root`），**缺失时响亮失败**，
-⛔ 绝不猜测、绝不遍历 `CODE_ROOTS` 撞运气（撞对了也是错的——它会在另一个仓里找到同名文件）。
-
-### 1.4 ⛔ 取回内容必须自检
-本线出过 `git show "<sha>:path"` 丢掉 `:path` 只打印 commit 的坑
-（**rc=0、输出 125KB，所以「空」看着正常**）。
-⛔ fetcher 必须校验取回内容**非空且形态合理**（例如行数 > 0、能定位到给定行段），
-否则响亮失败。
-
----
-
-## 2　硬验收
-
-> ⛔ **E1 是不可替代的一条**：必须拿**真实 bus 上的真实锚点**求值，不得用手写样例。
-
-| # | 断言 | 怎么验 |
-|---|---|---|
-| **E1** | ⛔ 对 `research:v1-tick-reclaim.evidence` 的 **6 条真实锚点**：**6 条全部被解析并真正校验，且结论为命中** | 直接读该 channel（或固化其真实导出为 fixture，**必须是原样字节**）；⛔ 不得手写样例 |
-| **E2** | ⛔ 对 131 条历史裸 `path:line`：**全部显式归入「旧格式」计数**，不计入通过、不计入失败 | 对真实导出求值，断言三类计数之和 === 总数 |
-| **E3** | ⛔ 变异：把现行格式的正则改回 `repo@sha:path` 形态 ⇒ **E1 必须挂** | 破坏后回显被改行，跑完还原 |
-| **E4** | ⛔ 引文确实**不在**该位置时必须判失败（阳性对照） | 构造一条 quote 与 anchor 不符的输入，断言判失败 |
-| **E5** | ⛔ 与 E4 只差一项：引文**在**该位置 ⇒ 判通过（判别对，防「恒判失败」） | 两例对照 |
-| **E6** | ⛔ 缺 `--repo-root` ⇒ **响亮失败**，非零退出，⛔ 不得猜仓 | 断言退出码非零 + 错误文本点名 |
-| **E7** | ⛔ fetcher 取回空内容 / 取不到该 revision ⇒ **响亮失败**，⛔ 不得当成「引文不匹配」 | 构造不存在的 revision，断言错误可区分于「不匹配」 |
-| **E8** | ⛔ 三类计数分别输出且**总和 === 输入条数**（⛔ 无声丢弃即失败） | 断言等式 |
-| **E9** | ⛔ 自检入口固定为 `plugins/deep-research/skills/deep-research/loop-orchestration/tools/anchor-check-selftest.sh`，exit 0 | 该路径必须存在且可执行（本包的验收命令就是它） |
-| **E10** | ⛔ 不得触碰 `.dd-evidence/`；既有文件不得删除 | `git diff` |
-
-### 2.1 ⛔ 执行约束
-- ⛔ **只读**：本包**不得向任何 channel 写入**（校验器是只读工具）。
-- 真实语料可直连 bus 读取，或固化为 fixture —— **固化必须是原样导出的字节**，
-  ⛔ 不得「照着写一份」（本线为此付过 0/141 的学费）。
-- ⚠️ 读会增长的 channel 时：`limit=N` 返回**最早** N 条；须先定位尾部再用 `after_seq` 倒查。
-
----
-
-## 3　变异自检
-
-| 变异 | 必须杀死 |
-|---|---|
-| **Q1** 正则改回 `repo@sha:path` 形态 | **E1** |
-| **Q2** 旧格式静默跳过（不计数） | **E2 与 E8** |
-| **Q3** 缺 `--repo-root` 时猜一个仓 | **E6** |
-| **Q4** 取回空内容当成「引文不匹配」 | **E7** |
-| **Q5** 校验恒判通过 | **E4** |
-| **Q6** 校验恒判失败 | **E5**（与 E4 构成判别对） |
-
-> **破坏后必须回显被改的那一行**，跑完逐字还原并 `git diff --stat` 确认干净。
-> ⛔ **变异未命中时该次运行不构成证据**（本线今日栽过一次：正则没命中却照跑，exit 0 被误读）。
-> ⚠️ **变异通过只证明「该断言有牙」，不证明「该设计正确」**
-> （A10b 的 `max_nodes: 2` 曾被变异"证明"正确，实则结构上仍错）。
-
----
-
-## 4　非目标
-- ⛔ **不改生产者的 anchor 格式**（`agent-runtime` 的 `composeAnchor`）——
-  该格式的实例已不可回退地在 bus 上，且相关协议已冻结
-- ⛔ 不注册/不修改任何协议
-- ⛔ 不实现 `web://` / `feishu://` 等其它 source 的 fetcher（**按需增量**，先只做 `code://`）
-- ⛔ 不动 `loop-orchestration/` 的其它文件（R4 会整体退役该目录，不在本包）
-
----
-
-## 5　⛔ 派发面
-- 目标仓：`Dandi007/katana`，改动限于
-  `plugins/deep-research/skills/deep-research/loop-orchestration/tools/`
-- 验收命令即 E9 的自检脚本（本包必须创建它）+ `./tests/lint-structure.sh`
-- ⛔ 读退出码时命令后不接管道
-- `.dd-evidence/` 是 dd 保留路径，actor 任何提交碰它都是硬失败
+- 守卫现场：`mcp/kernel/katana_kernel/kernel.py:629-635`、`gitops.py:399`（`require_clean_working_tree`）、`gitops.py:104`
+- 互锁实证：wf-3c3dba questions.md Q2（20:05 干净窗口成功 / 20:25 姊妹卷脏 → `OPERATION_FAILED`，双向复现表）
+- 同类先例：`mcp/memory/tests/test_memory_server.py:180`、PR #114（fix/memory-access-log-self-lock）
+- 用户拍板原话：「可以共用同一个仓库，但绝对不要互相阻塞，这是最基本的」（2026-08-13）
