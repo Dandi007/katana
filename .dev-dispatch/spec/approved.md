@@ -1,68 +1,84 @@
-# dev_katana_kernel_guard_scope_01 — governed mutation 守卫按 scope 收窄（消除多 client 互锁）
+# dev_katana_wf_verify_typing_01 —— work-folder 环境验证按资源类型判定，别把端点/记法当本地路径
 
-status: approved
-date: 2026-08-13
-upstream: 监督线（用户拍板 2026-08-13：「可共用同一仓库，但绝对不要互相阻塞，这是最基本的」）；实施以本文为准
+```
+development_id: dev_katana_wf_verify_typing_01
+status: ready-to-dispatch（先红证据已备）
+date: 2026-08-14
+repo: katana（单仓；本单不碰 goal-agent / agent-runtime）
+target_base: 由派发方按 katana 线分支实况定（本卷不代定）
+upstream: 考卷 C wf-9f3cfe 台账 G3
+先红证据: evidence/g3-red-20260814/（真机 echo，工装 ops/g3-red/probe.py）
+换号核对: dd attempts 无同名目录、三仓无同名 loopdev 分支（2026-08-13T18:0xZ 实核）
+```
 
-## 1. 背景（真机实锤，两处独立复现）
+## 1. 先红（真机实测，非推理）
 
-katana kernel 的 governed mutation 在写前要求**整仓** clean：
-`kernel.py:631 require_clean_working_tree(binding.repo_root, ...)`——仓里**任何**
-tracked/staged/untracked 改动都会让**一切** governed mutation 被拒
-（`governed mutation rejected: repository has tracked, staged, or untracked changes`）。
+`ops/g3-red/probe.py` 直接 import 生产同一份
+`katana/mcp/work-folder/katana_work_folder_mcp/verify.py`，在内存里喂四行样例表：
 
-后果（2026-08-13 双泵实测）：work-records 仓同时承载多个 work folder（wf-87e23d 与
-wf-3c3dba 两条 goal-driven 线），A 线 worker 直写盘尚未提交时，B 线（以及任何第三方
-session）的 `wf_save`/`fs_write`/`wf_append_progress` 全部失败——**两条互不相干的
-工作线经共享仓互锁**。同类先例：memory 域 access-log 自锁（`test_memory_server.py:180`、
-PR #114 fix/memory-access-log-self-lock），说明该全仓守卫已多次造成跨作用域误伤。
+```
+parse_context_paths 解析出 4 条资源：
+  name=反引号包裹的真实目录     path='`/data/work-records`'
+  name=dd Development MCP 端点  path='http://127.0.0.1:5606/mcp'
+  name=家目录记法               path='~/.claude'
+  name=裸真实目录（对照）        path='/data/work-records'
 
-## 2. 变更契约
+  反引号包裹的真实目录  -> BROKEN   路径不存在: `/data/work-records`
+  dd Development MCP 端点 -> BROKEN 路径不存在: http://127.0.0.1:5606/mcp
+  家目录记法            -> BROKEN   路径不存在: ~/.claude
+  裸真实目录（对照）     -> DRIFT    有未提交变更
 
-给 kernel 的 governed mutation 引入**作用域化清洁检查**（scope-aware clean guard）：
+overall_level = BROKEN
+G3-RED: CONFIRMED
+```
 
-1. **kernel API**：`GovernedKernel.mutate`（及同用该守卫的读路径，如 `kernel.py:177`）
-   新增可选参数 `scope_prefixes: list[str] | None`（repo-root 相对前缀）。
-   - `None`（默认）= 现行为，整仓 clean 检查，**完全向后兼容**；
-   - 非空 = 清洁检查只覆盖：`scope_prefixes` 之下的路径 + 本次事务必然触碰的治理面
-     （mutation ledger、manifest/INDEX 等由 binding 声明的 control paths）。
-     作用域**之外**的 dirty 条目不阻塞本次 mutation。
-2. **提交隔离（硬性）**：mutation 的 git commit 只允许包含事务 journal 声明的路径
-   （现有 `validate_transaction_paths` / `changed_paths` 校验保持）；作用域外的
-   dirty 内容**绝不可被顺手 add/commit/stash/checkout**——不属于本事务的现场一个
-   字节不碰。rollback 同样只回滚 journal 路径（现行为已是，回归测试固化）。
-3. **base_sha/CAS 语义不变**：`base_sha` 仍取 repo HEAD；作用域外 dirt 不影响 CAS。
-4. **work-folder domain 采用**：work-folder MCP server 对 folder 级操作
-   （`wf_save`/`wf_append_progress`/`fs_write`/`fs_edit`/`fs_create` 等）传
-   `scope_prefixes=[<folder 目录>]`（+该 server 声明的顶层 INDEX/brief 等 control
-   paths）。跨 folder 的生命周期操作（如 `wf_reindex`）可自行选择整仓语义。
-5. **memory / wiki domain 本单不改**（保持默认整仓语义），仅保证 kernel 参数对其
-   透明兼容；后续单独评估采用。
+对照项判 DRIFT（而非 BROKEN）⇒ 探针不是恒红，红的确实是那三类。
 
-## 3. 非目标
+**断链定位（读码实核）**：`verify.py:79-101` 的 `parse_context_paths` 把表格第 2 列
+**原样**取出（只跳过空/`<` 开头/含"路径|地址"字样三种），`fs_git_probe`（:199）随即
+`os.path.exists(path)`。⇒ 反引号、URL、`~`、`repo:path` 一律被当成本地路径 stat。
 
-- 不改 mutation ledger / journal / VFS 事务机制本身
-- 不做多 client 并发写同一 folder 的锁（另议；本单只解「异 folder 互锁」）
-- 不改 MCP 工具的对外 schema（纯 server 内部行为变更）
+**后果（上游真机实证，本卷 backlog G3 已载）**：B 线泵 run `gdpump-20260813-211358-1a0446`
+第 7 轮 coordinator 调 `wf_resume` 得 `BROKEN` → 按「BROKEN 必停」契约裁 blocked → **整泵终局**。
+即：一张写得规范（带反引号）的 context 表，能把一条在跑的泵杀死。
 
-## 4. 验收标准
+## 2. 变更契约（只动 katana work-folder MCP）
 
-`bash mcp/run-tests.sh` 全绿，其中新增/扩展测试覆盖：
+**2.1 资源分型.** `parse_context_paths` 产出的 `Resource` 增加类型判定（实现形态由实施方裁定）：
+- `local-path`：以 `/` 或 `./` 开头，或 `~` 开头（**须先 `expanduser`**）→ 走今天的 fs/git 探测；
+- `endpoint`：`http://`、`https://`、`ws://` 等 scheme → **不 stat**；探活与否见 2.3；
+- `repo-ref`：`repo:path` 一类记法 → 不 stat，标记为 client-verified；
+- `unknown`：其余 → 不 stat，判 `INFO`，**不得**因它把 overall 拉成 BROKEN。
 
-- [ ] 仓内存在 folder-B 的 tracked 改动 + untracked 新文件时，folder-A 的 governed
-      mutation（经 `scope_prefixes=[folder-A]`）**成功**，且产生的 commit diff 中
-      **不含任何 folder-B 路径**；folder-B 的 dirty 现场在 mutation 前后逐字节不变
-- [ ] folder-A 自身 dirty 时，folder-A 的 mutation 仍被拒（守卫语义保留，只是收窄）
-- [ ] `scope_prefixes=None` 路径行为与现行为完全一致（回归：任意 dirt 均拒）
-- [ ] control paths（ledger/INDEX 等）dirty 时，即使不在 folder 前缀下也拒
-      （治理面不受作用域豁免）
-- [ ] work-folder server 的 folder 级工具实际传入 scope（集成用例：模拟姊妹 folder
-      dirty，`wf_append_progress` 成功）
-- [ ] 既有全部测试保持绿
+**2.2 装饰字符归一.** 第 2 列先剥 markdown 装饰再判类型：成对反引号、加粗 `**`、行内链接
+`[text](path)` 取 path。**这条是先红里最致命的一条**——写法规范反而被判死。
 
-## 5. 参考
+**2.3 端点探活是可选项，不是默认.** 默认只标 `endpoint` 不探活；若实现探活，必须
+超时 ≤2s、失败只降级为 `DRIFT`，**不得**产生 `BROKEN`（网络抖动不该杀泵）。
 
-- 守卫现场：`mcp/kernel/katana_kernel/kernel.py:629-635`、`gitops.py:399`（`require_clean_working_tree`）、`gitops.py:104`
-- 互锁实证：wf-3c3dba questions.md Q2（20:05 干净窗口成功 / 20:25 姊妹卷脏 → `OPERATION_FAILED`，双向复现表）
-- 同类先例：`mcp/memory/tests/test_memory_server.py:180`、PR #114（fix/memory-access-log-self-lock）
-- 用户拍板原话：「可以共用同一个仓库，但绝对不要互相阻塞，这是最基本的」（2026-08-13）
+**2.4 overall 语义收窄.** `overall_level` 只由 `local-path` 类资源的 verdict 决定；
+其余类型最多贡献 `DRIFT`。**`BROKEN` 必须意味着「卷内声明的本地路径真的不在」**。
+
+**2.5 非目标.** 不动 `wf_resume` 的对外契约与返回结构；不动 guard-scope（G1/katana#116）；
+不改 context.md 的书写规范去迁就实现（**修实现，不是修所有卷的文档**）。
+
+## 3. 验收标准（可机检）
+
+### 3.1 单测
+1. 反引号包裹的存在路径 → `MATCH`（先红为 BROKEN）。
+2. `http(s)://` → 不调用 fs 探测（用 fake probe_fn 断言**未被调用**），且不产生 BROKEN。
+3. `~/<存在目录>` → expanduser 后 `MATCH`。
+4. 不存在的裸路径 → 仍 `BROKEN`（**回归护栏**：不能为了不误杀就永不判死）。
+5. 混合表 → `overall_level` 只受 local-path 影响。
+
+### 3.2 真机后绿（同一工装）
+`python3 ops/g3-red/probe.py` 重跑，末行须变成 `G3-RED: NOT_CONFIRMED`（先红三条转 MATCH/INFO）。
+> 该工装是**先红/后绿同一份**，判据方向相反即可，勿另写一份。
+
+### 3.3 回归
+B 卷 `wf-3c3dba` 迁去 `env-host.md` 的宿主资源表可迁回 context.md 而不再触发 BROKEN
+（属观察项，不作通过条件——迁回与否是那一卷的事）。
+
+## 4. 交付边界
+代码与 code review **全部走 dev-dispatch**。本 worker 只产出本 spec、先红证据与 `ops/g3-red/` 工装。
+**入队次序与授权不在本卷自决**：katana 仓不在授权硬线 1 的两仓之内，派发前需上游拍板（见 questions Q6-1）。
