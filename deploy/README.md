@@ -24,6 +24,15 @@ named volume 把这两类事故**结构性消除**：宿主命名空间里根本
 | `docker-compose.yml` | 三服务 + 三 named volume，零 bind |
 | `migrate-data-to-volumes.sh` | 宿主目录 → 卷，带校验与安全网 |
 | `backup-volumes.sh` | 卷 → 宿主 bare mirror |
+| `dd-stall-probe.sh` | **非部署件**：判定一条 dev-dispatch implement attempt 是否卡死（只读、无副作用、带正反自证） |
+
+`dd-stall-probe.sh` 与容器化无关，放这里是因为它和 `rehearse.sh` 同属本卷的确定性
+ops 工具面。它存在的原因是：本目标的接线单先后两次卡死，而两次都是靠人盯表判断
+「还在不在跑」，中间用错过两个信号——「进程还在」（卡死 72 分钟里进程一直在）和
+「socket 句柄数为 0」（实测三个**健康**作业同样是 0，这个信号根本不成立）。
+真正能区分的只有产出，故判据是「run target 零写入时长 + nodes/ 是否为空」，
+阈值 30 分钟按实测标定（健康 implementer 节点完成耗时 988s ≈ 16.5 分钟）。
+`--self-test` 用合成的卡死夹具与真实已收束的 run 做正反两例自证。
 
 ## 构建
 
