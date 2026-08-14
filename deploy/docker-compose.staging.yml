@@ -1,0 +1,42 @@
+# 演练用 override —— 与生产同一份 docker-compose.yml，只换三样：
+# 卷名、宿主端口、容器名。**镜像、env、加固项、command 全部与生产逐字相同**，
+# 否则演练就不是演练了。
+#
+#   docker compose -p katana-staging \
+#     -f deploy/docker-compose.yml -f deploy/docker-compose.staging.yml up -d
+#
+# 容器内端口刻意不改（仍是 5601/5602/5605）：改了就等于测的不是生产那套 env。
+# 只把宿主侧发布端口挪到 1560x，避开在跑的生产实例。
+#
+# **必须用 `!override`**：compose 对 ports 这类序列是**追加合并**而不是替换。不加
+# 这个标签，staging 栈会同时绑 5601/5602/5605 与 1560x —— 直接跟生产实例抢端口，
+# `address already in use` 起不来。真机演练里就是这么炸的。
+#
+# 卷由 deploy/rehearse.sh 从 bare mirror 克隆种入——用 mirror 而不是直接拷生产
+# 目录：mirror 是一致性快照，且**全程零触碰生产数据**。
+
+services:
+  wiki:
+    container_name: katana-wiki-mcp-staging
+    ports: !override ["127.0.0.1:15601:5601"]
+
+  work-folder:
+    container_name: katana-work-folder-mcp-staging
+    ports: !override ["127.0.0.1:15602:5602"]
+
+  memory:
+    container_name: katana-memory-mcp-staging
+    ports: !override ["127.0.0.1:15605:5605"]
+
+# external: true —— 卷由 rehearse.sh 从 mirror 种入并负责生命周期，compose 只消费。
+# 不声明 external 时 compose 会对「已存在但非我创建」的卷发告警并污染退出码。
+volumes:
+  katana-wiki:
+    name: katana-staging-wiki
+    external: true
+  katana-work-records:
+    name: katana-staging-work-records
+    external: true
+  katana-memory:
+    name: katana-staging-memory
+    external: true
