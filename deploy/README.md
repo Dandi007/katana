@@ -25,6 +25,7 @@ named volume 把这两类事故**结构性消除**：宿主命名空间里根本
 | `migrate-data-to-volumes.sh` | 宿主目录 → 卷，带校验与安全网 |
 | `backup-volumes.sh` | 卷 → 宿主 bare mirror |
 | `dd-stall-probe.sh` | **非部署件**：判定一条 dev-dispatch implement attempt 是否卡死（只读、无副作用、带正反自证） |
+| `dd-dispatch-preflight.sh` | **非部署件**：派 dd 单前的前置校验，选择器双层验证 + H0 不变量；不通过就不输出 initial_handoff |
 
 `dd-stall-probe.sh` 与容器化无关，放这里是因为它和 `rehearse.sh` 同属本卷的确定性
 ops 工具面。它存在的原因是：本目标的接线单先后两次卡死，而两次都是靠人盯表判断
@@ -33,6 +34,17 @@ ops 工具面。它存在的原因是：本目标的接线单先后两次卡死�
 真正能区分的只有产出，故判据是「run target 零写入时长 + nodes/ 是否为空」，
 阈值 30 分钟按实测标定（健康 implementer 节点完成耗时 988s ≈ 16.5 分钟）。
 `--self-test` 用合成的卡死夹具与真实已收束的 run 做正反两例自证。
+
+`dd-dispatch-preflight.sh` 解决的是另一条、已经吃掉**两个 development id** 的坑：
+选择器有两层互不一致的注册表（engine-frozen 解析器 / agent-run 的 model-registry），
+`dsv4pro/lingzhi` 只过前者、`ds/lingzhi` 只过后者，两次都要到派发时才炸，而
+attempt-context/v1 **不支持 reconfigure**，只能换号重派。
+
+把教训写进 PR 说明是挡不住的——下次派单没人会去读上一张单的 PR。所以做成流程里绕不过去
+的一步：**`initial_handoff` 的 JSON 只从这个脚本出**。任一层不认，脚本非零退出且
+**不打印 handoff**，那份 JSON 就不存在，也就无从粘进 `development_create`。
+它同时校验 H0 的三条不变量（worktree 干净、symbolic-ref 匹配、唯一父 = target base）。
+`--self-test` 直接拿两个真实烧过号的选择器做反例。
 
 ## 构建
 
