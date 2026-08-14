@@ -1,0 +1,14 @@
+[
+  {
+    "payload": {
+      "anchor": "web://http://127.0.0.1:50287/e1-material2.png@9bee527fe5f6e5ddef93194f3ede333b964ff9b50c8db013aef1dc6659fe1675#L900:1-5",
+      "quote": "图1 展示了 tick 回收在三个 revision 上的耗时分布，横轴为 revis"
+    }
+  },
+  {
+    "payload": {
+      "anchor": "web://http://127.0.0.1:50287/e1-material2.png@9bee527fe5f6e5ddef93194f3ede333b964ff9b50c8db013aef1dc6659fe1675#L3:1-9999",
+      "quote": "图1 展示了 tick 回收在三个 revision 上的耗时分布，横轴为 revis"
+    }
+  }
+]

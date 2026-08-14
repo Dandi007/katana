@@ -1,0 +1,20 @@
+[
+  {
+    "payload": {
+      "anchor": "wiki://foo@bar#L1",
+      "quote": "x"
+    }
+  },
+  {
+    "payload": {
+      "anchor": "feishu://x@y#L2",
+      "quote": "y"
+    }
+  },
+  {
+    "payload": {
+      "anchor": "!!!not-an-anchor!!!",
+      "quote": "z"
+    }
+  }
+]

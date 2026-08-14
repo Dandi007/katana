@@ -1,0 +1,46 @@
+[
+  {
+    "seq": 1,
+    "type": "research.doc.v2",
+    "payload": {
+      "doc_kind": "transcript",
+      "digest": "9bee527fe5f6e5ddef93194f3ede333b964ff9b50c8db013aef1dc6659fe1675",
+      "origin": "http://127.0.0.1:50287/e1-material2.png",
+      "body": "[transcript] e1-material2.png (fixture, 离线可重放)\n\n图1 展示了 tick 回收在三个 revision 上的耗时分布，横轴为 revision 序号。\n图注：灰色为 in_flight，蓝色为 reclaimed，红色为 stuck。\n采样窗口 2026-08-01 至 2026-08-05，共 131 个样本点。\n\n正文段落：回收路径的关键在于 CAS 回 open 时必须带上 retries，否则崩溃恢复后重试计数会被清零，导致同一张卡在 in_flight 与 open 之间无限往返；本图第二段与第三段分别给出了带 retries 与不带 retries 两种实现的实测曲线，两条曲线在第 40 个样本点后出现明显分叉，分叉幅度随并发度线性增长，这与我们在 N2b 里给出的分析一致，也解释了为何旧实现在高并发下会出现尾部长时间不收敛的现象；第四段进一步给出了并发度 8 / 16 / 32 三档的分位数表，P50 分别为 12ms / 19ms / 31ms，P99 分别为 74ms / 168ms / 402ms，其中 P99 的抬升主要来自 stuck 卡在超时前的空转，而这一段空转在带 retries 的实现里被完全消除。\n\n表1：三个 revision 的回收成功率分别为 91.2%、96.7%、99.4%。\n\n脚注：样本来自 research:v1-tick-reclaim.evidence 通道。\n末行：本 transcript 为离线核验用固定语料。",
+      "body_len": 666
+    }
+  },
+  {
+    "seq": 2,
+    "type": "research.doc.v2",
+    "payload": {
+      "doc_kind": "transcript",
+      "digest": "1c0ffee5deadbeef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "origin": "http://ops@127.0.0.1:50287/e1-material2.png",
+      "body": "[transcript] 带 userinfo 的 URI 取回的同一材料（鲁棒性语料）\n第二行给出结论：URI 段可含 @，故解析必须以定长 64 hex digest 收尾切分。\n第三行：其余内容与主语料一致。",
+      "body_len": 107
+    }
+  },
+  {
+    "seq": 3,
+    "type": "research.doc.v2",
+    "payload": {
+      "doc_kind": "transcript",
+      "digest": "0000000000111111111122222222223333333333444444444455555555556666",
+      "origin": "http://127.0.0.1:50287/e1-empty.png",
+      "body": "   \n  \n",
+      "body_len": 7
+    }
+  },
+  {
+    "seq": 4,
+    "type": "research.doc.v2",
+    "payload": {
+      "doc_kind": "material",
+      "digest": "9bee527fe5f6e5ddef93194f3ede333b964ff9b50c8db013aef1dc6659fe1675",
+      "origin": "http://127.0.0.1:50287/e1-material2.png",
+      "body": "这是 material doc，不是 transcript，绝不能被选中。",
+      "body_len": 37
+    }
+  }
+]
