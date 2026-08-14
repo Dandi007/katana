@@ -1,8 +1,15 @@
 """vault-search (127.0.0.1:18082) HTTP 客户端。复用既有检索栈，不重造 RRF。"""
 from dataclasses import dataclass
+import os
+
 import httpx
 
-DEFAULT_BASE_URL = "http://127.0.0.1:18082"
+# 允许 env 覆盖：容器化部署时 127.0.0.1 指向容器自己，够不着宿主上的 vault-search
+# （真机演练里 wiki 与 work-folder 的检索因此 Connection refused）。默认值不变，
+# 宿主部署零影响。
+DEFAULT_BASE_URL = os.environ.get(
+    "KATANA_VAULT_SEARCH_URL", "http://127.0.0.1:18082"
+)
 
 
 @dataclass

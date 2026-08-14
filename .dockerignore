@@ -3,6 +3,8 @@
 # 烘进去**——.git 历史、本地 venv、凭证、runtime 产物。
 *
 !mcp/requirements.lock.txt
+# wiki/work-folder 的配置 shim —— 不在 mcp/ 包里，但没它两个服务起不来
+!plugins/wiki/hooks/katana-config.sh
 !mcp/shared/
 !mcp/kernel/
 !mcp/memory/

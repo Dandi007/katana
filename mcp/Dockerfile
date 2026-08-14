@@ -73,7 +73,15 @@ RUN groupadd --gid 10001 katana \
 
 COPY --from=builder --chown=root:root /opt/katana/venv /opt/katana/venv
 
+# wiki 与 work-folder 经 katana_kb_mcp_shared.config 调这个 bash shim 解析配置
+# （env > .katana > 默认）。它不在 mcp/ 包里，而 shared/config.py 的路径推断假设
+# editable 安装布局（从 config.py 上溯 4 层找 repo 根），site-packages 装法必然
+# 落空 —— 真机演练里两个服务因此 crash-loop，memory 不用它所以没暴露。
+# 故：拷进镜像固定路径 + 在**镜像层**钉死 env，而不是让每个 compose 服务各自记得。
+COPY plugins/wiki/hooks/katana-config.sh /opt/katana/katana-config.sh
+
 ENV PATH=/opt/katana/venv/bin:$PATH \
+    KATANA_CONFIG_SH=/opt/katana/katana-config.sh \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

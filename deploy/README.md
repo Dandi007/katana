@@ -89,10 +89,43 @@ systemctl --user enable --now katana-{wiki,work-folder,memory}-mcp.service
 
 git 配置写在镜像的 `/etc/gitconfig` 而不是 `$HOME/.gitconfig`——只读 rootfs 下没有可写的 HOME。
 
+## 上线前演练
+
+```bash
+deploy/rehearse.sh          # 跑完自动拆
+deploy/rehearse.sh --keep   # 留栈手工继续戳（端口 15601/15602/15605）
+deploy/rehearse.sh --down   # 只拆
+```
+
+用**真数据、真容器、真 MCP 往返**做一次完整彩排：从生产目录 `cp -a`（只读挂载，与真迁移逐字同款）种 staging 卷 → 起栈 → 三域 MCP 工具面往返 → 校验写入真落进卷内 git 且 author 正确 → 只读 rootfs 加固三项 → 备份能从卷做出 mirror → 拆干净。
+
+与生产的唯一差异是卷名、宿主端口、容器名；镜像、env、加固项、command 全部逐字相同。
+
+**当前结果：22 PASS / 2 FAIL**，唯一 FAIL 是下面这条待决项。
+
+### ⚠️ 待决：检索后端在容器内不可达
+
+`wiki_search` / `wf_search` 要打宿主上的 vault-search，而它**只监听 `127.0.0.1:18082`**。容器经 `host.docker.internal` 出来落在 bridge 网关（本机 `192.168.228.1`），打不到宿主 loopback —— `ConnectTimeout`。
+
+代码侧已经改好（`vault_search.DEFAULT_BASE_URL` 现可经 `KATANA_VAULT_SEARCH_URL` 覆盖，默认值不变、宿主部署零影响），compose 也已配好 `extra_hosts` 与该 env。**缺的只是让 vault-search 在 bridge 网关上也监听一份。** 三条路：
+
+| 方案 | 代价 |
+|---|---|
+| vault-search 增监听 bridge 网关 IP | 改一个宿主服务的 bind，最小；注意别图省事绑 `0.0.0.0`（本机有 tailnet） |
+| wiki/work-folder 改 `network_mode: host` | 零改动别的服务，但放弃端口发布与网络命名空间；**数据面隔离不受影响**（那才是本工程的目标） |
+| vault-search 一并容器化，进同一 compose 网络 | 最干净，范围最大 |
+
+三域的**写路径全部已验证可用**，只有检索读路径受此影响。
+
 ## 施工中实测踩到的三个坑（都已修，留档免得再犯）
 
 1. **`printf '%s'` 不展开 `\t`** —— 手写 `/etc/gitconfig` 写出了字面反斜杠加 t，`fatal: bad config line`，整个镜像里 git 不可用。改用 `git config --file` 让 git 自己写 git 的配置（自校验）。
 2. **helper 容器继承镜像的 `USER katana`** —— 新建卷属主是 root，搬运时 `cp: Permission denied` 且 chown 也做不了。搬运必须 `--user 0:0`；校验则刻意用运行用户身份，顺带证明 chown 之后 MCP 真读得到。
 3. **YAML merge key 不做深合并** —— `x-katana-common` 里的 `environment` 会被各服务自己的 `environment:` 整块替换，三个服务的 `GIT_*` 全丢（而 git 会静默回落到镜像默认值，不报错）。改用 map 级 anchor 在 `environment` 内部合并。
 
-三个都是「不实测就发现不了、上生产才炸」的类型。
+4. **`.katana/runtime/` 是 gitignored 的** —— 演练最初用 bare mirror 克隆种卷，结果 work-folder crash-loop：`MutationBrokenError: runtime mutation ledger is incomplete for Git history`。ledger（`mutations.sqlite`）与 manifests 不进 git，克隆自然带不出来。**顺带暴露备份的真缺口：只有 git mirror 恢复不出一个能启动的系统**，故 `backup-volumes.sh` 已加 runtime 态捕获（sqlite 走 backup API 做一致性快照，不是裸 cp）。
+5. **compose 对 `ports` 是追加合并不是替换** —— staging override 写了 `1560x` 却仍同时绑 `560x`，直接跟生产实例抢端口起不来。要用 `!override` 标签。
+6. **`docker run` 不加 `-i` 收不到 stdin** —— 经 heredoc 喂进去的探针脚本压根没执行，表现是**静默零输出零报错**，极易误判成「MCP 挂了」。
+7. **memory MCP 是多租户，挂在 `/t/<tenant>/mcp`** —— 探针打根 `/mcp` 拿 404，客户端表现为 `Session terminated`，又一个看着像崩溃其实是路径写错。
+
+全都是「不实测就发现不了、上生产才炸」的类型。

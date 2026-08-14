@@ -10,6 +10,14 @@
 #
 # mirror 落在宿主（/data/backups/katana-data）是刻意的：备份要能在 Docker 挂了、
 # 卷损坏、甚至 dockerd 起不来的时候拿得到。把备份也锁进 Docker 等于没备份。
+#
+# **只有 git mirror 不构成完整恢复路径**（真机演练发现）：`.katana/runtime/`
+# （mutations.sqlite + manifests）是 gitignored 的，不进 mirror；只用 mirror 恢复出来
+# 的仓，kernel 启动时会发现 ledger 空而 git 历史含 receipt commit，直接
+# MutationBrokenError 拒绝启动。所以每轮另抓一份 runtime 态。
+#
+# sqlite 用 Python 的 backup API 做**一致性**快照，不是裸 cp/tar —— 备份期间服务仍在
+# 写，裸拷会拿到撕裂的库，而那种损坏只在恢复时才发作。
 set -uo pipefail
 
 MIRROR_ROOT="${KATANA_MIRROR_ROOT:-/data/backups/katana-data}"
@@ -43,6 +51,32 @@ for name in "${DOMAINS[@]}"; do
         --entrypoint sh "$IMAGE" -c "git --git-dir=/mirror/$name.git fetch --prune /src '+refs/*:refs/*'" >/dev/null 2>&1; then
       echo "FAIL $name：fetch 失败" >&2; rc=1; continue
     fi
+  fi
+
+  # runtime 态（gitignored，不进 mirror，但恢复时必需）
+  rtdir="$MIRROR_ROOT/$name-runtime"
+  mkdir -p "$rtdir"
+  if ! docker run --rm --user "$AS_USER" \
+      -v "$vol:/src:ro" -v "$rtdir:/out" \
+      --entrypoint python "$IMAGE" -c '
+import os, shutil, sqlite3, sys
+src, out = "/src/.katana/runtime", "/out"
+if not os.path.isdir(src):
+    sys.exit(0)                      # 该域没有 runtime 态，正常
+db = os.path.join(src, "mutations.sqlite")
+if os.path.exists(db):
+    # 一致性快照：sqlite backup API 会与并发写者协调，裸 cp 不会
+    s = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    d = sqlite3.connect(os.path.join(out, "mutations.sqlite"))
+    with d: s.backup(d)
+    s.close(); d.close()
+man = os.path.join(src, "manifests")
+if os.path.isdir(man):
+    shutil.rmtree(os.path.join(out, "manifests"), ignore_errors=True)
+    shutil.copytree(man, os.path.join(out, "manifests"))
+' 2>/dev/null; then
+    echo "WARN $name：runtime 态备份失败（mirror 已更新，但恢复需手工修 ledger）" >&2
+    rc=1
   fi
 
   # 报进度而不是盲目说成功：比对卷与 mirror 的 HEAD
