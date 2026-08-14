@@ -1,0 +1,9 @@
+[
+  {
+    "anchor": "web://http://127.0.0.1:50287/e1-material2.png@9bee527fe5f6e5ddef93194f3ede333b964ff9b50c8db013aef1dc6659fe1675#L3:1-43",
+    "quote": "Line nine is quoted whole by the bare L9 range form.",
+    "finding_entity_id": "msg_selftest_01",
+    "seq": 1,
+    "why_relevant": "anchor-check selftest fixture"
+  }
+]

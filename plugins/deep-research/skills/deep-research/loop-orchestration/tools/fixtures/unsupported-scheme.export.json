@@ -1,0 +1,23 @@
+[
+  {
+    "anchor": "wiki://foo@bar#L1",
+    "quote": "whatever",
+    "finding_entity_id": "msg_selftest_01",
+    "seq": 1,
+    "why_relevant": "anchor-check selftest fixture"
+  },
+  {
+    "anchor": "feishu://x@y#L2",
+    "quote": "whatever",
+    "finding_entity_id": "msg_selftest_02",
+    "seq": 2,
+    "why_relevant": "anchor-check selftest fixture"
+  },
+  {
+    "anchor": "!!!not-an-anchor!!!",
+    "quote": "whatever",
+    "finding_entity_id": "msg_selftest_03",
+    "seq": 3,
+    "why_relevant": "anchor-check selftest fixture"
+  }
+]

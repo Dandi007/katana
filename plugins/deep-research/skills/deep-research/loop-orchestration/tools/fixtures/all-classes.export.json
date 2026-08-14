@@ -1,0 +1,37 @@
+[
+  {
+    "anchor": "code://src/tick.ts@a592276892f5e93a5e37d800a52dd48436639c0b#L202-L211",
+    "quote": "  // §3 回收：遍历 status === \"in_flight\" 的卡。\n  for (const card of state.cards) {\n    if (card.status !== \"in_flight\") continue;\n\n    const run = card.runId ? state.runs[card.runId] : undefined;\n    if (!run) {\n      // 无对应 agent.run.started → 崩溃恢复，CAS 回 open。\n      decisions.push({ kind: \"reclaim\", clueId: card.clueId, to: \"open\", retries: card.retries });\n      continue;\n    }",
+    "seq": 1
+  },
+  {
+    "anchor": "web://http://127.0.0.1:50287/e1-material2.png@9bee527fe5f6e5ddef93194f3ede333b964ff9b50c8db013aef1dc6659fe1675#L3:1-43",
+    "quote": "Offline verification reads this transcript,",
+    "finding_entity_id": "msg_selftest_02",
+    "seq": 2,
+    "why_relevant": "anchor-check selftest fixture"
+  },
+  {
+    "anchor": "/data/code/self/claude-web-gateway/src/loop-mcp/service.ts:128-130",
+    "quote": "whatever",
+    "seq": 3
+  },
+  {
+    "anchor": "wiki://foo@bar#L1",
+    "quote": "whatever",
+    "finding_entity_id": "msg_selftest_04",
+    "seq": 4,
+    "why_relevant": "anchor-check selftest fixture"
+  },
+  {
+    "anchor": "!!!not-an-anchor!!!",
+    "quote": "whatever",
+    "finding_entity_id": "msg_selftest_05",
+    "seq": 5,
+    "why_relevant": "anchor-check selftest fixture"
+  },
+  {
+    "quote": "record with no anchor at all",
+    "seq": 6
+  }
+]

@@ -1,0 +1,32 @@
+[
+  {
+    "channel_seq": 1,
+    "kind": "research.doc.v2",
+    "payload": {
+      "doc_kind": "transcript",
+      "digest": "9bee527fe5f6e5ddef93194f3ede333b964ff9b50c8db013aef1dc6659fe1675",
+      "body": "# e1-material2.png transcript (offline fixture, stands in for the research:content doc)\n\nOffline verification reads this transcript, never the live page.\n\n## Extracted body\n\nBody section: The transcript is immutable on research:content, so the verdict is replayable; the page it came from may be rewritten tomorrow and that must not change anything. The transcript is immutable on research:content, so the verdict is replayable; the page it came from may be rewritten tomorrow and that must not change anything. The transcript is immutable on research:content, so the verdict is replayable; the page it came from may be rewritten tomorrow and that must not change anything. The transcript is immutable on research:content, so the verdict is replayable; the page it came from may be rewritten tomorrow and that must not change anything. The transcript is immutable on research:content, so the verdict is replayable; the page it came from may be rewritten tomorrow and that must not change anything. \n\nLine nine is quoted whole by the bare L9 range form.\n",
+      "origin": "http://127.0.0.1:50287/e1-material2.png"
+    }
+  },
+  {
+    "channel_seq": 2,
+    "kind": "research.doc.v2",
+    "payload": {
+      "doc_kind": "report",
+      "digest": "5761ef9566cd1fea310bd8c05b9ff469b333ede3f49139fedd5e6f5ef725eeb9",
+      "body": "not a transcript",
+      "origin": "research-id-xyz"
+    }
+  },
+  {
+    "channel_seq": 3,
+    "kind": "research.doc.v2",
+    "payload": {
+      "doc_kind": "transcript",
+      "digest": "db8d1470a226c3e3e318ffbee04cd9251d8fdfff7fd566c6908e29179e268672",
+      "body": "",
+      "origin": "http://127.0.0.1:50287/e1-empty.png"
+    }
+  }
+]

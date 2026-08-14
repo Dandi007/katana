@@ -1,0 +1,9 @@
+[
+  {
+    "anchor": "web://http://127.0.0.1:50287/e1-material2.png@db8d1470a226c3e3e318ffbee04cd9251d8fdfff7fd566c6908e29179e268672#L3:1-43",
+    "quote": "Offline verification reads this transcript,",
+    "finding_entity_id": "msg_selftest_01",
+    "seq": 1,
+    "why_relevant": "anchor-check selftest fixture"
+  }
+]
