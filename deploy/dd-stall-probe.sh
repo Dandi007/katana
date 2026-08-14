@@ -40,13 +40,30 @@ set -uo pipefail
 
 STALL_MINUTES="${KATANA_DD_STALL_MINUTES:-30}"
 
+# --- 从 run target 反查 workspace-repo ---------------------------------------
+# job.json 的 config_path 形如 .../<attempt>/implement/stage-resources/implement，
+# workspace-repo 是它的兄弟：.../<attempt>/implement/workspace-repo
+workspace_for() {
+  # 用一次 grep 定位，不要逐个 job.json 起 python：/data/loop-engine/jobs 下有
+  # 4000+ 个目录，逐个起解释器实测要跑几分钟，探针慢到没法放进轮询循环。
+  local R="$1" j cfg
+  j=$(grep -l -F "\"target_dir\": \"$R\"" /data/loop-engine/jobs/*/job.json 2>/dev/null | head -1)
+  [ -z "$j" ] && return 1
+  cfg=$(python3 -c "import json;print(json.load(open('$j')).get('config_path',''))" 2>/dev/null)
+  [ -z "$cfg" ] && return 1
+  echo "$(dirname "$(dirname "$cfg")")/workspace-repo"
+}
+
+newest_mtime() { find "$1" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1; }
+
 verdict_for() {
-  # $1 = run target dir。回显一行 "<VERDICT> <说明>"，并 return 0/1。
-  local R="$1"
+  # $1 = run target dir，$2 = workspace-repo（可选，缺省自动反查）
+  # 回显一行 "<VERDICT> <说明>"，并 return 0/1。
+  local R="$1" WS="${2:-}"
   [ -d "$R" ] || { echo "INPUT_ERROR 目录不存在: $R"; return 2; }
   [ -f "$R/events.jsonl" ] || { echo "INPUT_ERROR 缺 events.jsonl: $R"; return 2; }
 
-  local nodes stop now newest quiet_s quiet_m
+  local nodes stop now rt_m ws_m newest quiet_m rt_q ws_q
   nodes=$(ls -A "$R/nodes" 2>/dev/null | wc -l)
   # grep -c 无命中时**既打印 0 又返回 1**，写成 `|| echo 0` 会得到 "0\n0"，
   # 后面的 [ "$stop" -gt 0 ] 直接 integer expected 报错。自证第一次跑就撞到了。
@@ -58,17 +75,37 @@ verdict_for() {
     return 0
   fi
 
+  # 2) 活性面 = run target ∪ workspace-repo，取两者中**最新**的一次写入。
+  #
+  # 这里曾经只量 run target，是一次标定与实现的口径错位：标定文字用的是
+  # 「健康作业 workspace 写入间隔 2s/94s/1378s」，被测面却没有 workspace。
+  # 后果不是漏报而是**误杀**——run target 在节点收束前本来就不写，01/02 之所以
+  # 两个信号重合，只是因为它们整体死了。实测 dev_katana_search_wiring_05：
+  #   run target 零写入 18 分钟，同一时刻 workspace 8 秒前刚写
+  #   （已落 backfill.py / search_hook.py，git status 4 改 2 新增）
+  # 按旧实现会在第 30 分钟把这条正在成功的单判成 STALLED 并处置掉。
+  [ -z "$WS" ] && WS="$(workspace_for "$R" || true)"
   now=$(date +%s)
-  newest=$(find "$R" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)
-  [ -z "$newest" ] && { echo "INPUT_ERROR 目录内无文件: $R"; return 2; }
-  quiet_s=$(( now - newest ))
-  quiet_m=$(( quiet_s / 60 ))
+  rt_m=$(newest_mtime "$R")
+  [ -z "$rt_m" ] && { echo "INPUT_ERROR 目录内无文件: $R"; return 2; }
+  newest="$rt_m"
+  ws_q="n/a"
+  if [ -n "$WS" ] && [ -d "$WS" ]; then
+    ws_m=$(newest_mtime "$WS")
+    if [ -n "$ws_m" ]; then
+      ws_q="$(( (now - ws_m) / 60 ))分"
+      [ "$ws_m" -gt "$newest" ] && newest="$ws_m"
+    fi
+  fi
+  rt_q="$(( (now - rt_m) / 60 ))分"
+  quiet_m=$(( (now - newest) / 60 ))
 
+  local detail="run_target静默=${rt_q} workspace静默=${ws_q}"
   if [ "$quiet_m" -ge "$STALL_MINUTES" ]; then
-    echo "STALLED 零写入 ${quiet_m} 分钟（阈值 ${STALL_MINUTES}）nodes=0 stop=0 最近写入=$(date -d @"$newest" '+%H:%M:%S')"
+    echo "STALLED 两面均零写入 ${quiet_m} 分钟（阈值 ${STALL_MINUTES}）nodes=0 stop=0 [$detail]"
     return 1
   fi
-  echo "RUNNING 零写入 ${quiet_m} 分钟（未达阈值 ${STALL_MINUTES}）nodes=0 stop=0"
+  echo "RUNNING 最近写入 ${quiet_m} 分钟前（未达阈值 ${STALL_MINUTES}）nodes=0 stop=0 [$detail]"
   return 0
 }
 
@@ -95,11 +132,25 @@ EOF
   local ts=$(( $(date +%s) - 5400 ))
   touch -d "@$ts" "$fixture/events.jsonl" "$fixture/nodes" "$fixture"
 
-  echo "=== 反例：合成的卡死签名（events 止于 dispatch / nodes 空 / 零写入 90 分钟；期望 STALLED，退出码 1）==="
-  echo "  $fixture"
-  out=$(verdict_for "$fixture"); rc=$?
+  echo "=== 反例：两面俱死（run target 与 workspace 都零写入 90 分钟；期望 STALLED，退出码 1）==="
+  local dead_ws; dead_ws=$(mktemp -d); echo x > "$dead_ws/f.py"; touch -d "@$ts" "$dead_ws/f.py" "$dead_ws"
+  echo "  run=$fixture ws=$dead_ws"
+  out=$(verdict_for "$fixture" "$dead_ws"); rc=$?
   echo "  → $out"
   if [ "$rc" -eq 1 ] && [[ "$out" == STALLED* ]]; then echo "  ✅ 判定正确"; else echo "  ❌ 判定错误（rc=$rc）"; fail=1; fi
+  rm -rf "$dead_ws"
+
+  # 这一例专门钉死本探针犯过的那个错：run target 静默但 workspace 正在落码。
+  # 旧实现只量 run target，会把它误判成 STALLED —— 实测 05 就是这个形态。
+  echo "=== 关键例：run target 静默 90 分钟，但 workspace 刚写（期望 RUNNING，退出码 0）==="
+  local live_ws; live_ws=$(mktemp -d); echo y > "$live_ws/server.py"   # mtime = 现在
+  echo "  run=$fixture ws=$live_ws"
+  out=$(verdict_for "$fixture" "$live_ws"); rc=$?
+  echo "  → $out"
+  if [ "$rc" -eq 0 ] && [[ "$out" == RUNNING* ]]; then
+    echo "  ✅ 判定正确（旧实现会在这里误判 STALLED 并掐死一条正在成功的单）"
+  else echo "  ❌ 判定错误（rc=$rc）—— 误杀回归了"; fail=1; fi
+  rm -rf "$live_ws"
   rm -rf "$fixture"
 
   echo "=== 正例：已知正常收束的 run（期望 NORMAL / 退出码 0）==="

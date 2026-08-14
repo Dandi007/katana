@@ -31,9 +31,20 @@ named volume 把这两类事故**结构性消除**：宿主命名空间里根本
 ops 工具面。它存在的原因是：本目标的接线单先后两次卡死，而两次都是靠人盯表判断
 「还在不在跑」，中间用错过两个信号——「进程还在」（卡死 72 分钟里进程一直在）和
 「socket 句柄数为 0」（实测三个**健康**作业同样是 0，这个信号根本不成立）。
-真正能区分的只有产出，故判据是「run target 零写入时长 + nodes/ 是否为空」，
-阈值 30 分钟按实测标定（健康 implementer 节点完成耗时 988s ≈ 16.5 分钟）。
-`--self-test` 用合成的卡死夹具与真实已收束的 run 做正反两例自证。
+真正能区分的只有产出，故判据是「**run target ∪ workspace-repo** 两面取最新写入的静默
+时长 + nodes/ 是否为空」，阈值 30 分钟按实测标定（健康 implementer 节点完成耗时
+988s ≈ 16.5 分钟）。
+
+⚠️ 被测面必须含 workspace，这里栽过一次：第一版只量 run target，而**节点收束前
+run target 本来就不写**——01/02 之所以两个信号重合，只是因为它们整体死了。实测
+`dev_katana_search_wiring_05`：run target 静默 21 分钟的同一时刻，workspace 1 分钟前
+刚落码（已产出 `backfill.py`/`search_hook.py`，`git status` 4 改 2 新增）。按第一版会在第
+30 分钟把一条**正在成功**的单判成 STALLED 并处置掉——不是漏报，是误杀。标定文字当时
+写的就是「workspace 写入间隔 2s/94s/1378s」，被测面却没有 workspace，属标定与实现的
+口径错位。
+
+`--self-test` 三例自证：两面俱死 → STALLED；两面俱活的已收束 run → NORMAL；
+**run target 静默但 workspace 正在写 → RUNNING**（最后这例专门钉死上面那个误杀）。
 
 `dd-dispatch-preflight.sh` 解决的是另一条、已经吃掉**两个 development id** 的坑：
 选择器有两层互不一致的注册表（engine-frozen 解析器 / agent-run 的 model-registry），
