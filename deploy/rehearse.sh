@@ -8,10 +8,32 @@
 # 发现 ledger 空而 git 历史含 receipt commit，直接 MutationBrokenError 拒绝启动。
 # 演练必须复刻真迁移的搬运方式，否则测的不是同一件事。
 #
-# 生产目录全程只以 `:ro` 挂载，不写不改。
+# 生产目录全程只以 `:ro` 挂载，不写不改。连状态探测都在只读容器里做，且带
+# `--no-optional-locks`——`git status` 默认会顺手刷新并回写 `.git/index`，那是**写**。
 #
 # 与生产的唯一差异是卷名、宿主端口、容器名（见 docker-compose.staging.yml）——
 # 镜像、env、加固项、command 全部逐字相同，否则演练就不是演练。
+#
+# ---------------------------------------------------------------------------
+# 为什么有「步骤 0b 脏源判定」这一段（这是本脚本最贵的一条教训）
+# ---------------------------------------------------------------------------
+# `cp -a` 会把**未跟踪文件一起搬进卷**。于是种卷那一刻生产恰好脏，staging 卷里
+# 就带着一份脏工作区，work-folder MCP 启动即 `katana_kernel.gitops.DirtyWorkTreeError`
+# （server.py configure() → kernel.reconcile），容器进 restart loop，连锁把十几条
+# 下游判据全打成 FAIL。
+#
+# 实测：同一份代码，生产净时 25 PASS / 2 FAIL，生产脏时 14 PASS / 13 FAIL。
+# **唯一变量就是种卷那一刻生产脏不脏**——读数不可信，等于没读数。
+#
+# 现在的做法，两件事分开：
+#   1. 种卷**前**显式判定三域源仓状态，作为一条独立前置结论输出（哪个域、多少条、
+#      脏在哪个前缀）。脏不脏是生产的事实，如实报出来，不算 FAIL——按硬线 7，
+#      /data/work-records 的产物是三条 ronin 线的活，不归演练管。
+#   2. 种进 staging 副本后，**在副本里**按真迁移的「脏仓拒迁」纪律洗净
+#      （`git reset --hard` + `git clean -fd`，不带 -x 以保住 gitignored 的
+#      `.katana/runtime/`），再显式核验副本干净才起栈。洗的是一次性副本，
+#      生产一个字节都不动。
+# 于是生产脏/净两种状态下，演练测的都是同一件事：容器栈本身。
 #
 # 覆盖面：
 #   1. 三个容器起得来且健康
@@ -21,9 +43,10 @@
 #   5. 备份能从卷里做出 mirror
 #
 # 用法：
-#   deploy/rehearse.sh          # 跑完自动拆
-#   deploy/rehearse.sh --keep   # 保留 staging 栈供手工继续戳
-#   deploy/rehearse.sh --down   # 只拆
+#   deploy/rehearse.sh                    # 跑完自动拆
+#   deploy/rehearse.sh --keep             # 保留 staging 栈供手工继续戳
+#   deploy/rehearse.sh --down             # 只拆
+#   deploy/rehearse.sh --keep-source-dirt # 不洗副本，照搬生产脏状态（专门演练脏仓场景）
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,30 +60,123 @@ declare -A PORTS=([wiki]=15601 [work-folder]=15602 [memory]=15605)
 declare -A VOLS=([wiki]=katana-staging-wiki [work-folder]=katana-staging-work-records [memory]=katana-staging-memory)
 declare -A MIRRORS=([wiki]=wiki [work-folder]=work-records [memory]=memory)
 declare -A SRCDIRS=([wiki]=/data/wiki [work-folder]=/data/work-records [memory]=/data/memory)
+declare -A CONTAINERS=([wiki]=katana-wiki-mcp-staging [work-folder]=katana-work-folder-mcp-staging [memory]=katana-memory-mcp-staging)
 
-KEEP=0; DOWN_ONLY=0
+# 步骤 0b 记录的生产基线，拆除时逐字比对，作为「生产未触碰」的证据。
+declare -A SRC_HEAD_BEFORE=()
+declare -A SRC_DIRTY_BEFORE=()
+declare -A READY=()          # 域 → 1/0，起栈后是否可用；下游判据据此 SKIP 而不是连锁 FAIL
+declare -A BLOCKED_BY=()     # 域 → 不可用的根因，SKIP 时原样打出来
+declare -A POST_SCRUB=()     # 域 → 洗净后、起栈前的脏条数；结果行的解耦证据
+PROD_BIND_CLEAN=unknown   # 步骤 2 实测填 1/0；teardown 的「生产未触碰」[B] 证据
+
+KEEP=0; DOWN_ONLY=0; KEEP_DIRT=0
 for a in "$@"; do
   case "$a" in
     --keep) KEEP=1 ;;
     --down) DOWN_ONLY=1 ;;
-    *) echo "用法：$0 [--keep|--down]" >&2; exit 2 ;;
+    --keep-source-dirt) KEEP_DIRT=1 ;;
+    *) echo "用法：$0 [--keep|--down|--keep-source-dirt]" >&2; exit 2 ;;
   esac
 done
 
-pass=0; fail=0
+pass=0; fail=0; skip=0
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; fail=$((fail+1)); }
+skp()  { printf '  \033[33mSKIP\033[0m %s\n' "$*"; skip=$((skip+1)); }
+note() { printf '  \033[36mNOTE\033[0m %s\n' "$*"; }
 step() { printf '\n=== %s ===\n' "$*"; }
 
+# --- 生产源仓只读探测 -------------------------------------------------------
+# 一律在容器里、一律 `:ro`、一律 --no-optional-locks。三重保证「探测不写生产」。
+# safe.directory：宿主目录属主是 uther(1000)，容器里以 10001 读，不加这个 git 会
+# 以 dubious ownership 拒绝，表现为空输出——那会把「脏」误读成「净」，正是本脚本
+# 要消灭的那类静默失真。
+src_git() {
+  local src="$1"; shift
+  docker run --rm --user 10001:10001 -v "$src:/src:ro" --entrypoint sh \
+    "katana-mcp:$IMAGE_TAG" -c \
+    "git -c safe.directory='*' --no-optional-locks -C /src $*" 2>/dev/null
+}
+src_status() { src_git "$1" "status --porcelain=v1 --untracked-files=all"; }
+src_head()   { src_git "$1" "rev-parse HEAD"; }
+
+# staging 卷内探测（属主已 chown 到 10001，不需要 safe.directory 放宽）
+vol_git() {
+  local vol="$1"; shift
+  docker run --rm --user 10001:10001 -v "$vol:/d" --entrypoint sh \
+    "katana-mcp:$IMAGE_TAG" -c "git --no-optional-locks -C /d $*" 2>/dev/null
+}
+
 teardown() {
+  local verify="${1:-}"
   step "拆除 staging"
   KATANA_MCP_TAG="${IMAGE_TAG:-x}" "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1
   for v in "${VOLS[@]}"; do docker volume rm "$v" >/dev/null 2>&1; done
   rm -rf "$STAGING_MIRROR"
-  echo "  staging 卷与 mirror 已清除（生产未触碰）"
+  echo "  staging 卷与 mirror 已清除"
+
+  if [ "$verify" != "--verify" ] || [ "${#SRC_HEAD_BEFORE[@]}" -eq 0 ]; then
+    echo "  （未记录生产基线，跳过比对）"
+    return
+  fi
+  # ---------------------------------------------------------------------
+  # 「生产未触碰」怎么才算证明了
+  # ---------------------------------------------------------------------
+  # **不能拿「HEAD 没变」当判据。** /data/work-records 是活的生产仓，三条 ronin 线
+  # 在并发落账，一次演练跑十分钟，HEAD 前进是常态。第一版拿 HEAD 相等做判据，
+  # 当场报出「❌ 生产 HEAD 发生变化 —— 立即查」，而演练全程只 :ro 挂载，
+  # 什么都没干。假警报和漏报一样致命：它让这条回显不可信，等于没有。
+  #
+  # 真正能证明「没碰」的是**结构性事实**，两条，都可机检：
+  #   A. 本脚本里每一处挂生产路径的 docker 调用都带 :ro（脚本自检，源码级）
+  #   B. staging 栈里没有任何容器把生产路径 bind 进去（运行期实测，见步骤 2）
+  # HEAD/脏条数的前后变化则降级为**信息**，并明确归因给并发工作线。
+  echo "  生产未触碰核验："
+
+  # A. 源码自检：所有挂 $src 的地方必须是 :ro
+  local self="${BASH_SOURCE[0]}" ro_bad
+  ro_bad=$(grep -oE -- '-v "\$src:/src[^"]*"' "$self" | sort -u | grep -v ':ro"$' || true)
+  if [ -z "$ro_bad" ]; then
+    echo "    [A] 源码自检：本脚本挂载生产路径的 $(grep -c -- '-v "\$src:/src:ro"' "$self") 处调用全部为 :ro"
+  else
+    echo "    [A] ❌ 源码自检失败，存在非只读的生产挂载：$ro_bad"
+  fi
+
+  # B. 运行期实测（步骤 2 记录）
+  case "${PROD_BIND_CLEAN:-unknown}" in
+    1) echo "    [B] 运行期实测：staging 四容器均未 bind 任何生产路径（零 bind mount 成立）" ;;
+    0) echo "    [B] ❌ 运行期实测：有容器 bind 了生产路径 —— 立即查" ;;
+    *) echo "    [B] 运行期实测：未采集（栈未起来）" ;;
+  esac
+
+  # C. 前后对照，仅作信息与归因
+  echo "    [C] 生产状态前后对照（信息，非判据）："
+  for d in wiki work-folder memory; do
+    local src="${SRCDIRS[$d]}" h_now n_now tail_note
+    h_now="$(src_head "$src")"
+    n_now="$(src_status "$src" | wc -l | tr -d ' ')"
+    if [ "$h_now" = "${SRC_HEAD_BEFORE[$d]}" ] && [ "$n_now" = "${SRC_DIRTY_BEFORE[$d]}" ]; then
+      tail_note="无变化"
+    else
+      tail_note="有变化 —— 归因：并发工作线（本演练对该路径只有 :ro 句柄，写无可写）"
+    fi
+    printf '         %-12s HEAD %s→%s，脏 %s→%s 条；%s\n' \
+           "$d" "${SRC_HEAD_BEFORE[$d]:0:8}" "${h_now:0:8}" \
+           "${SRC_DIRTY_BEFORE[$d]}" "$n_now" "$tail_note"
+  done
+
+  if [ -z "$ro_bad" ] && [ "${PROD_BIND_CLEAN:-unknown}" != "0" ]; then
+    echo "  ✅ 生产未触碰（A 源码自检 + B 运行期零 bind 双证）"
+  else
+    echo "  ❌ 生产未触碰不成立 —— 见上面标 ❌ 的那条"
+  fi
 }
 
-if [ "$DOWN_ONLY" -eq 1 ]; then teardown; exit 0; fi
+if [ "$DOWN_ONLY" -eq 1 ]; then
+  IMAGE_TAG="${IMAGE_TAG:-$(git -C "$HERE/.." rev-parse --short HEAD 2>/dev/null)}"
+  teardown; exit 0
+fi
 
 # ---------------------------------------------------------------------------
 step "0 前置"
@@ -76,24 +192,97 @@ for img in katana-mcp katana-embedding; do
     exit 1
   fi
 done
-for d in "${!SRCDIRS[@]}"; do
+for d in wiki work-folder memory; do
   [ -d "${SRCDIRS[$d]}/.git" ] && ok "生产源 ${SRCDIRS[$d]} 在位（只读使用）" || { bad "缺源 ${SRCDIRS[$d]}"; exit 1; }
 done
 
 # ---------------------------------------------------------------------------
+step "0b 种卷前置：三域生产源仓状态判定"
+# 这一段是**独立前置结论**，不是下游判据的一部分。它回答一个问题：
+#   「这次演练的种子，是从什么状态的生产拷出来的？」
+# 不回答这个问题，后面所有读数都无法解释。
+dirty_total=0
+dirty_domains=()
+for d in wiki work-folder memory; do
+  src="${SRCDIRS[$d]}"
+  st="$(src_status "$src")"
+  head="$(src_head "$src")"
+  n=$(printf '%s' "$st" | grep -c . )
+  SRC_HEAD_BEFORE[$d]="$head"
+  SRC_DIRTY_BEFORE[$d]="$n"
+  if [ "$n" -eq 0 ]; then
+    ok "源 $d 干净（HEAD ${head:0:12}，0 条）"
+  else
+    n_mod=$(printf '%s\n' "$st" | grep -cv '^??')
+    n_untracked=$(printf '%s\n' "$st" | grep -c '^??')
+    dirty_total=$((dirty_total+n))
+    dirty_domains+=("$d")
+    # 报到「脏在哪个前缀」这一层——只说条数没法判断是谁在写。
+    top="$(printf '%s\n' "$st" | sed 's/^...//' | cut -d/ -f1 | sort | uniq -c | sort -rn | head -3 \
+           | awk '{printf "%s(%s) ", $2, $1}')"
+    note "源 $d 脏 $n 条（HEAD ${head:0:12}；已跟踪改动 $n_mod，未跟踪 $n_untracked）"
+    note "     脏在：$top"
+  fi
+done
+
+if [ "$dirty_total" -eq 0 ]; then
+  SEED_MODE="verbatim"
+  echo
+  echo "  判定：三域生产源仓全部干净 → staging 卷逐字照搬即可，无需洗。"
+elif [ "$KEEP_DIRT" -eq 1 ]; then
+  SEED_MODE="verbatim"
+  echo
+  echo "  判定：生产脏 $dirty_total 条（${dirty_domains[*]}），但指定了 --keep-source-dirt"
+  echo "        → 照搬脏状态种卷。**预期** work-folder MCP 会 DirtyWorkTreeError 起不来，"
+  echo "        这是刻意演练脏仓场景，不是回归。"
+else
+  SEED_MODE="scrub"
+  echo
+  echo "  判定：生产脏 $dirty_total 条（${dirty_domains[*]}）。"
+  echo "        cp -a 会把未跟踪文件一并搬进卷，脏工作区会让 work-folder MCP 启动即"
+  echo "        DirtyWorkTreeError 进 restart loop，连锁污染全部下游读数。"
+  echo "        → 按真迁移的「脏仓拒迁」纪律，**在 staging 副本内**洗净后再起栈"
+  echo "        （git reset --hard + git clean -fd，不带 -x 以保住 gitignored 的 .katana/runtime）。"
+  echo "        生产一个字节都不动；要照搬脏状态请用 --keep-source-dirt。"
+  # 硬线 7：/data/work-records 里的产物是三条 ronin 线的活，本卷只负责别让它污染读数。
+  echo "        注：生产那些脏文件本身不归演练处理，此处不做任何清理动作。"
+fi
+
+# ---------------------------------------------------------------------------
 step "1 从生产目录 cp -a 种 staging 卷（只读挂载，与真迁移同款）"
 teardown >/dev/null 2>&1
-for d in "${!VOLS[@]}"; do
+for d in wiki work-folder memory; do
   vol="${VOLS[$d]}"; src="${SRCDIRS[$d]}"
   docker volume create "$vol" >/dev/null
   # 与 migrate-data-to-volumes.sh 同款：root 身份 cp -a 全量（含 gitignored 的
   # .katana/runtime），再 chown 给镜像的运行用户
   if docker run --rm --user 0:0 -v "$vol:/dst" -v "$src:/src:ro" --entrypoint sh \
        "katana-mcp:$IMAGE_TAG" -c "cp -a /src/. /dst/ && chown -R 10001:10001 /dst" >/dev/null 2>&1; then
-    n=$(docker run --rm --user 10001:10001 -v "$vol:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" -c "git -C /d rev-list --count HEAD" 2>/dev/null)
+    n=$(vol_git "$vol" "rev-list --count HEAD")
     ok "$d 卷已种入（$n commits）"
   else
     bad "$d 卷种入失败"; exit 1
+  fi
+
+  if [ "$SEED_MODE" = "scrub" ] && [ "${SRC_DIRTY_BEFORE[$d]}" -gt 0 ]; then
+    before=$(vol_git "$vol" "status --porcelain=v1 --untracked-files=all" | grep -c .)
+    docker run --rm --user 10001:10001 -v "$vol:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" -c \
+      "git -C /d reset --hard >/dev/null 2>&1 && git -C /d clean -fd >/dev/null 2>&1" >/dev/null 2>&1
+    after=$(vol_git "$vol" "status --porcelain=v1 --untracked-files=all" | grep -c .)
+    note "$d 副本内洗净：$before → $after 条（生产未触碰）"
+  fi
+
+  # 起栈**前**就把 work-folder 的启动前置条件核验掉。不核验的代价实测过：
+  # 一条 DirtyWorkTreeError 在下游炸成 11 条 FAIL，而真正的根因一个字都没打出来。
+  clean_n=$(vol_git "$vol" "status --porcelain=v1 --untracked-files=all" | grep -c .)
+  POST_SCRUB[$d]="$clean_n"
+  if [ "$clean_n" -eq 0 ]; then
+    ok "$d staging 卷内仓干净（MCP 启动前置条件满足）"
+  elif [ "$KEEP_DIRT" -eq 1 ]; then
+    note "$d staging 卷内仓脏 $clean_n 条 —— --keep-source-dirt 下这是预期的"
+  else
+    bad "$d staging 卷内仓仍脏 $clean_n 条，洗净失败 —— 下游读数不可信，先查这条"
+    vol_git "$vol" "status --porcelain=v1 --untracked-files=all" | head -5 | sed 's/^/       /'
   fi
 done
 
@@ -117,14 +306,48 @@ for i in $(seq 1 30); do
 done
 if [ "${healthy:-0}" -ge 4 ]; then ok "四个容器 healthy（含 embedding）"; else bad "健康检查未全绿（healthy=$healthy）"; "${COMPOSE[@]}" ps; fi
 
-for d in "${!PORTS[@]}"; do
+# 零 bind mount 是本工程的核心性质，也是「生产未触碰」的运行期证据（见 teardown 的 [B]）。
+# 实测而不是靠读 compose 文件：compose 的 merge 语义踩过坑（ports 追加合并那次），
+# 声明与实际起出来的东西不一定一致，要问就问 dockerd。
+prod_binds=$(for c in $("${COMPOSE[@]}" ps -q 2>/dev/null); do
+               docker inspect -f '{{$n := .Name}}{{range .Mounts}}{{if eq .Type "bind"}}{{$n}} {{.Source}}{{"\n"}}{{end}}{{end}}' "$c" 2>/dev/null
+             done | grep -E ' /data/(wiki|work-records|memory)(/|$)' || true)
+if [ -z "$prod_binds" ]; then
+  PROD_BIND_CLEAN=1
+  ok "staging 四容器零 bind mount 生产路径（宿主 dockerd 实测）"
+else
+  PROD_BIND_CLEAN=0
+  bad "有容器把生产路径 bind 进去了 —— 这是本工程最不该破的性质"
+  echo "$prod_binds" | sed 's/^/       /'
+fi
+
+for d in wiki work-folder memory; do
   path="/mcp"; [ "$d" = "memory" ] && path="/t/uther/mcp"   # memory 多租户挂载
   if curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:${PORTS[$d]}$path" | grep -qE '^[24]'; then
     ok "$d 端口 ${PORTS[$d]} 有响应"
+    READY[$d]=1
   else
-    bad "$d 端口 ${PORTS[$d]} 无响应"
+    READY[$d]=0
+    c="${CONTAINERS[$d]}"
+    restarts=$(docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null || echo "?")
+    status=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null || echo "?")
+    # 一次把根因打全：restart 次数 + 容器日志最后几行。下游一律 SKIP 不再复述。
+    root=$(docker logs --tail 40 "$c" 2>&1 | grep -oE '[A-Za-z_.]*(Error|Exception)[A-Za-z]*' | tail -1)
+    BLOCKED_BY[$d]="容器 $c status=$status restarts=$restarts${root:+ 根因=$root}"
+    bad "$d 端口 ${PORTS[$d]} 无响应 —— ${BLOCKED_BY[$d]}"
+    echo "       ↓ $c 最后 12 行日志（根因就在这里，别去下游找）"
+    docker logs --tail 12 "$c" 2>&1 | sed 's/^/       /'
   fi
 done
+
+# 下游判据的统一闸门：前置不满足就 SKIP，不制造连锁 FAIL。
+# 一条根因应当只产生一条 FAIL；把它复述十几遍不增加任何信息，只会让读数不可解释。
+gate() {  # gate <域> <判据描述> —— 返回 0 表示可以继续跑
+  local d="$1" what="$2"
+  if [ "${READY[$d]:-0}" -eq 1 ]; then return 0; fi
+  skp "$what（前置未满足：${BLOCKED_BY[$d]:-$d 未就绪}）"
+  return 1
+}
 
 # ---------------------------------------------------------------------------
 step "3 真 MCP 往返（用镜像自带的 fastmcp.Client）"
@@ -189,27 +412,31 @@ PY
 echo "$RESULT" | tail -3
 J=$(echo "$RESULT" | tail -1)
 chk() { echo "$J" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('$1') else 1)" 2>/dev/null; }
-chk wf_create   && ok "work-folder wf_create 成功"        || bad "work-folder wf_create 失败"
-chk fs_create   && ok "work-folder fs_create 提交成功"     || bad "work-folder fs_create 失败"
-chk mem_create  && ok "memory memory_create 成功"          || bad "memory memory_create 失败"
-chk wiki_search && ok "wiki wiki_search 成功"              || bad "wiki wiki_search 失败"
-chk wf_search   && ok "work-folder wf_search 成功"        || bad "work-folder wf_search 失败"
+
+gate work-folder "work-folder wf_create"        && { chk wf_create   && ok "work-folder wf_create 成功"    || bad "work-folder wf_create 失败"; }
+gate work-folder "work-folder fs_create"        && { chk fs_create   && ok "work-folder fs_create 提交成功" || bad "work-folder fs_create 失败"; }
+gate memory      "memory memory_create"         && { chk mem_create  && ok "memory memory_create 成功"      || bad "memory memory_create 失败"; }
+gate wiki        "wiki wiki_search"             && { chk wiki_search && ok "wiki wiki_search 成功"          || bad "wiki wiki_search 失败"; }
+gate work-folder "work-folder wf_search"        && { chk wf_search   && ok "work-folder wf_search 成功"     || bad "work-folder wf_search 失败"; }
 
 # ---------------------------------------------------------------------------
 step "3b embedding 服务与向量臂"
-emb=$(docker exec katana-work-folder-mcp-staging python -c "
+if gate work-folder "embedding 可达性与维度（经 work-folder 容器内探测）"; then
+  emb=$(docker exec "${CONTAINERS[work-folder]}" python -c "
 import os, httpx, json
 url = os.environ['KATANA_EMBEDDING_ENDPOINT']
 r = httpx.post(url, json={'input': ['向量臂自检']}, timeout=30)
 print(json.dumps({'status': r.status_code, 'dim': len(r.json()['data'][0]['embedding'])}))
 " 2>&1 | tail -1)
-echo "  $emb"
-echo "$emb" | grep -q '"status": 200' && ok "MCP 容器内可达 embedding 服务" || bad "MCP 容器内够不到 embedding"
-echo "$emb" | grep -q '"dim": 512'    && ok "向量维度 512（与索引 schema 一致）" || bad "向量维度不符"
+  echo "  $emb"
+  echo "$emb" | grep -q '"status": 200' && ok "MCP 容器内可达 embedding 服务" || bad "MCP 容器内够不到 embedding"
+  echo "$emb" | grep -q '"dim": 512'    && ok "向量维度 512（与索引 schema 一致）" || bad "向量维度不符"
+fi
 
 # ---------------------------------------------------------------------------
 step "4 写入真落进卷内 git，且 author 正确"
 for d in work-folder memory; do
+  gate "$d" "$d 卷内 commit author 与事务后洁净度" || continue
   vol="${VOLS[$d]}"
   info=$(docker run --rm --user 10001:10001 -v "$vol:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" \
         -c "git -C /d log -1 --format='%an|%s' && git -C /d status --porcelain | wc -l" 2>/dev/null)
@@ -222,32 +449,154 @@ done
 
 # ---------------------------------------------------------------------------
 step "5 只读 rootfs 下确实只有卷与 /tmp 可写"
-probe=$(docker exec katana-work-folder-mcp-staging sh -c '
-  touch /probe 2>/dev/null && echo "ROOTFS_WRITABLE" || echo "rootfs-ro"
-  touch /tmp/probe 2>/dev/null && echo "tmp-ok" || echo "TMP_RO"
-  touch /data/work-records/.probe 2>/dev/null && { echo "vol-ok"; rm -f /data/work-records/.probe; } || echo "VOL_RO"' 2>&1)
-echo "$probe" | grep -q "rootfs-ro" && ok "rootfs 只读" || bad "rootfs 可写（加固失效）"
-echo "$probe" | grep -q "tmp-ok"   && ok "/tmp 可写"   || bad "/tmp 不可写"
-echo "$probe" | grep -q "vol-ok"   && ok "卷可写"      || bad "卷不可写"
-
-# ---------------------------------------------------------------------------
-step "6 备份能从卷里做出 mirror"
-mkdir -p "$STAGING_MIRROR"
-if KATANA_MIRROR_ROOT="$STAGING_MIRROR" \
-   KATANA_HELPER_IMAGE="katana-mcp:$IMAGE_TAG" \
-   bash -c "sed 's/katana-\$name/katana-staging-\$name/' '$HERE/backup-volumes.sh' > /tmp/bk-staging.sh && bash /tmp/bk-staging.sh" 2>&1 | tail -3; then
-  for m in work-records wiki memory; do
-    if [ -d "$STAGING_MIRROR/$m.git" ]; then
-      n=$(git --git-dir="$STAGING_MIRROR/$m.git" rev-list --count HEAD 2>/dev/null)
-      ok "备份 $m.git（$n commits）"
-    else
-      bad "备份 $m.git 缺失"
-    fi
-  done
+if gate work-folder "只读 rootfs 加固三项"; then
+  probe=$(docker exec "${CONTAINERS[work-folder]}" sh -c '
+    touch /probe 2>/dev/null && echo "ROOTFS_WRITABLE" || echo "rootfs-ro"
+    touch /tmp/probe 2>/dev/null && echo "tmp-ok" || echo "TMP_RO"
+    touch /data/work-records/.probe 2>/dev/null && { echo "vol-ok"; rm -f /data/work-records/.probe; } || echo "VOL_RO"' 2>&1)
+  echo "$probe" | grep -q "rootfs-ro" && ok "rootfs 只读" || bad "rootfs 可写（加固失效）"
+  echo "$probe" | grep -q "tmp-ok"   && ok "/tmp 可写"   || bad "/tmp 不可写"
+  echo "$probe" | grep -q "vol-ok"   && ok "卷可写"      || bad "卷不可写"
 fi
 
 # ---------------------------------------------------------------------------
+step "6 备份能从卷里做出 mirror"
+# 备份走的是卷，不经 MCP 进程——MCP 起不来时这一条仍然该跑，也仍然该有结论。
+#
+# **绝不能把这段写成 `if <pipeline> | tail -3; then <判据>; fi`。** 上一版就是那么写的，
+# 有两处静默失真，实测同时发作：
+#   1. `| tail -3` 把 backup-volumes.sh 逐域的 FAIL/WARN（走 stderr）截没了，
+#      只剩最后三行，第一个域的报错一个字都看不见；
+#   2. 那个脚本任一域出问题就返回 1，叠上 `set -o pipefail`，`if` 判假 →
+#      **三条备份判据整段不执行**。于是这一步既不 PASS 也不 FAIL，凭空消失，
+#      而总计里看不出少了三条。
+# 现在：输出全留、退出码单独成一条判据、三条校验无论如何都跑。
+mkdir -p "$STAGING_MIRROR"
+bk_out=$(KATANA_MIRROR_ROOT="$STAGING_MIRROR" \
+         KATANA_HELPER_IMAGE="katana-mcp:$IMAGE_TAG" \
+         bash -c "sed 's/katana-\$name/katana-staging-\$name/' '$HERE/backup-volumes.sh' > /tmp/bk-staging.sh && bash /tmp/bk-staging.sh" 2>&1)
+bk_rc=$?
+echo "$bk_out" | sed 's/^/       /'
+if [ "$bk_rc" -eq 0 ]; then
+  ok "backup-volumes.sh 退出码 0"
+else
+  bad "backup-volumes.sh 退出码 $bk_rc —— 逐域结论见上面几行"
+fi
+declare -A VOLOF=([work-records]=katana-staging-work-records [wiki]=katana-staging-wiki [memory]=katana-staging-memory)
+for m in work-records wiki memory; do
+  if [ ! -d "$STAGING_MIRROR/$m.git" ]; then
+    bad "备份 $m.git 缺失"
+    continue
+  fi
+  n=$(git --git-dir="$STAGING_MIRROR/$m.git" rev-list --count HEAD 2>/dev/null)
+  # 「目录在」不等于「备份全」。逐字比对源卷与 mirror 的 commit 数——
+  # work-records 那次就是 clone 退出非零、mirror 根本没建出来，而判据只看目录。
+  sn=$(vol_git "${VOLOF[$m]}" "rev-list --count HEAD")
+  if [ -n "$sn" ] && [ "$n" = "$sn" ]; then
+    ok "备份 $m.git 完整（commit $n = 源卷 $sn）"
+  else
+    bad "备份 $m.git commit 数不符（mirror=$n 源卷=$sn）"
+  fi
+  # 产物必须归调用者：root-owned 的备份等于「只有 Docker 动得了」，那不叫备份。
+  owner=$(stat -c '%u:%g' "$STAGING_MIRROR/$m.git/HEAD" 2>/dev/null)
+  if [ "$owner" = "$(id -u):$(id -g)" ]; then
+    ok "备份 $m.git 属主为调用者（$owner，可读可删，无 root 残留）"
+  else
+    bad "备份 $m.git 属主是 $owner，期望 $(id -u):$(id -g) —— 会留下只有 root 能清的残留"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+step "6b 负例自证：源侧 ref 异常的两种形态"
+# 光看「三域都出了 mirror」证明不了健壮性——上一版三域里有一域根本没出，读数照样
+# 「看起来没问题」。这一步在**一次性造出来的小仓**上主动制造两种源侧 ref 异常，
+# 分别断言两件相反的事：
+#   1. 不可读的 ref（0600/000，属主与 helper 不同）——修好之后必须**被吃掉**，
+#      因为读源已改走 root。这正是 work-records 那条 0600 tag 的形态。
+#   2. 真正损坏的 ref（写进 null OID）——必须**显式 FAIL 且带 git 原文**，
+#      绝不允许再退回「静默跳过」。
+# 全程只碰自己造的 katana-staging-negctl 卷，跑完即删，不碰三域任何数据。
+NEG_VOL=katana-staging-negctl
+NEG_MIRROR=/tmp/katana-negctl-mirror
+
+neg_setup() {
+  docker volume rm "$NEG_VOL" >/dev/null 2>&1
+  rm -rf "$NEG_MIRROR"; mkdir -p "$NEG_MIRROR"
+  docker volume create "$NEG_VOL" >/dev/null
+  docker run --rm --user 0:0 -v "$NEG_VOL:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" -c '
+    set -e
+    cd /d && git init -q
+    echo probe > a.md && git add a.md
+    git -c user.email=n@l -c user.name=n commit -qm seed
+    git -c user.email=n@l -c user.name=n tag -a probe -m probe
+    chown -R 10001:10001 /d' >/dev/null 2>&1
+  case "$1" in
+    unreadable) docker run --rm --user 0:0 -v "$NEG_VOL:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" \
+                  -c 'chmod 000 /d/.git/refs/tags/probe' >/dev/null 2>&1 ;;
+    broken)     docker run --rm --user 0:0 -v "$NEG_VOL:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" \
+                  -c 'printf "%040d\n" 0 > /d/.git/refs/tags/probe' >/dev/null 2>&1 ;;
+  esac
+}
+neg_run() {
+  KATANA_MIRROR_ROOT="$NEG_MIRROR" KATANA_HELPER_IMAGE="katana-mcp:$IMAGE_TAG" \
+  KATANA_BACKUP_DOMAINS=negctl \
+  bash -c "sed 's/katana-\$name/katana-staging-\$name/' '$HERE/backup-volumes.sh' > /tmp/bk-neg.sh && bash /tmp/bk-neg.sh" 2>&1
+}
+
+neg_setup unreadable
+neg_out=$(neg_run); neg_rc=$?
+if [ "$neg_rc" -eq 0 ] && echo "$neg_out" | grep -q '^FULL negctl'; then
+  ok "不可读 ref（模式 000，属主非 helper）不再阻断备份 —— 这是 work-records 那条 0600 tag 的形态"
+else
+  bad "不可读 ref 仍然阻断备份（rc=$neg_rc）—— 对源侧权限依旧敏感"
+  echo "$neg_out" | tail -4 | sed 's/^/       /'
+fi
+
+neg_setup broken
+neg_out=$(neg_run); neg_rc=$?
+if [ "$neg_rc" -ne 0 ] && echo "$neg_out" | grep -q '     git: '; then
+  ok "真损坏 ref（null OID）显式 FAIL 且带 git 原文（rc=$neg_rc）—— 不会再静默"
+  echo "$neg_out" | grep -E '^FAIL|     git: ' | head -2 | sed 's/^/       /'
+else
+  bad "真损坏 ref 没能显式炸出来（rc=$neg_rc）—— 静默失真回归了"
+  echo "$neg_out" | tail -4 | sed 's/^/       /'
+fi
+docker volume rm "$NEG_VOL" >/dev/null 2>&1; rm -rf "$NEG_MIRROR" /tmp/bk-neg.sh
+echo "  负例用的一次性卷与 mirror 已清除"
+
+# ---------------------------------------------------------------------------
 step "结果"
-printf '  PASS=%s  FAIL=%s\n' "$pass" "$fail"
-[ "$KEEP" -eq 1 ] && echo "  --keep：staging 栈保留（端口 15601/15602/15605），拆用 $0 --down" || teardown
+printf '  PASS=%s  FAIL=%s  SKIP=%s\n' "$pass" "$fail" "$skip"
+# ---------------------------------------------------------------------------
+# 读数与生产脏净解耦的**一行证据**
+# ---------------------------------------------------------------------------
+# 两次不同脏度的运行要能直接对比，就得把「输入脏度」和「起栈时的实际输入」分开印：
+#   · seed_dirty  是这一刻生产的脏度 —— 每次都不同，是环境噪声
+#   · post_scrub  是洗完之后、真正喂给容器栈的脏度 —— **必须恒为 0/0/0**
+# 只要 post_scrub 这段两次运行相同，PASS/FAIL 计数就可比；它一旦不是 0/0/0，
+# 这一轮读数就不可信，不必再往下解释任何一条 FAIL。
+printf '  读数解耦证据：\n'
+printf '    seed_mode=%s  seed_dirty=%s（%s）\n' \
+       "$SEED_MODE" "$dirty_total" "${dirty_domains[*]:-无}"
+scrub_line=""; post_line=""; post_bad=0
+for d in wiki work-folder memory; do
+  scrub_line+="$d:${SRC_DIRTY_BEFORE[$d]}→${POST_SCRUB[$d]:-?} "
+  post_line+="${POST_SCRUB[$d]:-?}/"
+  [ "${POST_SCRUB[$d]:-1}" != "0" ] && post_bad=1
+done
+printf '    scrub=%s\n' "$scrub_line"
+printf '    post_scrub=%s  ← 这一段两次运行相同则读数可比\n' "${post_line%/}"
+if [ "$post_bad" -eq 0 ]; then
+  printf '    ✅ 喂给容器栈的输入恒为干净仓，PASS/FAIL 计数与生产脏度无关\n'
+else
+  printf '    ❌ 仍有域带脏起栈，本轮 PASS/FAIL 计数不可与其它轮次相比\n'
+fi
+if [ "$skip" -gt 0 ]; then
+  echo "  SKIP 不是「没测」的借口，是「前置塌了，测了也没意义」——根因见上面唯一那条 FAIL。"
+fi
+if [ "$KEEP" -eq 1 ]; then
+  echo "  --keep：staging 栈保留（端口 15601/15602/15605），拆用 $0 --down"
+else
+  teardown --verify
+fi
 exit $([ "$fail" -eq 0 ] && echo 0 || echo 1)

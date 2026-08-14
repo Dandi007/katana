@@ -27,13 +27,23 @@ named volume 把这两类事故**结构性消除**：宿主命名空间里根本
 
 ## 构建
 
+**两个镜像都要建，且必须同 tag。** compose 里 `katana-mcp` 与 `katana-embedding` 共用同一个
+`KATANA_MCP_TAG`，只建一个的话另一个在步骤 0 就把演练挡下来。
+
 ```bash
 cd <repo>
 REV=$(git rev-parse --short HEAD)
+
+# 1) 三域 MCP（context 由 .dockerignore 收到 mcp/ 下六个包）
 docker build -f mcp/Dockerfile --build-arg GIT_REVISION=$REV -t katana-mcp:$REV .
+
+# 2) 共享 embedding（context 是 services/embedding，不是仓根——模型在构建期烘进去）
+docker build -f services/embedding/Dockerfile --build-arg GIT_REVISION=$REV \
+             -t katana-embedding:$REV services/embedding
 ```
 
-镜像 455MB。`compose` 里 tag 走 `KATANA_MCP_TAG`，**刻意不接受 `latest`**——部署要能说清跑的是哪个 commit。
+MCP 镜像 455MB，embedding 镜像 668MB。`compose` 里 tag 走 `KATANA_MCP_TAG`，**刻意不接受
+`latest`**——部署要能说清跑的是哪个 commit。
 
 ## 迁移（一次性）
 
@@ -75,6 +85,44 @@ deploy/backup-volumes.sh
 
 ⚠️ 本机 mirror 只防误删与仓损坏，**不防磁盘故障**——它和 Docker 数据在同一块盘上。异地副本是独立的一件事。
 
+### 🔴 备份对源侧 ref 权限敏感 —— 迁移上线当天会断，演练提前逼出来了
+
+演练里 work-records 备份失败，git 的报错是：
+
+```
+fatal: 'refs/tags/pre-flatten-baseline-20260729T084648Z-902583' has a null OID
+```
+
+**这句话会骗人。** 那个 tag 完好无损：`cat-file -t` 是 `tag`，指向
+`1c44ff0651f2550cb49e74e5b023221f80984772`，`fsck --connectivity-only` 无输出。
+真因是**文件权限**：
+
+```
+$ ls -l /data/work-records/.git/refs/tags/
+-rw-rw-r-- pre-flat-migration-20260729T140829Z          # 0664
+-rw------- pre-flatten-baseline-20260729T084648Z-902583  # 0600 ← 只有这一个
+```
+
+git 读不到一个 ref 时，报出来的形状就是 `has a null OID`。所以**「坏 tag」是误诊，
+按那个方向去删/重建 tag 等于对着错误目标动生产数据。**
+
+为什么宿主上没暴露、演练里暴露了：宿主上该文件属主是 uid 1000，`backup-volumes.sh`
+也以 uid 1000 跑，读得到，生产 mirror 一直是好的（`/data/backups/katana-data/work-records.git`，
+3020 commits）。而演练种卷时按真迁移做了 `chown -R 10001:10001`，0600 于是对 uid 1000
+不可读 —— **`migrate-data-to-volumes.sh` 迁移时做的是同一个 chown**，所以这不是演练
+特有的问题，是**真迁移上线后生产备份会以完全相同的方式断掉**，而且断了没人会发现。
+
+修法不是去动那个 0600 文件（生产面只读），而是让备份路径对源侧权限不敏感：
+读源改走 root（源始终 `:ro` 挂载，root 也写不进去），产物在同一次容器调用里
+`chown` 回调用者，`README` 里「备份不能归 root」那条纪律照旧成立。
+另加一条完备性判据：mirror 的 commit 数与 ref 集合必须与源逐字相等 ——
+「clone 退出 0」不等于「全都拷过来了」。
+
+两处吞错误的写法也已修（`backup-volumes.sh` 的 `>/dev/null 2>&1` 吃掉 git 的 fatal；
+`rehearse.sh` 的 `if <pipeline> | tail -3` 叠 `pipefail` 让整个备份判据段既不 PASS
+也不 FAIL 地消失）。演练步骤 6b 用一次性小仓对这两种形态做负例自证：不可读 ref
+必须被吃掉，真损坏 ref 必须显式 FAIL 并带 git 原文。
+
 ## 回滚
 
 ```bash
@@ -101,7 +149,28 @@ deploy/rehearse.sh --down   # 只拆
 
 与生产的唯一差异是卷名、宿主端口、容器名；镜像、env、加固项、command 全部逐字相同。
 
-**当前结果：22 PASS / 2 FAIL**，唯一 FAIL 是下面这条待决项。
+**当前结果（`d455747`，生产 work-records 脏 78 条时跑）：40 PASS / 2 FAIL / 0 SKIP。**
+
+仅剩的两条 FAIL 是 `wiki wiki_search` 与 `work-folder wf_search`，**都是 P0 未接线的
+预期 FAIL**：两个 server 仍调宿主 vault_search（见下方待决项），容器里打不到宿主
+loopback，报 `Connection refused`。dd 单 `dev_katana_search_wiring_01` 正在修这一条；
+它转绿之后本演练即全绿，**没有其它已知阻塞项**。
+
+读数与「生产恰好脏不脏」已解耦。结果行会直接印出解耦证据：
+
+```
+  读数解耦证据：
+    seed_mode=scrub  seed_dirty=78（work-folder）   ← 环境噪声，每次都不同
+    scrub=wiki:0→0 work-folder:78→0 memory:0→0
+    post_scrub=0/0/0  ← 这一段两次运行相同则读数可比
+```
+
+`seed_dirty` 是这一刻生产的脏度，`post_scrub` 是**真正喂给容器栈的输入**。只要
+`post_scrub` 恒为 `0/0/0`，两次不同脏度的运行就可以直接比 PASS/FAIL 计数。
+实测四轮 seed_dirty 分别为 57/63/76/78，post_scrub 全为 `0/0/0`，结构逐字一致。
+
+对照：改造前同一份代码在生产净时读 25/2、脏时读 14/13，唯一变量就是种卷那一刻的
+生产状态——那种读数没有意义。
 
 ### ⚠️ 待决：检索后端在容器内不可达
 
