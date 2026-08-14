@@ -26,6 +26,7 @@ named volume 把这两类事故**结构性消除**：宿主命名空间里根本
 | `backup-volumes.sh` | 卷 → 宿主 bare mirror |
 | `dd-stall-probe.sh` | **非部署件**：判定一条 dev-dispatch implement attempt 是否卡死（只读、无副作用、带正反自证） |
 | `dd-dispatch-preflight.sh` | **非部署件**：派 dd 单前的前置校验，选择器双层验证 + H0 不变量；不通过就不输出 initial_handoff |
+| `dd-spec-verify.sh` | **非部署件**：对候选 checkout 逐项核验接线 spec 的 D1–D7 + D7.1，每项打印文件/行号/命令/回显 |
 
 `dd-stall-probe.sh` 与容器化无关，放这里是因为它和 `rehearse.sh` 同属本卷的确定性
 ops 工具面。它存在的原因是：本目标的接线单先后两次卡死，而两次都是靠人盯表判断
