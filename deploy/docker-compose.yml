@@ -16,12 +16,6 @@
 # 时静默丢失。**必须用 map 级 anchor 在各服务的 environment 内部合并**——放在
 # x-katana-common 里会被服务自己的 environment: 整块替换掉（YAML merge key 不做
 # 深合并），实测三个服务的 GIT_* 全丢，而 git 会静默回落到镜像默认值，不报错。
-# wiki 与 work-folder 的检索要打宿主上的 vault-search(:18082)。容器里 127.0.0.1 是
-# 容器自己，必须经 host-gateway 出去——真机演练里这两个域的检索就是这么 refused 的。
-# memory 不用检索后端，故不带这一段。
-x-vault-search: &vault-search
-  KATANA_VAULT_SEARCH_URL: http://host.docker.internal:18082
-
 x-git-identity: &git-identity
   GIT_AUTHOR_NAME: katana-mcp
   GIT_AUTHOR_EMAIL: katana-mcp@localhost
@@ -39,8 +33,6 @@ x-katana-common: &katana-common
   cap_drop: [ALL]
   security_opt:
     - no-new-privileges:true
-  extra_hosts:
-    - "host.docker.internal:host-gateway"
   logging:
     driver: json-file
     options: { max-size: "10m", max-file: "3" }
@@ -51,7 +43,7 @@ services:
     container_name: katana-wiki-mcp
     command: ["python", "-m", "katana_wiki_mcp.server"]
     environment:
-      <<: [*git-identity, *vault-search]
+      <<: *git-identity
       KATANA_KB_ROOT: /data/wiki
       KATANA_WIKI_ROOT: /data/wiki
       KATANA_WIKI_MCP_HOST: 0.0.0.0        # 容器内监听全网卡；对外仅由下面的 ports 绑到 127.0.0.1
@@ -74,7 +66,7 @@ services:
     container_name: katana-work-folder-mcp
     command: ["python", "-m", "katana_work_folder_mcp.server"]
     environment:
-      <<: [*git-identity, *vault-search]
+      <<: *git-identity
       KATANA_KB_ROOT: /data/work-records
       KATANA_WORK_FOLDER: 智元工作/工作记录
       KATANA_WORK_FOLDER_MCP_HOST: 0.0.0.0

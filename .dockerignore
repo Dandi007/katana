@@ -10,6 +10,7 @@
 !mcp/memory/
 !mcp/wiki/
 !mcp/work-folder/
+!mcp/search/
 
 # 上面 ! 放行的子树里仍要剔除的
 **/__pycache__/

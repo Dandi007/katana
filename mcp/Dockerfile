@@ -37,8 +37,9 @@ COPY mcp/kernel      /src/mcp/kernel
 COPY mcp/memory      /src/mcp/memory
 COPY mcp/wiki        /src/mcp/wiki
 COPY mcp/work-folder /src/mcp/work-folder
+COPY mcp/search      /src/mcp/search
 RUN pip install --no-deps \
-      /src/mcp/shared /src/mcp/kernel \
+      /src/mcp/shared /src/mcp/kernel /src/mcp/search \
       /src/mcp/memory /src/mcp/wiki /src/mcp/work-folder
 
 # ---------------------------------------------------------------------------
