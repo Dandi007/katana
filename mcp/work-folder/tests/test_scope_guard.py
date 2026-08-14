@@ -154,3 +154,45 @@ def test_append_progress_rejected_when_control_index_dirty(repo_store):
             "key-index",
             now_fn=_fixed_now,
         )
+
+
+def test_create_succeeds_with_dirty_sister_folder(repo_store):
+    """建新 folder 不该被别人 folder 里的脏改动阻断。
+
+    实测过的真实故障：某条工作线把运行时产物（trace snapshot、日志、
+    __pycache__）写进自己的 work folder，导致**所有** session 的 wf_create
+    被整仓 clean 前置条件拒绝。create 触及的既有路径只有 INDEX.md——
+    新 folder 由 mint 循环保证不存在，天然干净。
+    """
+    repo, _, store = repo_store
+    folder_b = store.create("beta", _fixed_now)["folder_id"]
+    b_tracked_before, b_untracked_before = _dirty_folder(repo, folder_b)
+
+    result = store.create("gamma", _fixed_now)
+
+    assert result["created"] is True
+    new_folder = result["folder_id"]
+    assert new_folder != folder_b
+
+    # 兄弟 folder 的脏内容逐字节保留，且不泄进本次提交
+    assert (repo / folder_b / "progress.md").read_bytes() == b_tracked_before
+    assert (repo / folder_b / "scratch.txt").read_bytes() == b_untracked_before
+
+    sha = result["git"]["detail"]
+    committed = subprocess.run(
+        ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha],
+        cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.splitlines()
+    assert not any(path.startswith(f"{folder_b}/") for path in committed)
+    assert any(path.startswith(f"{new_folder}/") for path in committed)
+
+
+def test_create_rejected_when_control_index_dirty(repo_store):
+    """收窄不等于放开：控制面（INDEX.md）脏时 create 仍须 fail closed。"""
+    repo, _, store = repo_store
+    store.create("alpha", _fixed_now)
+    index = repo / "INDEX.md"
+    index.write_bytes(index.read_bytes() + b"\nstale index\n")
+
+    with pytest.raises(DirtyWorkTreeError):
+        store.create("delta", _fixed_now)

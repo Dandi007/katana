@@ -271,6 +271,25 @@ class WorkFolderStore:
             "control_paths": list(control_paths),
         }
 
+    def _create_scope(self) -> dict:
+        """Return the scope kwargs for `wf_create`.
+
+        create 无法用 `_folder_scope`——`wf_id` 在事务内才铸出（要 `binding.vfs`
+        扫已有 id 去重）。但它**不需要**整仓 clean：mint 循环保证
+        `not vfs.exists(wf_id)`，新 folder 路径在仓里必然不存在、必然干净；create
+        唯一触及的既有路径就是 `INDEX.md`（加 kernel 自己合并进来的 ledger /
+        manifest 控制面）。
+
+        所以正确的 scope = 只有控制面必须干净。不这么做的后果实测过：任何一个
+        无关 folder 里的脏改动（如某条工作线往自己 folder 里写运行时产物）会
+        阻断**所有** session 建新 folder——爆炸半径与该 mutation 实际触及的
+        范围完全不匹配。
+        """
+        return {
+            "scope_prefixes": ["INDEX.md"],
+            "control_paths": ["INDEX.md"],
+        }
+
     def _folder_path(self, folder_id: str) -> str:
         """O(1) 校验 flat folder identity，并返回 repo-relative 目录名。"""
         folder_id = require_folder_id(folder_id)
@@ -354,6 +373,7 @@ class WorkFolderStore:
             "work-folder: create",
             idempotency_key=idempotency_key,
             idempotency_payload={"topic": topic},
+            **self._create_scope(),
         )
 
     def save(self, folder_id: str, now_fn,
