@@ -68,12 +68,14 @@ if [ -z "$IMAGE_TAG" ]; then
   IMAGE_TAG="$(git -C "$HERE/.." rev-parse --short HEAD 2>/dev/null)"
 fi
 export KATANA_MCP_TAG="$IMAGE_TAG"
-if docker image inspect "katana-mcp:$IMAGE_TAG" >/dev/null 2>&1; then
-  ok "镜像 katana-mcp:$IMAGE_TAG 在位"
-else
-  bad "缺镜像 katana-mcp:$IMAGE_TAG —— 先 docker build -f mcp/Dockerfile --build-arg GIT_REVISION=$IMAGE_TAG -t katana-mcp:$IMAGE_TAG ."
-  exit 1
-fi
+for img in katana-mcp katana-embedding; do
+  if docker image inspect "$img:$IMAGE_TAG" >/dev/null 2>&1; then
+    ok "镜像 $img:$IMAGE_TAG 在位"
+  else
+    bad "缺镜像 $img:$IMAGE_TAG —— 见 deploy/README.md「构建」"
+    exit 1
+  fi
+done
 for d in "${!SRCDIRS[@]}"; do
   [ -d "${SRCDIRS[$d]}/.git" ] && ok "生产源 ${SRCDIRS[$d]} 在位（只读使用）" || { bad "缺源 ${SRCDIRS[$d]}"; exit 1; }
 done
@@ -110,10 +112,10 @@ fi
 
 for i in $(seq 1 30); do
   healthy=$("${COMPOSE[@]}" ps --format json 2>/dev/null | grep -c '"Health":"healthy"')
-  [ "${healthy:-0}" -ge 3 ] && break
+  [ "${healthy:-0}" -ge 4 ] && break
   sleep 2
 done
-if [ "${healthy:-0}" -ge 3 ]; then ok "三个容器 healthy"; else bad "健康检查未全绿（healthy=$healthy）"; "${COMPOSE[@]}" ps; fi
+if [ "${healthy:-0}" -ge 4 ]; then ok "四个容器 healthy（含 embedding）"; else bad "健康检查未全绿（healthy=$healthy）"; "${COMPOSE[@]}" ps; fi
 
 for d in "${!PORTS[@]}"; do
   path="/mcp"; [ "$d" = "memory" ] && path="/t/uther/mcp"   # memory 多租户挂载
@@ -192,6 +194,18 @@ chk fs_create   && ok "work-folder fs_create 提交成功"     || bad "work-fold
 chk mem_create  && ok "memory memory_create 成功"          || bad "memory memory_create 失败"
 chk wiki_search && ok "wiki wiki_search 成功"              || bad "wiki wiki_search 失败"
 chk wf_search   && ok "work-folder wf_search 成功"        || bad "work-folder wf_search 失败"
+
+# ---------------------------------------------------------------------------
+step "3b embedding 服务与向量臂"
+emb=$(docker exec katana-work-folder-mcp-staging python -c "
+import os, httpx, json
+url = os.environ['KATANA_EMBEDDING_ENDPOINT']
+r = httpx.post(url, json={'input': ['向量臂自检']}, timeout=30)
+print(json.dumps({'status': r.status_code, 'dim': len(r.json()['data'][0]['embedding'])}))
+" 2>&1 | tail -1)
+echo "  $emb"
+echo "$emb" | grep -q '"status": 200' && ok "MCP 容器内可达 embedding 服务" || bad "MCP 容器内够不到 embedding"
+echo "$emb" | grep -q '"dim": 512'    && ok "向量维度 512（与索引 schema 一致）" || bad "向量维度不符"
 
 # ---------------------------------------------------------------------------
 step "4 写入真落进卷内 git，且 author 正确"

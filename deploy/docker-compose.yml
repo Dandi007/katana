@@ -16,6 +16,13 @@
 # 时静默丢失。**必须用 map 级 anchor 在各服务的 environment 内部合并**——放在
 # x-katana-common 里会被服务自己的 environment: 整块替换掉（YAML merge key 不做
 # 深合并），实测三个服务的 GIT_* 全丢，而 git 会静默回落到镜像默认值，不报错。
+# 共享 embedding 端点。**服务名而不是 IP/宿主回环**：三个 MCP 与 embedding 在同一
+# compose 网络里，容器间直连——容器化之初卡住的 host.docker.internal 问题在这个
+# 形态下结构性不存在，也不需要动任何宿主服务的监听面。
+x-embedding: &embedding
+  KATANA_EMBEDDING_ENDPOINT: http://embedding:80/v1/embeddings
+  KATANA_EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+
 x-git-identity: &git-identity
   GIT_AUTHOR_NAME: katana-mcp
   GIT_AUTHOR_EMAIL: katana-mcp@localhost
@@ -38,12 +45,43 @@ x-katana-common: &katana-common
     options: { max-size: "10m", max-file: "3" }
 
 services:
+  # 共享的**无状态**计算面：进文本、出向量，不持有任何域的数据。
+  # 有状态的索引归各域自持，在各自的卷里（mcp/search）。
+  embedding:
+    image: katana-embedding:${KATANA_MCP_TAG:?需指定镜像 tag，勿用 latest 部署}
+    container_name: katana-embedding
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=64m"   # flow 写法会把逗号当列表分隔符，必须加引号
+    cap_drop: [ALL]
+    security_opt:
+      - "no-new-privileges:true"
+    environment:
+      # 6 = 物理核数。实测 12 线程（超线程）反降到 46.8 chunk/s，别拉满。
+      KATANA_EMBEDDING_THREADS: "6"
+    # 不发布到宿主：只有同网络的 MCP 需要它，少一个对外面。
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:80/health',timeout=5).json().get('ok') else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   wiki:
     <<: *katana-common
     container_name: katana-wiki-mcp
+    depends_on:
+      embedding:
+        condition: service_healthy
     command: ["python", "-m", "katana_wiki_mcp.server"]
     environment:
-      <<: *git-identity
+      <<: [*git-identity, *embedding]
       KATANA_KB_ROOT: /data/wiki
       KATANA_WIKI_ROOT: /data/wiki
       KATANA_WIKI_MCP_HOST: 0.0.0.0        # 容器内监听全网卡；对外仅由下面的 ports 绑到 127.0.0.1
@@ -64,9 +102,12 @@ services:
   work-folder:
     <<: *katana-common
     container_name: katana-work-folder-mcp
+    depends_on:
+      embedding:
+        condition: service_healthy
     command: ["python", "-m", "katana_work_folder_mcp.server"]
     environment:
-      <<: *git-identity
+      <<: [*git-identity, *embedding]
       KATANA_KB_ROOT: /data/work-records
       KATANA_WORK_FOLDER: 智元工作/工作记录
       KATANA_WORK_FOLDER_MCP_HOST: 0.0.0.0
