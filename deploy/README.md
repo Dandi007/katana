@@ -149,28 +149,66 @@ deploy/rehearse.sh --down   # 只拆
 
 与生产的唯一差异是卷名、宿主端口、容器名；镜像、env、加固项、command 全部逐字相同。
 
-**当前结果（`d455747`，生产 work-records 脏 78 条时跑）：40 PASS / 2 FAIL / 0 SKIP。**
+**镜像不必事先建。** 步骤 0 发现缺 `katana-mcp:<HEAD>` / `katana-embedding:<HEAD>` 时，
+按上面「构建」那两条命令**就地建**。默认 tag 跟 HEAD，每出一个新 commit 就要重建一次，
+一份要求先手工建两个镜像才能跑的 ops 工装等于默认不可跑。要严格校验「镜像必须事先
+备好」用 `--no-build`。
+
+**当前结果（`67b8431`）：42 PASS / 2 FAIL / 0 SKIP。**
 
 仅剩的两条 FAIL 是 `wiki wiki_search` 与 `work-folder wf_search`，**都是 P0 未接线的
 预期 FAIL**：两个 server 仍调宿主 vault_search（见下方待决项），容器里打不到宿主
 loopback，报 `Connection refused`。dd 单 `dev_katana_search_wiring_01` 正在修这一条；
 它转绿之后本演练即全绿，**没有其它已知阻塞项**。
 
-读数与「生产恰好脏不脏」已解耦。结果行会直接印出解耦证据：
+### 判据 11「全绿」的口径
+
+**全绿 = `FAIL=0` 且 `SKIP=0`。** SKIP 的语义是「前置塌了，这条判据根本没跑」——
+它把连锁塌方从十几条 FAIL 收敛成一条 FAIL + 若干 SKIP，那是为了**可读**，不是为了
+好看。没跑过的判据不能算通过，否则「把判据 SKIP 掉」就成了让读数变绿最省事的办法。
+脚本的退出码对 FAIL 与 SKIP 一视同仁，结果行也会直接印出这个口径。
+
+### 读数与生产状态解耦：两根轴，都要挡
+
+生产 `/data/work-records` 是活仓（实测约 **70+ 笔 commit/小时**），会以两种方式污染读数：
+
+| 轴 | 症状 | 挡法 |
+|---|---|---|
+| **脏工作区** | `cp -a` 把未跟踪文件一并搬进卷 → `DirtyWorkTreeError` | 副本内按迁移纪律洗净（步骤 1） |
+| **撕裂副本** | `cp -a` 不是原子快照，objects/ 与 refs/ 在不同瞬间被抄 → 卷里 HEAD 指向没抄进来的 tree → `error: bad tree object HEAD` | 抄完验自洽（`vol_intact`），不自洽就整卷重抄，最多 `KATANA_SEED_ATTEMPTS`（默认 4）次 |
+
+只挡第一根轴是不够的，而且第二根轴**会伪装成第一根轴的成功**：撕裂副本上
+`git status` 非零退出、stdout 为空，`... | grep -c .` 把它数成 **0 条**，于是
+「卷内仓干净」PASS、「洗净 0→0」、`post_scrub=0/0/0`、✅「与生产脏度无关」四条断言
+一起说谎，而真实情况是 work-folder 容器根本起不来。**一个断言读不出被测量时必须
+报错，不能返回一个恰好等于「健康」的值**——现在 `vol_dirty_count` 回显 `ERR`，
+按 FAIL 处理。
+
+结果行直接印解耦证据：
 
 ```
   读数解耦证据：
-    seed_mode=scrub  seed_dirty=78（work-folder）   ← 环境噪声，每次都不同
-    scrub=wiki:0→0 work-folder:78→0 memory:0→0
+    seed_mode=scrub  seed_dirty=116（work-folder）   ← 环境噪声，每次都不同
+    scrub=wiki:0→0 work-folder:116→0 memory:0→0
     post_scrub=0/0/0  ← 这一段两次运行相同则读数可比
 ```
 
 `seed_dirty` 是这一刻生产的脏度，`post_scrub` 是**真正喂给容器栈的输入**。只要
 `post_scrub` 恒为 `0/0/0`，两次不同脏度的运行就可以直接比 PASS/FAIL 计数。
-实测四轮 seed_dirty 分别为 57/63/76/78，post_scrub 全为 `0/0/0`，结构逐字一致。
 
-对照：改造前同一份代码在生产净时读 25/2、脏时读 14/13，唯一变量就是种卷那一刻的
-生产状态——那种读数没有意义。
+实测三轮连跑（生产全程在落账）：
+
+| 轮 | seed_dirty | 种卷 | PASS/FAIL/SKIP |
+|---|---|---|---|
+| A | 108 | 一次抄成 | 42 / 2 / 0 |
+| B | 111 | 一次抄成 | 42 / 2 / 0 |
+| C（`KATANA_SEED_FORCE_TEAR=2` 故障注入） | 116 | 三域各重抄 2 次 | 42 / 2 / 0 |
+
+C 用故障注入把撕裂强行造出来，证明重抄这条路真的会跑而不是「恰好没撞上」——
+真实撕裂是概率事件（落账约 1 笔/分钟，抄一次十几秒），连跑两次都没撞上不等于免疫。
+
+对照：改造前同一份代码在生产净时读 25/2、脏时读 14/13，撞上撕裂时读 29/3/6，
+唯一变量就是种卷那一刻的生产状态——那种读数没有意义。
 
 ### ⚠️ 待决：检索后端在容器内不可达
 

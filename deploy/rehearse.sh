@@ -47,6 +47,7 @@
 #   deploy/rehearse.sh --keep             # 保留 staging 栈供手工继续戳
 #   deploy/rehearse.sh --down             # 只拆
 #   deploy/rehearse.sh --keep-source-dirt # 不洗副本，照搬生产脏状态（专门演练脏仓场景）
+#   deploy/rehearse.sh --no-build         # 镜像必须事先备好，缺了就 FAIL（不就地构建）
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,13 +71,15 @@ declare -A BLOCKED_BY=()     # 域 → 不可用的根因，SKIP 时原样打出
 declare -A POST_SCRUB=()     # 域 → 洗净后、起栈前的脏条数；结果行的解耦证据
 PROD_BIND_CLEAN=unknown   # 步骤 2 实测填 1/0；teardown 的「生产未触碰」[B] 证据
 
-KEEP=0; DOWN_ONLY=0; KEEP_DIRT=0
+KEEP=0; DOWN_ONLY=0; KEEP_DIRT=0; NO_BUILD=0
+SEED_ATTEMPTS="${KATANA_SEED_ATTEMPTS:-4}"   # 撞上并发写就重抄，见步骤 1
 for a in "$@"; do
   case "$a" in
     --keep) KEEP=1 ;;
     --down) DOWN_ONLY=1 ;;
     --keep-source-dirt) KEEP_DIRT=1 ;;
-    *) echo "用法：$0 [--keep|--down|--keep-source-dirt]" >&2; exit 2 ;;
+    --no-build) NO_BUILD=1 ;;
+    *) echo "用法：$0 [--keep|--down|--keep-source-dirt|--no-build]" >&2; exit 2 ;;
   esac
 done
 
@@ -106,6 +109,35 @@ vol_git() {
   local vol="$1"; shift
   docker run --rm --user 10001:10001 -v "$vol:/d" --entrypoint sh \
     "katana-mcp:$IMAGE_TAG" -c "git --no-optional-locks -C /d $*" 2>/dev/null
+}
+
+# --- 脏计数：必须区分「0 条」与「读不出来」-----------------------------------
+# 上一版写的是 `vol_git ... status | grep -c .`。git 报错时 stdout 为空，grep 数出
+# **0**，于是一个 `bad tree object HEAD` 的撕裂副本被读成「干净」——
+# 「PASS 卷内仓干净」「洗净 0→0」「post_scrub=0/0/0」「✅ 与生产脏度无关」四条
+# 全是假阴性，而且是**自己证明自己成功**的那种假。一个断言读不出被测量时必须
+# 报错，不能返回一个恰好等于「健康」的值。
+vol_dirty_count() {
+  local out rc
+  out=$(docker run --rm --user 10001:10001 -v "$1:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" \
+        -c 'git --no-optional-locks -C /d status --porcelain=v1 --untracked-files=all' 2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then echo ERR; return 1; fi
+  printf '%s' "$out" | grep -c .
+  return 0
+}
+
+# --- 副本自洽性：HEAD 与它的 tree 都得解得开 ---------------------------------
+# `cp -a` **不是原子快照**。生产 work-records 每小时 70+ 笔落账，objects/ 与 refs/
+# 在不同瞬间被抄，卷里 HEAD 就会指向一个没抄进来的 tree，work-folder MCP 启动即
+#   DirtyWorkTreeError: cannot verify governed repository cleanliness:
+#   error: bad tree object HEAD
+# 「脏工作区」和「撕裂副本」是两根独立的轴，洗净只解决前者。
+vol_intact() {
+  docker run --rm --user 10001:10001 -v "$1:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" -c \
+    'git --no-optional-locks -C /d rev-parse --verify -q HEAD^{commit} >/dev/null \
+     && git --no-optional-locks -C /d cat-file -e HEAD^{tree} \
+     && git --no-optional-locks -C /d status --porcelain=v1 --untracked-files=all >/dev/null' 2>&1
 }
 
 teardown() {
@@ -184,14 +216,31 @@ if [ -z "$IMAGE_TAG" ]; then
   IMAGE_TAG="$(git -C "$HERE/.." rev-parse --short HEAD 2>/dev/null)"
 fi
 export KATANA_MCP_TAG="$IMAGE_TAG"
-for img in katana-mcp katana-embedding; do
+# 默认 tag 跟 HEAD，于是**每出一个新 commit，「照文档跑」这条路就断一次**
+# （`FAIL 缺镜像 katana-mcp:<新 sha>` → exit 1）。一份要求先手工建两个镜像才能跑的
+# ops 工装，等于默认不可跑。缺就按 deploy/README.md 的那两条命令**就地建**，
+# 这样镜像与 HEAD 恒定同源，也不可能测成别的 commit。
+# 要严格校验「镜像必须事先备好」，用 --no-build。
+ensure_image() {
+  local img="$1" df="$2" ctx="$3" log="/tmp/rehearse-build-${1}-${IMAGE_TAG}.log"
   if docker image inspect "$img:$IMAGE_TAG" >/dev/null 2>&1; then
-    ok "镜像 $img:$IMAGE_TAG 在位"
-  else
-    bad "缺镜像 $img:$IMAGE_TAG —— 见 deploy/README.md「构建」"
-    exit 1
+    ok "镜像 $img:$IMAGE_TAG 在位"; return 0
   fi
-done
+  if [ "$NO_BUILD" -eq 1 ]; then
+    bad "缺镜像 $img:$IMAGE_TAG 且指定了 --no-build —— 见 deploy/README.md「构建」"; return 1
+  fi
+  echo "  缺 $img:$IMAGE_TAG，按 deploy/README.md 就地构建（context=$ctx）…"
+  if docker build -f "$HERE/../$df" --build-arg GIT_REVISION="$IMAGE_TAG" \
+       -t "$img:$IMAGE_TAG" "$HERE/../$ctx" >"$log" 2>&1; then
+    ok "镜像 $img:$IMAGE_TAG 就地构建完成（日志 $log）"
+  else
+    bad "镜像 $img:$IMAGE_TAG 构建失败（日志 $log）"
+    tail -15 "$log" | sed 's/^/       /'
+    return 1
+  fi
+}
+ensure_image katana-mcp       mcp/Dockerfile                . || exit 1
+ensure_image katana-embedding services/embedding/Dockerfile services/embedding || exit 1
 for d in wiki work-folder memory; do
   [ -d "${SRCDIRS[$d]}/.git" ] && ok "生产源 ${SRCDIRS[$d]} 在位（只读使用）" || { bad "缺源 ${SRCDIRS[$d]}"; exit 1; }
 done
@@ -205,8 +254,14 @@ dirty_total=0
 dirty_domains=()
 for d in wiki work-folder memory; do
   src="${SRCDIRS[$d]}"
-  st="$(src_status "$src")"
+  st="$(src_status "$src")"; st_rc=$?
   head="$(src_head "$src")"
+  if [ "$st_rc" -ne 0 ]; then
+    # 源侧同样不许把「读不出来」记成 0 条 —— 那正是本轮骗过读数的形态。
+    bad "源 $d 状态读取失败（git status 非零退出）—— 按 FAIL 处理，不当成干净"
+    SRC_HEAD_BEFORE[$d]="$head"; SRC_DIRTY_BEFORE[$d]=ERR
+    continue
+  fi
   n=$(printf '%s' "$st" | grep -c . )
   SRC_HEAD_BEFORE[$d]="$head"
   SRC_DIRTY_BEFORE[$d]="$n"
@@ -253,36 +308,71 @@ step "1 从生产目录 cp -a 种 staging 卷（只读挂载，与真迁移同�
 teardown >/dev/null 2>&1
 for d in wiki work-folder memory; do
   vol="${VOLS[$d]}"; src="${SRCDIRS[$d]}"
-  docker volume create "$vol" >/dev/null
   # 与 migrate-data-to-volumes.sh 同款：root 身份 cp -a 全量（含 gitignored 的
-  # .katana/runtime），再 chown 给镜像的运行用户
-  if docker run --rm --user 0:0 -v "$vol:/dst" -v "$src:/src:ro" --entrypoint sh \
-       "katana-mcp:$IMAGE_TAG" -c "cp -a /src/. /dst/ && chown -R 10001:10001 /dst" >/dev/null 2>&1; then
-    n=$(vol_git "$vol" "rev-list --count HEAD")
-    ok "$d 卷已种入（$n commits）"
-  else
-    bad "$d 卷种入失败"; exit 1
+  # .katana/runtime），再 chown 给镜像的运行用户。
+  # 但 cp -a 抄的是一个**正在被写**的仓，可能抄出撕裂副本，故：抄完立刻验自洽，
+  # 不自洽就整卷重抄。重抄窗口是秒级，落账间隔是分钟级，几次之内必成；连续失败
+  # 则显式 FAIL，绝不带着一个解不开 HEAD 的卷往下走。
+  seeded=0
+  for attempt in $(seq 1 "$SEED_ATTEMPTS"); do
+    docker volume rm "$vol" >/dev/null 2>&1
+    docker volume create "$vol" >/dev/null
+    pin="$(src_head "$src")"          # 抄之前先记锚点，用来证明窗口内源仓是否前进
+    if ! docker run --rm --user 0:0 -v "$vol:/dst" -v "$src:/src:ro" --entrypoint sh \
+         "katana-mcp:$IMAGE_TAG" -c "cp -a /src/. /dst/ && chown -R 10001:10001 /dst" >/dev/null 2>&1; then
+      note "$d 第 $attempt 次 cp -a 失败，重抄"
+      continue
+    fi
+    # 故障注入（**仅自测用**）：把前 N 次抄出来的副本人为撕裂，用来证明重抄这条
+    # 路真的会跑而不是「恰好没撞上」。真实撕裂是概率事件（落账约 1 笔/分钟，
+    # 抄一次十几秒），连跑两次都没撞上不等于免疫。默认 0，不注入。
+    if [ "${KATANA_SEED_FORCE_TEAR:-0}" -gt 0 ] && [ "$attempt" -le "${KATANA_SEED_FORCE_TEAR:-0}" ]; then
+      docker run --rm --user 0:0 -v "$vol:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" -c \
+        't=$(git -C /d rev-parse HEAD^{tree}); rm -f /d/.git/objects/${t%${t#??}}/${t#??}' >/dev/null 2>&1
+      note "$d 第 $attempt 次：故障注入人为撕裂副本（KATANA_SEED_FORCE_TEAR）"
+    fi
+    if intact_err=$(vol_intact "$vol"); then
+      post="$(src_head "$src")"
+      n=$(vol_git "$vol" "rev-list --count HEAD")
+      if [ "$attempt" -gt 1 ]; then
+        ok "$d 卷已种入且自洽（$n commits；第 $attempt 次抄成，前 $((attempt-1)) 次撞上并发写）"
+      else
+        ok "$d 卷已种入且自洽（$n commits，HEAD 与其 tree 均解得开）"
+      fi
+      if [ "$pin" != "$post" ]; then
+        note "$d 种卷窗口内源仓前进 ${pin:0:8}→${post:0:8}（生产确在并发落账，副本仍自洽）"
+      fi
+      seeded=1; break
+    fi
+    note "$d 第 $attempt 次抄到撕裂副本，重抄：$(printf '%s' "$intact_err" | tail -1)"
+  done
+  if [ "$seeded" -ne 1 ]; then
+    bad "$d 连续 $SEED_ATTEMPTS 次都抄到撕裂副本 —— 种卷一致性没解决，本域读数不可信"
+    POST_SCRUB[$d]=ERR
+    continue
   fi
 
-  if [ "$SEED_MODE" = "scrub" ] && [ "${SRC_DIRTY_BEFORE[$d]}" -gt 0 ]; then
-    before=$(vol_git "$vol" "status --porcelain=v1 --untracked-files=all" | grep -c .)
+  if [ "$SEED_MODE" = "scrub" ] && [ "${SRC_DIRTY_BEFORE[$d]}" != "0" ]; then
+    before=$(vol_dirty_count "$vol")
     docker run --rm --user 10001:10001 -v "$vol:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" -c \
       "git -C /d reset --hard >/dev/null 2>&1 && git -C /d clean -fd >/dev/null 2>&1" >/dev/null 2>&1
-    after=$(vol_git "$vol" "status --porcelain=v1 --untracked-files=all" | grep -c .)
+    after=$(vol_dirty_count "$vol")
     note "$d 副本内洗净：$before → $after 条（生产未触碰）"
   fi
 
   # 起栈**前**就把 work-folder 的启动前置条件核验掉。不核验的代价实测过：
   # 一条 DirtyWorkTreeError 在下游炸成 11 条 FAIL，而真正的根因一个字都没打出来。
-  clean_n=$(vol_git "$vol" "status --porcelain=v1 --untracked-files=all" | grep -c .)
+  clean_n=$(vol_dirty_count "$vol")
   POST_SCRUB[$d]="$clean_n"
-  if [ "$clean_n" -eq 0 ]; then
+  if [ "$clean_n" = "ERR" ]; then
+    bad "$d staging 卷内仓脏计数**读不出来**（git status 非零退出）—— 按 FAIL 处理，绝不当成 0 条"
+    vol_intact "$vol" | tail -2 | sed 's/^/       /'
+  elif [ "$clean_n" -eq 0 ]; then
     ok "$d staging 卷内仓干净（MCP 启动前置条件满足）"
   elif [ "$KEEP_DIRT" -eq 1 ]; then
     note "$d staging 卷内仓脏 $clean_n 条 —— --keep-source-dirt 下这是预期的"
   else
     bad "$d staging 卷内仓仍脏 $clean_n 条，洗净失败 —— 下游读数不可信，先查这条"
-    vol_git "$vol" "status --porcelain=v1 --untracked-files=all" | head -5 | sed 's/^/       /'
   fi
 done
 
@@ -507,7 +597,7 @@ for m in work-records wiki memory; do
 done
 
 # ---------------------------------------------------------------------------
-step "6b 负例自证：源侧 ref 异常的两种形态"
+step "6b 负例自证：源侧异常的三种形态（含本轮骗过读数的那条）"
 # 光看「三域都出了 mirror」证明不了健壮性——上一版三域里有一域根本没出，读数照样
 # 「看起来没问题」。这一步在**一次性造出来的小仓**上主动制造两种源侧 ref 异常，
 # 分别断言两件相反的事：
@@ -535,6 +625,10 @@ neg_setup() {
                   -c 'chmod 000 /d/.git/refs/tags/probe' >/dev/null 2>&1 ;;
     broken)     docker run --rm --user 0:0 -v "$NEG_VOL:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" \
                   -c 'printf "%040d\n" 0 > /d/.git/refs/tags/probe' >/dev/null 2>&1 ;;
+    torn)       # 复刻撕裂副本：HEAD 的 commit 在，它的 tree 不在 —— 与生产并发写
+                # 被 cp -a 抄成两半的结果逐字同形（bad tree object HEAD）。
+                docker run --rm --user 0:0 -v "$NEG_VOL:/d" --entrypoint sh "katana-mcp:$IMAGE_TAG" \
+                  -c 't=$(git -C /d rev-parse HEAD^{tree}); rm -f /d/.git/objects/${t%${t#??}}/${t#??}' >/dev/null 2>&1 ;;
   esac
 }
 neg_run() {
@@ -561,6 +655,26 @@ else
   bad "真损坏 ref 没能显式炸出来（rc=$neg_rc）—— 静默失真回归了"
   echo "$neg_out" | tail -4 | sed 's/^/       /'
 fi
+# 第三种形态 —— **这一条正是本轮骗过读数的那个**。
+# 撕裂副本上 `git status` 直接报 `error: bad tree object HEAD` 并非零退出，stdout 为空。
+# 旧写法 `... | grep -c .` 把它数成 0，于是「卷内仓干净」PASS、「洗净 0→0」、
+# post_scrub=0/0/0、✅「与生产脏度无关」全部成立——四条断言一起说谎，
+# 而真实情况是 work-folder 容器起不来。现在必须显式 ERR。
+neg_setup torn
+neg_cnt=$(vol_dirty_count "$NEG_VOL")
+if [ "$neg_cnt" = "ERR" ]; then
+  ok "撕裂副本的脏计数显式报 ERR（不再被数成 0 条）—— 本轮假绿的那条形态已封"
+  vol_intact "$NEG_VOL" | tail -1 | sed 's/^/       /'
+else
+  bad "撕裂副本被读成「$neg_cnt 条」—— 假阴性回归，读数不可信"
+fi
+# 同一形态在种卷路径上也必须被拦：vol_intact 要判它不自洽
+if vol_intact "$NEG_VOL" >/dev/null 2>&1; then
+  bad "vol_intact 认为撕裂副本是自洽的 —— 种卷重抄逻辑会被绕过"
+else
+  ok "vol_intact 判定撕裂副本不自洽 —— 种卷阶段就会重抄而不是带病起栈"
+fi
+
 docker volume rm "$NEG_VOL" >/dev/null 2>&1; rm -rf "$NEG_MIRROR" /tmp/bk-neg.sh
 echo "  负例用的一次性卷与 mirror 已清除"
 
@@ -580,7 +694,7 @@ printf '    seed_mode=%s  seed_dirty=%s（%s）\n' \
        "$SEED_MODE" "$dirty_total" "${dirty_domains[*]:-无}"
 scrub_line=""; post_line=""; post_bad=0
 for d in wiki work-folder memory; do
-  scrub_line+="$d:${SRC_DIRTY_BEFORE[$d]}→${POST_SCRUB[$d]:-?} "
+  scrub_line+="$d:${SRC_DIRTY_BEFORE[$d]:-?}→${POST_SCRUB[$d]:-?} "
   post_line+="${POST_SCRUB[$d]:-?}/"
   [ "${POST_SCRUB[$d]:-1}" != "0" ] && post_bad=1
 done
@@ -594,9 +708,19 @@ fi
 if [ "$skip" -gt 0 ]; then
   echo "  SKIP 不是「没测」的借口，是「前置塌了，测了也没意义」——根因见上面唯一那条 FAIL。"
 fi
+# ---------------------------------------------------------------------------
+# 判据 11「rehearse.sh 全绿」的口径 —— 写死在这里，免得靠嘴解释
+# ---------------------------------------------------------------------------
+# 全绿 == FAIL=0 **且** SKIP=0。
+# SKIP 的语义是「前置塌了，这条判据根本没跑」，它把连锁塌方从十几条 FAIL 收敛成
+# 一条 FAIL + 若干 SKIP，那是为了**可读**，不是为了好看。没跑过的判据不能算通过，
+# 否则「把判据 SKIP 掉」就成了让读数变绿的最省事办法——那正是要防的作弊面。
+# 故退出码对 FAIL 与 SKIP 一视同仁。
+printf '  判据 11 口径：全绿 = FAIL=0 且 SKIP=0（SKIP=没跑过，不充数）→ 本轮%s\n' \
+       "$([ "$fail" -eq 0 ] && [ "$skip" -eq 0 ] && echo '全绿' || echo "未全绿（FAIL=$fail SKIP=$skip）")"
 if [ "$KEEP" -eq 1 ]; then
   echo "  --keep：staging 栈保留（端口 15601/15602/15605），拆用 $0 --down"
 else
   teardown --verify
 fi
-exit $([ "$fail" -eq 0 ] && echo 0 || echo 1)
+exit $([ "$fail" -eq 0 ] && [ "$skip" -eq 0 ] && echo 0 || echo 1)
