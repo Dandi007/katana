@@ -18,22 +18,41 @@
 # ---------------------------------------------------------------------------
 # 判据（阈值按 01/02 的实测签名标定）
 # ---------------------------------------------------------------------------
+# **活性面 = run target ∪ workspace-repo，取两者最新写入。** 两个面缺一不可，
+# 只量其中之一必然出错（下面「被测面为什么必须含 workspace」有实测代价）。
+#
 # 先看终局信号，再看停滞信号，顺序不能反（已收束的 run 同样「长时间零写入」）：
-#   1. nodes/ 非空，或 events.jsonl 出现 "ev":"stop"  → NORMAL（已产出/已收束）
-#   2. 否则：run target 目录零写入时长 ≥ STALL_MINUTES 且 nodes/ 为空 → STALLED
-#   3. 否则                                                            → RUNNING
+#   1. nodes/ 非空，或 events.jsonl 出现 "ev":"stop"          → NORMAL（已产出/已收束）
+#   2. 否则：max(run target 最新写入, workspace-repo 最新写入) 距今 ≥ STALL_MINUTES
+#      且 nodes/ 为空                                          → STALLED
+#   3. 否则                                                     → RUNNING
+# workspace-repo 由 job.json 的 config_path 反查，也可用 verdict_for 的第二参显式给。
+# 判定输出把两面的静默时长**分开打印**，避免口径错位再次藏在一个合并数字后面。
+#
+# ---------------------------------------------------------------------------
+# 被测面为什么必须含 workspace（这条是花了代价换来的）
+# ---------------------------------------------------------------------------
+# 第一版只量 run target，判据文字写的是「run target 零写入 ≥ 阈值 → STALLED」。
+# 但**节点收束前 run target 本来就不写**：01/02 之所以「run target 静默」与「真的死了」
+# 两个信号重合，只是因为它们整体死了——那是巧合，不是因果。
+# 实测 dev_katana_search_wiring_05：run target 静默 21 分钟的同一时刻，workspace
+# 1 分钟前刚落码（已产出 backfill.py / search_hook.py，git status 4 改 2 新增）。
+# 按第一版会在第 30 分钟把这条**正在成功**的单判成 STALLED —— 不是漏报，是误杀。
+# 而当时的「标定依据」引用的恰恰是 workspace 的写入间隔，被测面却没有 workspace，
+# 属标定文字与实现口径的错位。**改判据时这一段与实现必须同步改，否则照文件头复核
+# 的人会重新推出错误判据。**
 #
 # STALL_MINUTES 默认 30，标定依据（全部为本机实测，非估计）：
 #   · 健康 implementer 节点完成耗时 = 988s ≈ 16.5 分钟
 #     （job-2026-08-14T175654-eec8a6e8 的 elapsed_ms=988405）
 #   · 健康在跑作业的 workspace 写入间隔 = 2s / 94s / 1378s
-#   · 01 卡死签名：零写入 72 分钟；02 卡死签名：零写入 30 分钟
+#   · 01 卡死签名：两面零写入 64/137 分钟；02 卡死签名：两面零写入 31/63 分钟
 #   取 30 分钟 ≈ 健康完成耗时的两倍，既不会误杀慢作业，也不必等满引擎的
 #   node_timeout（10800s = 3 小时）。
 #
 # 用法：
 #   deploy/dd-stall-probe.sh <run-target-dir> [--minutes N]
-#   deploy/dd-stall-probe.sh --self-test        # 正反两例自证
+#   deploy/dd-stall-probe.sh --self-test        # 三例自证（含 workspace 活跃那例）
 #
 # 退出码：0=NORMAL/RUNNING（不要处置） 1=STALLED（可处置） 2=用法或输入错误
 set -uo pipefail
@@ -161,7 +180,7 @@ EOF
 
   echo "=== 自证结论 ==="
   if [ "$fail" -eq 0 ]; then
-    echo "  ✅ 探针在正反两例上均判定正确 —— 它不是恒真也不是恒假"
+    echo "  ✅ 探针在三例（两面俱死 / 仅 workspace 活 / 已收束）上均判定正确 —— 非恒真非恒假"
     return 0
   fi
   echo "  ❌ 探针自证失败，判定不可信"
