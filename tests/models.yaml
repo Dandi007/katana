@@ -1,10 +1,16 @@
 # 测试模型配置。setter 仅供 env（base_url/betas/auth），model 一律显式（G5）。
 semantic_judge: single        # single | jury
 roles:
-  default-judge: {setter: set_claude_ccswitch_claude, model: lingzhi/claude-opus-4-8}
-  contract:      {setter: set_claude_ccswitch_claude, model: lingzhi/claude-opus-4-8}
+  # 2026-07-28: judge/contract 从 opus-4-8 切到 opus-5（Claude 家族统一到 opus-5，4-8 退场）。
+  # 注意：历史评分基线在此断裂，跨此日期的 judge 分数不可直接比较。
+  default-judge: {setter: set_claude_ccswitch_opus5, model: lingzhi/claude-opus-5}
+  contract:      {setter: set_claude_ccswitch_opus5, model: lingzhi/claude-opus-5}
 jury-roster:
   - {name: opus,     setter: set_claude_native_opus,  model: opus}
+  # FIXME(2026-07-28): set_claude_ccswitch_gpt 在 profile.zsh 中**不存在**（正确的是
+  # set_claude_ccswitch_model，其默认即 gpt/gpt-5.5）。setter 调用失败后 env 保持不变，
+  # 该席位会静默沿用调用方环境跑分 → 评分污染。仅在 semantic_judge: jury 时生效，
+  # 当前为 single 故未触发。修法需确认后再动。
   - {name: gpt,      setter: set_claude_ccswitch_gpt,  model: gpt/gpt-5.5}
   - {name: deepseek, setter: set_claude_ccswitch_ds,   model: lingzhi/deepseek-v4-pro}
   - {name: qwen,     setter: set_claude_ccswitch_qwen, model: lingzhi/qwen3.7-max}
