@@ -169,7 +169,33 @@ class GovernedKernel:
             )
         return allowances
 
-    def reconcile(self, domain: str) -> dict[str, Any]:
+    @staticmethod
+    def _control_paths(
+        binding: DomainBinding,
+        extra: list[str] | None = None,
+    ) -> list[str]:
+        """Return the governance surfaces a mutation must always touch.
+
+        These paths are outside the folder scope but still block a governed
+        mutation when dirty (the governance surface is never exempt from the
+        clean guard).
+        """
+        paths: list[str] = [binding.ledger.path]
+        if binding.manifest.git_tracked:
+            paths.append(binding.manifest.manifests_dir)
+        if binding.mutation_ledger is not None:
+            paths.append(binding.mutation_ledger.path)
+        if extra:
+            paths.extend(extra)
+        return paths
+
+    def reconcile(
+        self,
+        domain: str,
+        *,
+        scope_prefixes: list[str] | None = None,
+        control_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Validate and reconcile one runtime binding before serving traffic."""
         binding = self.get_binding(domain)
         with repository_mutation_lock(binding.repo_root):
@@ -177,6 +203,8 @@ class GovernedKernel:
             require_clean_working_tree(
                 binding.repo_root,
                 allowed_ignored_paths=self._runtime_state_allowances(binding),
+                scope_prefixes=scope_prefixes,
+                control_paths=self._control_paths(binding, control_paths),
             )
             if binding.mutation_ledger is not None:
                 self._reconcile_runtime_ledger(binding)
@@ -553,6 +581,8 @@ class GovernedKernel:
         extra_commit_paths: list[str] | None = None,
         idempotency_key: str | None = None,
         idempotency_payload: Any | None = None,
+        scope_prefixes: list[str] | None = None,
+        control_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         binding = self.get_binding(domain)
         with repository_mutation_lock(binding.repo_root):
@@ -566,6 +596,8 @@ class GovernedKernel:
                 extra_commit_paths=extra_commit_paths,
                 idempotency_key=idempotency_key,
                 idempotency_payload=idempotency_payload,
+                scope_prefixes=scope_prefixes,
+                control_paths=control_paths,
             )
 
     def _mutate_locked(
@@ -580,6 +612,8 @@ class GovernedKernel:
         extra_commit_paths: list[str] | None = None,
         idempotency_key: str | None = None,
         idempotency_payload: Any | None = None,
+        scope_prefixes: list[str] | None = None,
+        control_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         binding = self.get_binding(domain)
 
@@ -625,12 +659,16 @@ class GovernedKernel:
         if write_fn is None:
             raise ValueError("write_fn is required for GovernedKernel.mutate")
 
-        # The governed writer owns the whole repository for the duration of one
-        # mutation. Refuse any pre-existing tracked, staged, or untracked state
-        # before write_fn can run.
+        # The governed writer owns the checked scope for the duration of one
+        # mutation.  With no scope_prefixes this refuses any pre-existing
+        # tracked, staged, or untracked state before write_fn can run; with a
+        # scope it refuses dirt only inside the scope + governance control
+        # paths, leaving sibling dirt byte-for-byte untouched.
         base_sha = require_clean_working_tree(
             binding.repo_root,
             allowed_ignored_paths=self._runtime_state_allowances(binding),
+            scope_prefixes=scope_prefixes,
+            control_paths=self._control_paths(binding, control_paths),
         )
         if expected_base_sha is not None and base_sha != expected_base_sha:
             raise CASRejectionError(

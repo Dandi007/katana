@@ -1,135 +1,84 @@
-# N2b —— `anchor-check` 解析的锚点格式，真实数据里一条都没有
+# dev_katana_wf_verify_typing_01 —— work-folder 环境验证按资源类型判定，别把端点/记法当本地路径
 
-> 上游依据：`wf-dc0c15` `plan.md` §3 链 B N2；`spec.md` §5.2。
-> **全部依据来自 2026-08-05 对真实 bus 的普查，不是推测。**
-
----
-
-## 0　实测：校验器与生产者对不上，且校验器那一侧是空集
-
-`plugins/deep-research/skills/deep-research/loop-orchestration/tools/anchor-check.py`
-自述 `v2 (2026-08-04 N2): 支持带版本 URI`，其正则：
-```python
-VERSIONED_URI_RE = re.compile(r'^code://([^@]+)@([^:]+):(.+)#L(\d+)(?:-L?(\d+))?$')
-# 期望：code://<repo-name>@<commit>:<relpath>#L<start>[-<end>]
+```
+development_id: dev_katana_wf_verify_typing_01
+status: ready-to-dispatch（先红证据已备）
+date: 2026-08-14
+repo: katana（单仓；本单不碰 goal-agent / agent-runtime）
+target_base: 由派发方按 katana 线分支实况定（本卷不代定）
+upstream: 考卷 C wf-9f3cfe 台账 G3
+先红证据: evidence/g3-red-20260814/（真机 echo，工装 ops/g3-red/probe.py）
+换号核对: dd attempts 无同名目录、三仓无同名 loopdev 分支（2026-08-13T18:0xZ 实核）
 ```
 
-**而流水线真实产出的锚点**（`agent-runtime` 的 `composeAnchor(source, locator, revision, range)`
-组装为 `<source>://<locator>@<revision>#<range>`）长这样：
+## 1. 先红（真机实测，非推理）
+
+`ops/g3-red/probe.py` 直接 import 生产同一份
+`katana/mcp/work-folder/katana_work_folder_mcp/verify.py`，在内存里喂四行样例表：
+
 ```
-code://src/tick.ts@a592276892f5e93a5e37d800a52dd48436639c0b#L202-L211
+parse_context_paths 解析出 4 条资源：
+  name=反引号包裹的真实目录     path='`/data/work-records`'
+  name=dd Development MCP 端点  path='http://127.0.0.1:5606/mcp'
+  name=家目录记法               path='~/.claude'
+  name=裸真实目录（对照）        path='/data/work-records'
+
+  反引号包裹的真实目录  -> BROKEN   路径不存在: `/data/work-records`
+  dd Development MCP 端点 -> BROKEN 路径不存在: http://127.0.0.1:5606/mcp
+  家目录记法            -> BROKEN   路径不存在: ~/.claude
+  裸真实目录（对照）     -> DRIFT    有未提交变更
+
+overall_level = BROKEN
+G3-RED: CONFIRMED
 ```
 
-实测该正则对它 **NO MATCH**（缺 `:`，且 path 在 `@` 之前）。
+对照项判 DRIFT（而非 BROKEN）⇒ 探针不是恒红，红的确实是那三类。
 
-### 0.1 全 bus 普查：校验器期望的那个格式，**零实例**
+**断链定位（读码实核）**：`verify.py:79-101` 的 `parse_context_paths` 把表格第 2 列
+**原样**取出（只跳过空/`<` 开头/含"路径|地址"字样三种），`fs_git_probe`（:199）随即
+`os.path.exists(path)`。⇒ 反引号、URL、`~`、`repo:path` 一律被当成本地路径 stat。
 
-| 格式 | 真实条数 |
-|---|---|
-| `code://<repo>@<sha>:<path>#L..`（**anchor-check 期望**） | **0** |
-| `code://<path>@<sha>#<range>`（**流水线实产**） | **6**（`research:v1-tick-reclaim.evidence`，2026-08-05 V1 真跑） |
-| 裸 `path:line`（历史） | **131**（`loop-mcp-semantics` 114 + `smoke-bus-semantics` 17） |
+**后果（上游真机实证，本卷 backlog G3 已载）**：B 线泵 run `gdpump-20260813-211358-1a0446`
+第 7 轮 coordinator 调 `wf_resume` 得 `BROKEN` → 按「BROKEN 必停」契约裁 blocked → **整泵终局**。
+即：一张写得规范（带反引号）的 context 表，能把一条在跑的泵杀死。
 
-⇒ **`anchor-check` 目前解析不了任何真实存在的锚点。**
-它不会报错，只会把全部锚点归为「不可解析 / 旧格式」⇒ **零功率校验器**。
+## 2. 变更契约（只动 katana work-folder MCP）
 
-> ### ⛔ 判据（本线第二次付同样的学费）：
-> **一个格式/契约在写出来之后、被消费之前，必须拿真实产物原样喂一遍。**
-> 上一次是 `research.*.v2` 设计七轮公示后拿真产物一喂 **0/141 通过**；
-> 这次是 `anchor-check v2` 写完后对真实锚点 **0/6 可解析**。
-> **两次都是「照着自己脑子里的格式写，没拿真东西对」。**
+**2.1 资源分型.** `parse_context_paths` 产出的 `Resource` 增加类型判定（实现形态由实施方裁定）：
+- `local-path`：以 `/` 或 `./` 开头，或 `~` 开头（**须先 `expanduser`**）→ 走今天的 fs/git 探测；
+- `endpoint`：`http://`、`https://`、`ws://` 等 scheme → **不 stat**；探活与否见 2.3；
+- `repo-ref`：`repo:path` 一类记法 → 不 stat，标记为 client-verified；
+- `unknown`：其余 → 不 stat，判 `INFO`，**不得**因它把 overall 拉成 BROKEN。
 
-### 0.2 ⛔ 零功率校验器比没有校验器更坏
-它会输出「N 条锚点，全部旧格式/不可校验」这种**看起来像正常结论**的报告，
-而真相是「校验从未发生」。本 folder 已记：**零功率的检查制造一个看起来被验证过的空位。**
+**2.2 装饰字符归一.** 第 2 列先剥 markdown 装饰再判类型：成对反引号、加粗 `**`、行内链接
+`[text](path)` 取 path。**这条是先红里最致命的一条**——写法规范反而被判死。
 
----
+**2.3 端点探活是可选项，不是默认.** 默认只标 `endpoint` 不探活；若实现探活，必须
+超时 ≤2s、失败只降级为 `DRIFT`，**不得**产生 `BROKEN`（网络抖动不该杀泵）。
 
-## 1　交付
+**2.4 overall 语义收窄.** `overall_level` 只由 `local-path` 类资源的 verdict 决定；
+其余类型最多贡献 `DRIFT`。**`BROKEN` 必须意味着「卷内声明的本地路径真的不在」**。
 
-### 1.1 ⛔ 以**生产者的实际格式**为准，不是以校验器为准
-权威格式 = `composeAnchor` 产出的 `<source>://<locator>@<revision>#<range>`。
-理由：**该格式的 6 条实例已经不可回退地写在 append-only 的 bus 上**
-（`research:v1-tick-reclaim.evidence`），且 `worker.result.v1` / `research.evidence.v2`
-两个协议**已永久冻结**。⛔ **不得为了迁就校验器去改生产者格式。**
+**2.5 非目标.** 不动 `wf_resume` 的对外契约与返回结构；不动 guard-scope（G1/katana#116）；
+不改 context.md 的书写规范去迁就实现（**修实现，不是修所有卷的文档**）。
 
-### 1.2 ⛔ 三种格式都必须被**显式**分类，不得静默归堆
-| 输入 | 要求 |
-|---|---|
-| `code://<path>@<sha>#L<a>-L<b>`（现行） | **必须解析并真正校验**（取该 revision 的文件、比对 quote） |
-| 裸 `path:line`（历史 131 条） | **显式标为「旧格式，不可校验 revision」**，计入独立计数；⛔ 不得与「校验通过」混在一起 |
-| 其它 | **显式标为不可解析**，计入独立计数 |
-⛔ 三类计数必须分别输出；⛔ 任何一类都不得被静默丢弃。
+## 3. 验收标准（可机检）
 
-### 1.3 ⛔ repo 归属必须外部提供，且缺失时响亮失败
-现行格式的 `locator` 是**仓内相对路径**（`src/tick.ts`），**不含仓名**
-⇒ 单看锚点无法确定是哪个仓。
-⛔ 必须由调用方显式提供仓根（如 `--repo-root`），**缺失时响亮失败**，
-⛔ 绝不猜测、绝不遍历 `CODE_ROOTS` 撞运气（撞对了也是错的——它会在另一个仓里找到同名文件）。
+### 3.1 单测
+1. 反引号包裹的存在路径 → `MATCH`（先红为 BROKEN）。
+2. `http(s)://` → 不调用 fs 探测（用 fake probe_fn 断言**未被调用**），且不产生 BROKEN。
+3. `~/<存在目录>` → expanduser 后 `MATCH`。
+4. 不存在的裸路径 → 仍 `BROKEN`（**回归护栏**：不能为了不误杀就永不判死）。
+5. 混合表 → `overall_level` 只受 local-path 影响。
 
-### 1.4 ⛔ 取回内容必须自检
-本线出过 `git show "<sha>:path"` 丢掉 `:path` 只打印 commit 的坑
-（**rc=0、输出 125KB，所以「空」看着正常**）。
-⛔ fetcher 必须校验取回内容**非空且形态合理**（例如行数 > 0、能定位到给定行段），
-否则响亮失败。
+### 3.2 真机后绿（同一工装）
+`python3 ops/g3-red/probe.py` 重跑，末行须变成 `G3-RED: NOT_CONFIRMED`（先红三条转 MATCH/INFO）。
+> 该工装是**先红/后绿同一份**，判据方向相反即可，勿另写一份。
 
----
+### 3.3 回归
+B 卷 `wf-3c3dba` 迁去 `env-host.md` 的宿主资源表可迁回 context.md 而不再触发 BROKEN
+（属观察项，不作通过条件——迁回与否是那一卷的事）。
 
-## 2　硬验收
-
-> ⛔ **E1 是不可替代的一条**：必须拿**真实 bus 上的真实锚点**求值，不得用手写样例。
-
-| # | 断言 | 怎么验 |
-|---|---|---|
-| **E1** | ⛔ 对 `research:v1-tick-reclaim.evidence` 的 **6 条真实锚点**：**6 条全部被解析并真正校验，且结论为命中** | 直接读该 channel（或固化其真实导出为 fixture，**必须是原样字节**）；⛔ 不得手写样例 |
-| **E2** | ⛔ 对 131 条历史裸 `path:line`：**全部显式归入「旧格式」计数**，不计入通过、不计入失败 | 对真实导出求值，断言三类计数之和 === 总数 |
-| **E3** | ⛔ 变异：把现行格式的正则改回 `repo@sha:path` 形态 ⇒ **E1 必须挂** | 破坏后回显被改行，跑完还原 |
-| **E4** | ⛔ 引文确实**不在**该位置时必须判失败（阳性对照） | 构造一条 quote 与 anchor 不符的输入，断言判失败 |
-| **E5** | ⛔ 与 E4 只差一项：引文**在**该位置 ⇒ 判通过（判别对，防「恒判失败」） | 两例对照 |
-| **E6** | ⛔ 缺 `--repo-root` ⇒ **响亮失败**，非零退出，⛔ 不得猜仓 | 断言退出码非零 + 错误文本点名 |
-| **E7** | ⛔ fetcher 取回空内容 / 取不到该 revision ⇒ **响亮失败**，⛔ 不得当成「引文不匹配」 | 构造不存在的 revision，断言错误可区分于「不匹配」 |
-| **E8** | ⛔ 三类计数分别输出且**总和 === 输入条数**（⛔ 无声丢弃即失败） | 断言等式 |
-| **E9** | ⛔ 自检入口固定为 `plugins/deep-research/skills/deep-research/loop-orchestration/tools/anchor-check-selftest.sh`，exit 0 | 该路径必须存在且可执行（本包的验收命令就是它） |
-| **E10** | ⛔ 不得触碰 `.dd-evidence/`；既有文件不得删除 | `git diff` |
-
-### 2.1 ⛔ 执行约束
-- ⛔ **只读**：本包**不得向任何 channel 写入**（校验器是只读工具）。
-- 真实语料可直连 bus 读取，或固化为 fixture —— **固化必须是原样导出的字节**，
-  ⛔ 不得「照着写一份」（本线为此付过 0/141 的学费）。
-- ⚠️ 读会增长的 channel 时：`limit=N` 返回**最早** N 条；须先定位尾部再用 `after_seq` 倒查。
-
----
-
-## 3　变异自检
-
-| 变异 | 必须杀死 |
-|---|---|
-| **Q1** 正则改回 `repo@sha:path` 形态 | **E1** |
-| **Q2** 旧格式静默跳过（不计数） | **E2 与 E8** |
-| **Q3** 缺 `--repo-root` 时猜一个仓 | **E6** |
-| **Q4** 取回空内容当成「引文不匹配」 | **E7** |
-| **Q5** 校验恒判通过 | **E4** |
-| **Q6** 校验恒判失败 | **E5**（与 E4 构成判别对） |
-
-> **破坏后必须回显被改的那一行**，跑完逐字还原并 `git diff --stat` 确认干净。
-> ⛔ **变异未命中时该次运行不构成证据**（本线今日栽过一次：正则没命中却照跑，exit 0 被误读）。
-> ⚠️ **变异通过只证明「该断言有牙」，不证明「该设计正确」**
-> （A10b 的 `max_nodes: 2` 曾被变异"证明"正确，实则结构上仍错）。
-
----
-
-## 4　非目标
-- ⛔ **不改生产者的 anchor 格式**（`agent-runtime` 的 `composeAnchor`）——
-  该格式的实例已不可回退地在 bus 上，且相关协议已冻结
-- ⛔ 不注册/不修改任何协议
-- ⛔ 不实现 `web://` / `feishu://` 等其它 source 的 fetcher（**按需增量**，先只做 `code://`）
-- ⛔ 不动 `loop-orchestration/` 的其它文件（R4 会整体退役该目录，不在本包）
-
----
-
-## 5　⛔ 派发面
-- 目标仓：`Dandi007/katana`，改动限于
-  `plugins/deep-research/skills/deep-research/loop-orchestration/tools/`
-- 验收命令即 E9 的自检脚本（本包必须创建它）+ `./tests/lint-structure.sh`
-- ⛔ 读退出码时命令后不接管道
-- `.dd-evidence/` 是 dd 保留路径，actor 任何提交碰它都是硬失败
+## 4. 交付边界
+代码与 code review **全部走 dev-dispatch**。本 worker 只产出本 spec、先红证据与 `ops/g3-red/` 工装。
+**入队次序与授权不在本卷自决**：katana 仓不在授权硬线 1 的两仓之内，派发前需上游拍板（见 questions Q6-1）。
