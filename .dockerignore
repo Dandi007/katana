@@ -1,0 +1,19 @@
+# 构建 context 只需要 mcp/ 下的五个包；其余一律排除。
+# 好处有二：构建快（context 从数百 MB 降到几百 KB），且**杜绝把不该进镜像的东西
+# 烘进去**——.git 历史、本地 venv、凭证、runtime 产物。
+*
+!mcp/requirements.lock.txt
+!mcp/shared/
+!mcp/kernel/
+!mcp/memory/
+!mcp/wiki/
+!mcp/work-folder/
+
+# 上面 ! 放行的子树里仍要剔除的
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.ruff_cache/
+**/*.egg-info/
+**/.venv/
+**/tests/
