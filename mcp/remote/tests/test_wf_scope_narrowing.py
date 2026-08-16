@@ -14,6 +14,8 @@ from katana_work_folder_mcp.scope_guard import (
     get_audit_log,
     set_enforcement,
     is_enforcement_enabled,
+    set_deny_by_default,
+    is_deny_by_default,
 )
 
 
@@ -24,9 +26,11 @@ def _allowed_set() -> list[str]:
 @pytest.fixture(autouse=True)
 def _reset_guard():
     set_enforcement(False)
+    set_deny_by_default(True)
     clear_audit_log()
     yield
     set_enforcement(False)
+    set_deny_by_default(True)
     clear_audit_log()
 
 
@@ -168,26 +172,14 @@ def test_on_mode_allows_wf_save():
 def test_mutation_allow_by_default_reverses_deny_behavior():
     import katana_work_folder_mcp.scope_guard as sg
 
-    original = sg.check_tool
+    original = sg.is_deny_by_default()
     try:
-        def allow_by_default(tool, folder_id=None):
-            allowed = tool in GOAL_WORKER_ALLOWED_OPS
-            if not allowed:
-                return None
-            return {
-                "ok": False,
-                "code": "SCOPE_DENIED",
-                "message": "denied",
-                "tool": tool,
-                "allowed_set": sorted(GOAL_WORKER_ALLOWED_OPS),
-                "folder_id": folder_id,
-            }
-        sg.check_tool = allow_by_default
+        sg.set_deny_by_default(False)
         set_enforcement(True)
-        result = sg.check_tool("wf_unknown_new_tool")
+        result = check_tool("wf_unknown_new_tool")
         assert result is None
     finally:
-        sg.check_tool = original
+        sg.set_deny_by_default(original)
 
 
 # ── Test 9: mutation — empty allowed set → allowed tools fail ────────────
@@ -252,3 +244,15 @@ def test_set_enforcement_toggles():
     assert is_enforcement_enabled() is True
     set_enforcement(False)
     assert is_enforcement_enabled() is False
+
+
+def test_default_deny_by_default_is_true():
+    set_deny_by_default(True)
+    assert is_deny_by_default() is True
+
+
+def test_set_deny_by_default_toggles():
+    set_deny_by_default(False)
+    assert is_deny_by_default() is False
+    set_deny_by_default(True)
+    assert is_deny_by_default() is True

@@ -7,6 +7,8 @@ else is denied with a stable error containing the tool name and the allowed set.
 
 from __future__ import annotations
 
+import json
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +23,8 @@ GOAL_WORKER_ALLOWED_OPS = frozenset({
 })
 
 _scope_enforcement_enabled: bool = False
+
+_scope_deny_by_default: bool = True
 
 _scope_audit_log: list[ScopeAuditEntry] = []
 
@@ -42,8 +46,17 @@ def set_enforcement(enabled: bool) -> None:
     _scope_enforcement_enabled = bool(enabled)
 
 
+def set_deny_by_default(deny: bool) -> None:
+    global _scope_deny_by_default
+    _scope_deny_by_default = bool(deny)
+
+
 def is_enforcement_enabled() -> bool:
     return _scope_enforcement_enabled
+
+
+def is_deny_by_default() -> bool:
+    return _scope_deny_by_default
 
 
 def clear_audit_log() -> None:
@@ -60,17 +73,32 @@ def _record_audit(
     decision: str,
     principal: str = "goal-worker",
 ) -> None:
-    _scope_audit_log.append(
-        ScopeAuditEntry(
-            timestamp=time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
-            principal=principal,
-            tool=tool,
-            folder_id=folder_id,
-            decision=decision,
-            allowed_set=sorted(GOAL_WORKER_ALLOWED_OPS),
-            enforcement_enabled=_scope_enforcement_enabled,
-        )
+    entry = ScopeAuditEntry(
+        timestamp=time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+        principal=principal,
+        tool=tool,
+        folder_id=folder_id,
+        decision=decision,
+        allowed_set=sorted(GOAL_WORKER_ALLOWED_OPS),
+        enforcement_enabled=_scope_enforcement_enabled,
     )
+    _scope_audit_log.append(entry)
+    _emit_audit(entry)
+
+
+def _emit_audit(entry: ScopeAuditEntry) -> None:
+    record = {
+        "scope_guard_audit": {
+            "timestamp": entry.timestamp,
+            "principal": entry.principal,
+            "tool": entry.tool,
+            "folder_id": entry.folder_id,
+            "decision": entry.decision,
+            "allowed_set": entry.allowed_set,
+            "enforcement_enabled": entry.enforcement_enabled,
+        }
+    }
+    print(json.dumps(record, ensure_ascii=False), file=sys.stderr, flush=True)
 
 
 def check_tool(tool: str, folder_id: str | None = None) -> dict | None:
@@ -82,26 +110,41 @@ def check_tool(tool: str, folder_id: str | None = None) -> dict | None:
     """
     allowed = tool in GOAL_WORKER_ALLOWED_OPS
 
-    if _scope_enforcement_enabled:
-        if allowed:
-            _record_audit(tool, folder_id, "allow")
+    if _scope_deny_by_default:
+        if _scope_enforcement_enabled:
+            if allowed:
+                _record_audit(tool, folder_id, "allow")
+                return None
+            else:
+                _record_audit(tool, folder_id, "deny")
+                return {
+                    "ok": False,
+                    "code": "SCOPE_DENIED",
+                    "message": (
+                        f"tool '{tool}' is not permitted for the goal worker seat; "
+                        f"allowed tools: {sorted(GOAL_WORKER_ALLOWED_OPS)}"
+                    ),
+                    "tool": tool,
+                    "allowed_set": sorted(GOAL_WORKER_ALLOWED_OPS),
+                    "folder_id": folder_id,
+                }
+        else:
+            if allowed:
+                _record_audit(tool, folder_id, "allow")
+            else:
+                _record_audit(tool, folder_id, "would_deny")
             return None
-        else:
-            _record_audit(tool, folder_id, "deny")
-            return {
-                "ok": False,
-                "code": "SCOPE_DENIED",
-                "message": (
-                    f"tool '{tool}' is not permitted for the goal worker seat; "
-                    f"allowed tools: {sorted(GOAL_WORKER_ALLOWED_OPS)}"
-                ),
-                "tool": tool,
-                "allowed_set": sorted(GOAL_WORKER_ALLOWED_OPS),
-                "folder_id": folder_id,
-            }
     else:
-        if allowed:
-            _record_audit(tool, folder_id, "allow")
+        if _scope_enforcement_enabled:
+            if allowed:
+                _record_audit(tool, folder_id, "allow")
+                return None
+            else:
+                _record_audit(tool, folder_id, "would_deny")
+                return None
         else:
-            _record_audit(tool, folder_id, "would_deny")
-        return None
+            if allowed:
+                _record_audit(tool, folder_id, "allow")
+            else:
+                _record_audit(tool, folder_id, "would_deny")
+            return None
