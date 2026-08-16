@@ -29,6 +29,7 @@ from katana_kernel import (
 )
 from katana_work_folder_mcp import lifecycle as _lifecycle
 from katana_work_folder_mcp.fs_tools import FSTools, ID_RE
+from katana_work_folder_mcp import scope_guard as _scope_guard
 from katana_work_folder_mcp.store import (
     WorkFolderStore,
     _render_index_snapshot,
@@ -400,6 +401,10 @@ def _require_fs_tools() -> FSTools:
     return _fs_tools
 
 
+def _scope_guard_check(tool: str, folder_id: str | None = None) -> dict | None:
+    return _scope_guard.check_tool(tool, folder_id=folder_id)
+
+
 def _do_search(query: str, top_k: int) -> list[dict]:
     """先限定 Work Folder source，再把 locator 收敛为 ID + filename。"""
     if _repo_root is None:
@@ -451,6 +456,9 @@ async def wf_create(
     idempotency_key: str | None = None,
 ) -> dict:
     """在 data root 直接创建新的 ``wf-ID/`` folder。"""
+    blocked = _scope_guard_check("wf_create")
+    if blocked:
+        return blocked
     return _server_mutation(
         lambda: _require_store().create(
             topic,
@@ -481,6 +489,9 @@ async def wf_save(
     idempotency_key: str | None = None,
 ) -> dict:
     """用 opaque folder ID 保存 checkpoint。"""
+    blocked = _scope_guard_check("wf_save", folder_id=folder_id)
+    if blocked:
+        return blocked
     return _server_mutation(
         lambda: _require_store().save(
             folder_id,
@@ -503,6 +514,9 @@ async def wf_resume(
     idempotency_key: str | None = None,
 ) -> dict:
     """用 opaque folder ID 恢复并验证工作状态。"""
+    blocked = _scope_guard_check("wf_resume", folder_id=folder_id)
+    if blocked:
+        return blocked
     return _server_mutation(
         lambda: _require_store().resume(
             folder_id,
@@ -522,6 +536,9 @@ async def wf_append_progress(
     expected_base_sha: str | None = None,
 ) -> dict:
     """幂等追加 session 进展，并原子更新 brief 与顶层 INDEX。"""
+    blocked = _scope_guard_check("wf_append_progress", folder_id=folder_id)
+    if blocked:
+        return blocked
     return _server_mutation(
         lambda: _require_store().append_progress(
             folder_id,
@@ -541,6 +558,9 @@ async def wf_reindex(
     idempotency_key: str | None = None,
 ) -> dict:
     """重建无 locator 列的顶层 INDEX.md。"""
+    blocked = _scope_guard_check("wf_reindex")
+    if blocked:
+        return blocked
     return _server_mutation(
         lambda: _require_store().reindex(
             dry_run=dry_run,
@@ -612,6 +632,9 @@ async def fs_create(
     expected_base_commit: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict:
+    blocked = _scope_guard_check("fs_create", folder_id=folder_id)
+    if blocked:
+        return blocked
     return _public_payload(
         _require_fs_tools().fs_create(
             folder_id,
@@ -632,6 +655,9 @@ async def fs_write(
     expected_resource_revision: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict:
+    blocked = _scope_guard_check("fs_write", folder_id=folder_id)
+    if blocked:
+        return blocked
     return _public_payload(
         _require_fs_tools().fs_write(
             folder_id,
@@ -655,6 +681,9 @@ async def fs_edit(
     expected_resource_revision: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict:
+    blocked = _scope_guard_check("fs_edit", folder_id=folder_id)
+    if blocked:
+        return blocked
     return _public_payload(
         _require_fs_tools().fs_edit(
             folder_id,
@@ -678,6 +707,9 @@ async def fs_copy(
     expected_base_commit: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict:
+    blocked = _scope_guard_check("fs_copy", folder_id=source_folder_id)
+    if blocked:
+        return blocked
     return _public_payload(
         _require_fs_tools().fs_copy(
             source_folder_id,
@@ -699,6 +731,9 @@ async def fs_rename(
     expected_base_commit: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict:
+    blocked = _scope_guard_check("fs_rename", folder_id=source_folder_id)
+    if blocked:
+        return blocked
     return _public_payload(
         _require_fs_tools().fs_rename(
             source_folder_id,
@@ -718,6 +753,9 @@ async def fs_delete(
     expected_base_commit: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict:
+    blocked = _scope_guard_check("fs_delete", folder_id=folder_id)
+    if blocked:
+        return blocked
     return _public_payload(
         _require_fs_tools().fs_delete(
             folder_id,
@@ -734,6 +772,9 @@ async def fs_batch(
     expected_base_commit: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict:
+    blocked = _scope_guard_check("fs_batch")
+    if blocked:
+        return blocked
     return _public_payload(
         _require_fs_tools().fs_batch(
             operations,
