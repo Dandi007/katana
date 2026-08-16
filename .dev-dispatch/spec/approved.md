@@ -1,84 +1,160 @@
-# dev_katana_wf_verify_typing_01 —— work-folder 环境验证按资源类型判定，别把端点/记法当本地路径
+# H7 —— goal worker 座位对 work-folder MCP 的**写面收窄**（路线 (b)：server 内加等价闸）
 
+- 单：`dev_katana_h7_wf_scope_narrowing_01`
+- 仓：`Dandi007/katana`
+- base：`refs/heads/release/katana-h7-wf-scope-narrowing`（切点 `dedbb049d2be75a4f228b20ddb566e629fb5a2f3` = `release/katana-infra` tip）
+- spec 成文：2026-08-16T03:2xZ
+- 判据口径：**相对当刻基线无新增失败**；先红后绿，红判据必须先跑出红。
+
+---
+
+## §0 路线已裁定：**只做 (b)，不做 (a)**
+
+**监督者通报 14 · 2-2 逐字**：
+
+> **2-2 H7 路线：先 (b) server 内加等价闸，(a) 前置 katana_remote 转监督面择期统一 backlog。**
+> 理由照准 worker 分析：(a) 部署面牵动全部消费方（≥3 在跑泵+dd 座位）且上线瞬间未配 token 座位当场失能——不适合边跑边改窗口；(b) 灰度 off 时行为不变、回滚一个开关。长期统一到 (a) 由监督面在考卷全收官后另起。
+
+⇒ 本单**只交付 (b)**：在 `mcp/work-folder` 的 server 内加一层等价闸。
+**(a)「前置 `katana_remote`」不在本单范围内**，越界即 REJECT（见 §5）。
+具体地：**不得**改 `katana-work-folder-mcp.service` 的启动方式，**不得**要求任何消费方改 URL 或加 token。
+
+---
+
+## §1 靶面
+
+goal worker 座位对 work-folder MCP 拥有**全量写面**，包括建卷、全局索引重建、删除/搬运等
+远超「记账」所需的能力。本单按座位收窄写面，**读面一律不动**。
+
+---
+
+## §2 要求
+
+### R1 —— 座位只保留「记账所需」的最小写面（**deny-by-default**）
+
+| 工具 | 判定 | 依据 |
+|---|---|---|
+| `wf_append_progress` | ✅ 允许 | 每轮记账 |
+| `wf_resume` | ✅ 允许 | 每轮开工读状态（虽在 `_MUTATE_OPS` 内，语义是读+校验） |
+| `fs_create` / `fs_write` / `fs_edit` | ✅ 允许 | 落 spec 与固化证物 |
+| **`wf_save`** | ## ✅ **允许（已裁定）** | **通报 14 · 2-3 逐字：「wf_save 待定项裁定：留在允许集合内（它是 checkpoint 主工具，其他消费方依赖；审计数据出来后若确认本卷不用再收窄）」**。⚠️ v2 spec 原稿标「⚠️ 待定 / 建议先禁」——**该建议已被裁定推翻，实现须按「允许」落地** |
+| `wf_create` | ❌ 禁 | 建新考卷是监督面动作 |
+| `wf_reindex` | ❌ 禁 | 全局索引重建，影响面超出单卷 |
+| `fs_delete` / `fs_rename` / `fs_copy` / `fs_batch` | ❌ 禁 | 删除/搬运不可逆 |
+
+- 判定必须 **deny-by-default**（沿用 `mcp/remote/scopes.py` 既有原则）：
+  **未列入任何集合的工具名 → 拒绝**。
+- 拒绝必须返回**稳定错误码 + 被拒工具名 + 该座位允许的集合**，
+  不得只回 generic error（否则 worker 无法自我纠正）。
+
+### R2 —— 灰度开关，**默认 `off`（只写审计不拦）**
+
+**监督者通报 14 · 2-3 逐字**：
+
+> **2-3 灰度默认：off（只审计不拦）。** 允许集合未经真实调用分布验证前默认 on=拿生产当试验场，且「worker 记不上账」是最难归因的失败形态。……真拦截的开启另行拍板，以审计数据为据。
+
+- 开关默认值**必须**是 `off`。
+- `off` 时行为与当刻**逐字一致**（全放行），只额外写审计。
+- ## **本单不得把默认值设为 `on`，也不得提供「自动升级为 on」的逻辑。**
+  真拦截的开启是**另行拍板事项**，交付物只提供开关本身。
+- 回滚形态：改一个开关回 `off` 即恢复，**不需重启任何消费方**。
+
+### R3 —— 每次拒绝（及 `off` 时的每次「本应拒绝」）必须可观测
+
+审计事件必须含：`principal`/座位、`tool`、`folder_id`、`decision`、`allowed_set`。
+`off` 时也要写，否则拿不到「真开起来会拦掉什么」的数据——而通报 14 明写
+「真拦截的开启……**以审计数据为据**」，这份数据就是本单的核心交付。
+
+---
+
+## §3 先红后绿判据
+
+**工装文件**：`mcp/remote/tests/test_wf_scope_narrowing.py`
+**运行命令**：§4 `acceptance_commands` 第三条（先红后绿两侧同一条）
+
+| # | 断言 | 在 `target_base_commit` 上 | 类 |
+|:--:|---|---|---|
+| 1 | 允许集合内（`wf_append_progress` / `fs_edit`）→ 放行 | 绿（当刻无闸，什么都放行） | ②，须配变异点 |
+| 2 | 禁止集合内（`wf_reindex` / `fs_delete`）→ 拒绝，错误含工具名与允许集合 | **必红** | ① |
+| 3 | **deny-by-default**：未列入任何集合的新工具名 → 拒绝 | **必红** | ① |
+| 4 | 灰度开关 `off` → 全放行但写审计 | **必红**（当刻无该开关） | ① |
+| 5 | 灰度开关 `on` → 按 R1 表拦截 | **必红** | ① |
+| 6 | 三个必需工具在 `on` 时仍放行 | **必红**（依赖 4/5） | ① |
+| **7** | **`wf_save` 在 `on` 时仍放行** | **必红** | ① · **本条为通报 14 · 2-3 裁定新增，原 v2 spec 无** |
+| 8 | **变异**：deny-by-default 改成 allow-by-default → 用例 3 必须转红 | 变异证据 | — |
+| 9 | **变异**：`on` 前提下把 R1 允许集合改空 → 用例 1、6、7 必须转红 | 变异证据 | — |
+
+**②类收口**：用例 1 归②类不归③空绿 —— 它绿的原因是「当刻根本没有闸」，
+而非「闸判定后放行了」。R1/R2 落地后它就是一条实打实的守卫断言，
+且**可以**被变异打红（用例 9），按 F-5 就**必须**配。
+> 若归③空绿，等于承认「允许集合被改坏也没有任何用例会红」——
+> 而这条恰恰是 deny-by-default 语义里**唯一**保护「必需工具不被误伤」的断言。
+
+**用例分类清点**：①类 6 条（2/3/4/5/6/7）、②类 1 条（1，已配变异点 9）、
+③类 0 条、变异专供 2 条（8/9）。**②类缺口计数 = 0。**
+
+**真机先红的额外要求**：生产 5602 实测**绕过** `katana_remote`
+（直起 `python -m katana_work_folder_mcp.server`），故先红必须**另附一条
+「生产形态下当刻无任何 scope 判定」的回显**，否则无法证明这条闸真的不存在。
+**该回显由 implementer 在其工装内构造。**
+
+**证据载体**：三类回显落 `.dd-evidence/<attempt_id>/h7-scope.md`，随交付提交进被审树。
+
+---
+
+## §4 验收栈与基线
+
+**验收栈**取自 `.github/workflows/tests.yml` 的 `mcp-unit` job（该仓 merge gate）。
+
+⚠️ **注意**：`mcp/run-tests.sh` 用 `PY="${PYTHON:-python3}"`，依赖 `PYTHON` 环境变量；
+而 dd acceptance 是 `env_allowlist=["PATH","HOME"]` 的极小环境、argv-only 无 shell，
+**无法传该变量**。故按 v2 spec §3.1 的指示采用**展开形态**，逐字展开 `run-tests.sh` 的七个路径。
+
+`acceptance_commands`（本单实际使用）：
+```json
+[{"argv":["uv","pip","install","--python",".venv/bin/python","-e","mcp/shared","-e","mcp/kernel","-e","mcp/memory","-e","mcp/wiki","-e","mcp/work-folder","pytest"]},
+ {"argv":["./.venv/bin/python","-m","pytest",
+          "mcp/shared/tests","mcp/wiki/tests","mcp/work-folder/tests","mcp/memory/tests",
+          "mcp/migration/tests","mcp/kernel/tests","mcp/remote/tests",
+          "--import-mode=importlib","-p","no:cacheprovider"]}]
 ```
-development_id: dev_katana_wf_verify_typing_01
-status: ready-to-dispatch（先红证据已备）
-date: 2026-08-14
-repo: katana（单仓；本单不碰 goal-agent / agent-runtime）
-target_base: 由派发方按 katana 线分支实况定（本卷不代定）
-upstream: 考卷 C wf-9f3cfe 台账 G3
-先红证据: evidence/g3-red-20260814/（真机 echo，工装 ops/g3-red/probe.py）
-换号核对: dd attempts 无同名目录、三仓无同名 loopdev 分支（2026-08-13T18:0xZ 实核）
-```
+`setup_commands`：`[{"argv":["uv","venv"]}]`
 
-## 1. 先红（真机实测，非推理）
+**为什么 `mcp/remote` 与 `mcp/migration` 不在 install 列表里仍能跑**：
+`mcp/conftest.py` 显式把 `remote` 等 8 个子包插进 `sys.path`
+（注释原文：「ensure mcp/ packages are importable without pip install」）。
+且 `grep -rn 'skip\|importorskip' mcp/remote/tests/*.py` **零命中** ⇒ 缺依赖会直接 error，不会静默 skip 造假绿。
 
-`ops/g3-red/probe.py` 直接 import 生产同一份
-`katana/mcp/work-folder/katana_work_folder_mcp/verify.py`，在内存里喂四行样例表：
+**基线**（在本单 `target_base_commit = dedbb049` 上同环境实取）：
+**`1403 passed` / 具名失败集合 = ∅（空集）**。
+⇒ **差集 = 候选具名失败集 − ∅ = 候选具名失败集**，
+即 **accept-green ⟺ 候选具名失败集为空**，无可继承的红。
 
-```
-parse_context_paths 解析出 4 条资源：
-  name=反引号包裹的真实目录     path='`/data/work-records`'
-  name=dd Development MCP 端点  path='http://127.0.0.1:5606/mcp'
-  name=家目录记法               path='~/.claude'
-  name=裸真实目录（对照）        path='/data/work-records'
+**差集口径**：具名失败集逐条比对，`grep -E '^(FAILED|ERROR) ' | sed -E 's/^(FAILED|ERROR) //; s/ .*//' | sort -u`。
+`sort -u` 是硬要求。**禁一切数量口径**（「passed 数变多/变少」不构成结论）。
+**同环境是硬要求**：基线与候选必须在同一环境取。
 
-  反引号包裹的真实目录  -> BROKEN   路径不存在: `/data/work-records`
-  dd Development MCP 端点 -> BROKEN 路径不存在: http://127.0.0.1:5606/mcp
-  家目录记法            -> BROKEN   路径不存在: ~/.claude
-  裸真实目录（对照）     -> DRIFT    有未提交变更
+---
 
-overall_level = BROKEN
-G3-RED: CONFIRMED
-```
+## §5 非目标（越界即 REJECT）
 
-对照项判 DRIFT（而非 BROKEN）⇒ 探针不是恒红，红的确实是那三类。
+1. ## **不做路线 (a)** —— 不前置 `katana_remote`、不改 `katana-work-folder-mcp.service`
+   启动方式、不要求任何消费方改 URL 或加 token。（通报 14 已把 (a) 转监督面 backlog）
+2. ## **不得把灰度默认设为 `on`**，不得提供自动升级为 `on` 的逻辑。
+   真拦截的开启属**另行拍板**事项。
+3. ## **不得把 `wf_save` 移出允许集合**（通报 14 · 2-3 已裁定其留在允许集合内）。
+4. **不动读面**：`fs_read` / `fs_list` / `fs_stat` / `wf_list` / `wf_search` 一律不改。
+5. 不改 `mcp/remote/scopes.py` 已有六个 scope 定义与 `_MUTATE_OPS` 枚举。
+6. 不做跨仓 token 分发流程；不改 wiki 域 `DomainPolicy`；不碰 `.dev-dispatch/**`。
 
-**断链定位（读码实核）**：`verify.py:79-101` 的 `parse_context_paths` 把表格第 2 列
-**原样**取出（只跳过空/`<` 开头/含"路径|地址"字样三种），`fs_git_probe`（:199）随即
-`os.path.exists(path)`。⇒ 反引号、URL、`~`、`repo:path` 一律被当成本地路径 stat。
+---
 
-**后果（上游真机实证，本卷 backlog G3 已载）**：B 线泵 run `gdpump-20260813-211358-1a0446`
-第 7 轮 coordinator 调 `wf_resume` 得 `BROKEN` → 按「BROKEN 必停」契约裁 blocked → **整泵终局**。
-即：一张写得规范（带反引号）的 context 表，能把一条在跑的泵杀死。
+## §6 交付前自检
 
-## 2. 变更契约（只动 katana work-folder MCP）
-
-**2.1 资源分型.** `parse_context_paths` 产出的 `Resource` 增加类型判定（实现形态由实施方裁定）：
-- `local-path`：以 `/` 或 `./` 开头，或 `~` 开头（**须先 `expanduser`**）→ 走今天的 fs/git 探测；
-- `endpoint`：`http://`、`https://`、`ws://` 等 scheme → **不 stat**；探活与否见 2.3；
-- `repo-ref`：`repo:path` 一类记法 → 不 stat，标记为 client-verified；
-- `unknown`：其余 → 不 stat，判 `INFO`，**不得**因它把 overall 拉成 BROKEN。
-
-**2.2 装饰字符归一.** 第 2 列先剥 markdown 装饰再判类型：成对反引号、加粗 `**`、行内链接
-`[text](path)` 取 path。**这条是先红里最致命的一条**——写法规范反而被判死。
-
-**2.3 端点探活是可选项，不是默认.** 默认只标 `endpoint` 不探活；若实现探活，必须
-超时 ≤2s、失败只降级为 `DRIFT`，**不得**产生 `BROKEN`（网络抖动不该杀泵）。
-
-**2.4 overall 语义收窄.** `overall_level` 只由 `local-path` 类资源的 verdict 决定；
-其余类型最多贡献 `DRIFT`。**`BROKEN` 必须意味着「卷内声明的本地路径真的不在」**。
-
-**2.5 非目标.** 不动 `wf_resume` 的对外契约与返回结构；不动 guard-scope（G1/katana#116）；
-不改 context.md 的书写规范去迁就实现（**修实现，不是修所有卷的文档**）。
-
-## 3. 验收标准（可机检）
-
-### 3.1 单测
-1. 反引号包裹的存在路径 → `MATCH`（先红为 BROKEN）。
-2. `http(s)://` → 不调用 fs 探测（用 fake probe_fn 断言**未被调用**），且不产生 BROKEN。
-3. `~/<存在目录>` → expanduser 后 `MATCH`。
-4. 不存在的裸路径 → 仍 `BROKEN`（**回归护栏**：不能为了不误杀就永不判死）。
-5. 混合表 → `overall_level` 只受 local-path 影响。
-
-### 3.2 真机后绿（同一工装）
-`python3 ops/g3-red/probe.py` 重跑，末行须变成 `G3-RED: NOT_CONFIRMED`（先红三条转 MATCH/INFO）。
-> 该工装是**先红/后绿同一份**，判据方向相反即可，勿另写一份。
-
-### 3.3 回归
-B 卷 `wf-3c3dba` 迁去 `env-host.md` 的宿主资源表可迁回 context.md 而不再触发 BROKEN
-（属观察项，不作通过条件——迁回与否是那一卷的事）。
-
-## 4. 交付边界
-代码与 code review **全部走 dev-dispatch**。本 worker 只产出本 spec、先红证据与 `ops/g3-red/` 工装。
-**入队次序与授权不在本卷自决**：katana 仓不在授权硬线 1 的两仓之内，派发前需上游拍板（见 questions Q6-1）。
+- [ ] 用例 2/3/4/5/6/7 在 base 上**先跑出红**，红在哪个断言逐条点名
+- [ ] 两个变异点（8/9）各出一份变异回显
+- [ ] 「生产形态下当刻无任何 scope 判定」的回显已附
+- [ ] 灰度开关默认值经代码与测试双向确认为 `off`
+- [ ] `wf_save` 在 `on` 时放行（用例 7）
+- [ ] 具名失败集差集为空（基线 ∅，故候选须为 ∅）
+- [ ] 三类回显落 `.dd-evidence/<attempt_id>/h7-scope.md`
