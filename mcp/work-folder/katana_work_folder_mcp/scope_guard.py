@@ -26,6 +26,8 @@ _scope_enforcement_enabled: bool = False
 
 _scope_deny_by_default: bool = True
 
+MAX_AUDIT_LOG_SIZE = 10_000
+
 _scope_audit_log: list[ScopeAuditEntry] = []
 
 
@@ -82,6 +84,8 @@ def _record_audit(
         allowed_set=sorted(GOAL_WORKER_ALLOWED_OPS),
         enforcement_enabled=_scope_enforcement_enabled,
     )
+    if len(_scope_audit_log) >= MAX_AUDIT_LOG_SIZE:
+        _scope_audit_log[:MAX_AUDIT_LOG_SIZE // 2] = []
     _scope_audit_log.append(entry)
     _emit_audit(entry)
 
