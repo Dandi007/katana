@@ -110,6 +110,7 @@ def env(tmp_path, monkeypatch):
         manifest,
         str(tmp_path),
         mutation_ledger=mutation_ledger,
+        runtime_state_paths=[str(runtime / "evidence")],
     )
     store = WorkFolderStore(kernel)
     tools = FSTools(kernel, str(tmp_path))
@@ -291,3 +292,115 @@ def test_evidence_tools_are_triggerable_through_mcp(env):
     assert "wf_evidence_put" in names
     assert "wf_evidence_migrate" in names
     _assert_safe(put, env.repo)
+
+
+def test_reconcile_after_evidence_landing_accepts_runtime_evidence(env):
+    env.tools.wf_evidence_put(
+        env.folder_id,
+        "audit-evidence-r20.md",
+        "runtime evidence for restart\n",
+    )
+
+    result = env.kernel.reconcile("work-folder")
+
+    assert result["ok"] is True
+    assert result["domain"] == "work-folder"
+
+
+def test_evidence_put_same_filename_rewrite_reuses_reference(env):
+    filename = "audit-evidence-r21.md"
+    first = env.tools.wf_evidence_put(env.folder_id, filename, "v1 content\n")
+    second = env.tools.wf_evidence_put(env.folder_id, filename, "v2 changed\n")
+
+    runtime_rel = f".katana/runtime/evidence/{env.folder_id}/{filename}"
+    runtime_abs = env.repo / runtime_rel
+
+    assert second["ok"] is True
+    assert second["reference_filename"] == first["reference_filename"]
+    assert runtime_abs.read_text(encoding="utf-8") == "v2 changed\n"
+    assert second["sha256"] == (
+        "sha256:" + hashlib.sha256(b"v2 changed\n").hexdigest()
+    )
+
+    ref_abs = env.repo / env.folder_id / second["reference_filename"]
+    ref_text = ref_abs.read_text(encoding="utf-8")
+    assert (
+        f"sha256:{hashlib.sha256(b'v2 changed\n').hexdigest()}" in ref_text
+    )
+
+    # 同名重写不积累旧指针：仅存在一个引用文件，且可复算 runtime 产物 hash。
+    ref_prefix = f"{env.folder_id}/evidence/"
+    tracked_refs = [
+        path for path in _tracked_paths(env.repo) if path.startswith(ref_prefix)
+    ]
+    assert tracked_refs == [f"{env.folder_id}/{second['reference_filename']}"]
+    assert hashlib.sha256(runtime_abs.read_bytes()).hexdigest() == (
+        second["sha256"].removeprefix("sha256:")
+    )
+
+
+def test_evidence_migrate_ignores_existing_references(env):
+    env.tools.wf_evidence_put(
+        env.folder_id,
+        "audit-evidence-r22.md",
+        "already-runtime evidence\n",
+    )
+    env.tools.fs_create(
+        env.folder_id,
+        "audit-evidence-r23.md",
+        "legacy evidence\n",
+    )
+
+    result = env.tools.wf_evidence_migrate(env.folder_id)
+
+    assert result["ok"] is True
+    assert [item["filename"] for item in result["migrated"]] == [
+        "audit-evidence-r23.md"
+    ]
+
+    # 既存引用文件不被当作 legacy 产物重复迁移，只迁移真正的文件夹原文。
+    legacy_runtime = (
+        f".katana/runtime/evidence/{env.folder_id}/audit-evidence-r23.md"
+    )
+    assert (env.repo / legacy_runtime).read_text("utf-8") == "legacy evidence\n"
+    put_runtime = (
+        f".katana/runtime/evidence/{env.folder_id}/audit-evidence-r22.md"
+    )
+    assert (env.repo / put_runtime).read_text("utf-8") == "already-runtime evidence\n"
+    assert (env.repo / env.folder_id / "evidence/audit-evidence-r22.md.sha256").is_file()
+
+
+def test_evidence_migrate_empty_is_noop(env):
+    result = env.tools.wf_evidence_migrate(env.folder_id)
+
+    assert result["ok"] is True
+    assert result["migrated"] == []
+
+
+def test_evidence_put_failed_mutation_cleans_orphan_runtime_file(env, monkeypatch):
+    filename = "audit-evidence-r23.md"
+    runtime_rel = f".katana/runtime/evidence/{env.folder_id}/{filename}"
+    runtime_abs = env.repo / runtime_rel
+    original_write = env.tools._vfs.write
+
+    def failing_write(path, content, op="write", args=None):
+        raise RuntimeError("simulated VFS failure")
+
+    monkeypatch.setattr(env.tools._vfs, "write", failing_write)
+    result = env.tools.wf_evidence_put(
+        env.folder_id,
+        filename,
+        "orphan candidate\n",
+    )
+
+    assert result["ok"] is False
+    assert not runtime_abs.exists()
+
+    monkeypatch.setattr(env.tools._vfs, "write", original_write)
+    recovered = env.tools.wf_evidence_put(
+        env.folder_id,
+        filename,
+        "recovered\n",
+    )
+    assert recovered["ok"] is True
+    assert runtime_abs.read_text(encoding="utf-8") == "recovered\n"

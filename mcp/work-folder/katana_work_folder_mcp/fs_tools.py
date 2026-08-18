@@ -82,8 +82,13 @@ def _evidence_runtime_rel(folder_id: str, filename: str) -> str:
     return f"{_EVIDENCE_RUNTIME_DIR}/{folder_id}/{filename}"
 
 
-def _evidence_ref_filename(sha256_hex: str) -> str:
-    return f"{_EVIDENCE_REF_DIR}/{sha256_hex}.sha256"
+def _evidence_ref_filename(filename: str) -> str:
+    return f"{_EVIDENCE_REF_DIR}/{filename}.sha256"
+
+
+def _is_evidence_ref_internal(folder_id: str, internal: str) -> bool:
+    ref_dir = f"{folder_id}/{_EVIDENCE_REF_DIR}/"
+    return internal.startswith(ref_dir)
 
 
 def _render_evidence_ref(
@@ -765,7 +770,7 @@ class FSTools:
                     "tools": ["wf_evidence_put", "wf_evidence_migrate"],
                     "landing": f"{_EVIDENCE_RUNTIME_DIR}/<folder_id>/<filename>",
                     "reference": (
-                        "<folder_id>/" + _evidence_ref_filename("<sha256>")
+                        "<folder_id>/" + _evidence_ref_filename("<filename>")
                     ),
                     "git": "runtime-only; never committed",
                 },
@@ -1700,6 +1705,24 @@ class FSTools:
             )
         return None
 
+    def _evidence_runtime_prior(self, runtime_rel: str) -> bytes | None:
+        runtime_abs = Path(self._repo_root) / runtime_rel
+        if not runtime_abs.is_file():
+            return None
+        return runtime_abs.read_bytes()
+
+    def _restore_evidence_runtime(
+        self,
+        runtime_rel: str,
+        prior: bytes | None,
+    ) -> None:
+        runtime_abs = Path(self._repo_root) / runtime_rel
+        if prior is None:
+            runtime_abs.unlink(missing_ok=True)
+        else:
+            runtime_abs.parent.mkdir(parents=True, exist_ok=True)
+            runtime_abs.write_bytes(prior)
+
     def _evidence_put_write(
         self,
         binder,
@@ -1784,9 +1807,10 @@ class FSTools:
         data = content.encode("utf-8")
         sha256_hex = hashlib.sha256(data).hexdigest()
         runtime_rel = _evidence_runtime_rel(folder_id, filename)
-        reference_filename = _evidence_ref_filename(sha256_hex)
+        reference_filename = _evidence_ref_filename(filename)
         ref_internal = f"{folder_id}/{reference_filename}"
         conclusion = conclusion or _DEFAULT_EVIDENCE_CONCLUSION
+        prior_runtime = self._evidence_runtime_prior(runtime_rel)
 
         def write(binding, args):
             return self._evidence_put_write(
@@ -1815,6 +1839,7 @@ class FSTools:
                 **self._folder_scope(folder_id),
             )
         except Exception as exc:
+            self._restore_evidence_runtime(runtime_rel, prior_runtime)
             return self._mutation_error(
                 exc,
                 folder_id=folder_id,
@@ -1868,11 +1893,13 @@ class FSTools:
 
         plan: list[dict[str, Any]] = []
         for internal in sorted(matches):
+            if _is_evidence_ref_internal(folder_id, internal):
+                continue
             filename = internal[len(folder_id) + 1 :]
             data = self._vfs.read_bytes(internal)
             sha256_hex = hashlib.sha256(data).hexdigest()
             runtime_rel = _evidence_runtime_rel(folder_id, filename)
-            reference_filename = _evidence_ref_filename(sha256_hex)
+            reference_filename = _evidence_ref_filename(filename)
             plan.append(
                 {
                     "folder_id": folder_id,
@@ -1884,13 +1911,14 @@ class FSTools:
                     "internal": internal,
                     "ref_internal": f"{folder_id}/{reference_filename}",
                     "data": data,
+                    "prior_runtime": self._evidence_runtime_prior(runtime_rel),
                 }
             )
 
         if dry_run:
             preview = [
                 {key: value for key, value in item.items() if key not in
-                 ("internal", "ref_internal", "data")}
+                 ("internal", "ref_internal", "data", "prior_runtime")}
                 for item in plan
             ]
             result = _make_success(
@@ -1900,6 +1928,15 @@ class FSTools:
             )
             result["migrated"] = preview
             result["dry_run"] = True
+            return result
+
+        if not plan:
+            result = _make_success(
+                folder_id=folder_id,
+                node_type="directory",
+                commit=self._commit(),
+            )
+            result["migrated"] = []
             return result
 
         def write(binding, args):
@@ -1953,6 +1990,11 @@ class FSTools:
                 **self._folder_scope(folder_id),
             )
         except Exception as exc:
+            for item in plan:
+                self._restore_evidence_runtime(
+                    item["runtime_path"],
+                    item.get("prior_runtime"),
+                )
             return self._mutation_error(
                 exc,
                 folder_id=folder_id,

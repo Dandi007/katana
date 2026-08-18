@@ -416,6 +416,7 @@ def configure(repo_root: str) -> None:
         manifest,
         root,
         mutation_ledger=mutation_ledger,
+        runtime_state_paths=[os.path.join(runtime_root, "evidence")],
     )
     _validate_flat_index(kernel, root)
     kernel.reconcile("work-folder")

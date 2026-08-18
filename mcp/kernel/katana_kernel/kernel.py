@@ -57,6 +57,9 @@ class DomainBinding:
     manifest: "TransactionManifest"
     repo_root: str
     mutation_ledger: "SQLiteMutationLedger | None" = None
+    extra_runtime_state_paths: list[str] = dataclasses.field(
+        default_factory=list,
+    )
 
 
 class MutationBrokenError(RuntimeError):
@@ -95,6 +98,7 @@ class GovernedKernel:
         repo_root: str,
         *,
         mutation_ledger: "SQLiteMutationLedger | None" = None,
+        runtime_state_paths: list[str] | None = None,
     ) -> DomainBinding:
         if domain in self._bindings:
             raise ValueError(f"domain {domain!r} already bound")
@@ -117,6 +121,7 @@ class GovernedKernel:
             manifest=manifest,
             repo_root=resolved,
             mutation_ledger=mutation_ledger,
+            extra_runtime_state_paths=list(runtime_state_paths or []),
         )
         self._bindings[domain] = binding
         self._repo_roots.add(resolved)
@@ -139,6 +144,8 @@ class GovernedKernel:
         validate_runtime_state_tree(
             binding.repo_root, binding.manifest.manifests_dir,
         )
+        for extra_path in binding.extra_runtime_state_paths:
+            validate_runtime_state_tree(binding.repo_root, extra_path)
         if binding.mutation_ledger is not None:
             ledger_path = binding.mutation_ledger.path
             validate_runtime_state_paths(
@@ -167,6 +174,7 @@ class GovernedKernel:
                     f"{ledger_path}-journal",
                 ]
             )
+        allowances.extend(binding.extra_runtime_state_paths)
         return allowances
 
     @staticmethod
