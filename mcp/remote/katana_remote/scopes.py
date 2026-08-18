@@ -47,6 +47,7 @@ _MUTATE_OPS = {
     "memory_create", "memory_update", "memory_delete", "memory_edit",
     "wiki_ingest_plan", "wiki_ingest_apply",
     "wf_create", "wf_save", "wf_resume", "wf_append_progress", "wf_reindex",
+    "wf_reconcile",
 }
 
 _COMMAND_OPS: set[str] = set()

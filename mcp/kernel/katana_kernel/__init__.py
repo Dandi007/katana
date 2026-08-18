@@ -13,6 +13,7 @@ from katana_kernel.idempotency import (
     canonical_request_hash,
 )
 from katana_kernel.gitops import (
+    BaseCommitConflictError,
     CASRejectionError,
     DirtyWorkTreeError,
     MutationLockError,
@@ -40,6 +41,7 @@ __all__ = [
     "canonical_request_hash",
     "git_commit",
     "cas_guard",
+    "BaseCommitConflictError",
     "CASRejectionError",
     "DirtyWorkTreeError",
     "MutationLockError",

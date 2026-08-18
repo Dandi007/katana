@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -17,6 +18,20 @@ from dataclasses import dataclass
 
 class CASRejectionError(Exception):
     """Raised when expected_base_sha does not match current HEAD."""
+
+
+class BaseCommitConflictError(Exception):
+    """Raised when a governed exact commit loses the CAS ref-publish race.
+
+    Unlike ``MutationBrokenError`` the scene has already been restored to a
+    clean state, so the caller may safely retry against the new head.
+    """
+
+    def __init__(self, detail: str, head: str | None = None):
+        super().__init__(detail)
+        self.retryable = True
+        self.head = head or ""
+        self.detail = detail
 
 
 class DirtyWorkTreeError(Exception):
@@ -93,6 +108,15 @@ def require_exact_git_root(repo_root: str) -> str:
             f"{resolved} != {discovered}"
         )
     return str(resolved)
+
+
+def is_path_ignored(repo_root: str, path: str) -> bool:
+    """Return True when Git itself reports the path as ignored."""
+    try:
+        result = _run(repo_root, "check-ignore", "-q", "--no-index", "--", path)
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return result.returncode == 0
 
 
 def is_working_tree_clean(
@@ -459,6 +483,67 @@ def _porcelain_paths(status_output: str) -> list[str]:
     return result
 
 
+def governed_dirty_paths(
+    repo_root: str,
+    *,
+    allowed_ignored_paths: list[str] | None = None,
+    scope_prefixes: list[str] | None = None,
+    control_paths: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Enumerate the dirt the governed clean guard would reject, without raising.
+
+    Returns ``(changed_status_paths, unexpected_ignored_paths)``.  With
+    ``scope_prefixes=None`` the whole repository is considered; with a non-empty
+    scope only dirt under ``scope_prefixes`` or ``control_paths`` is reported.
+    This is the read-only twin of :func:`require_clean_working_tree` and lets a
+    caller classify a scene *before* applying any recovery mutation.
+    """
+    scopes = _normalize_scope_prefixes(repo_root, scope_prefixes)
+    controls = _normalize_scope_prefixes(repo_root, control_paths)
+
+    try:
+        status_result = _run(
+            repo_root,
+            "status", "--porcelain=v1", "-z", "--no-renames",
+            "--untracked-files=all",
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise DirtyWorkTreeError(
+            f"cannot verify governed repository cleanliness: {exc}"
+        ) from exc
+    if status_result.returncode != 0:
+        detail = status_result.stderr.strip() or "git status failed"
+        raise DirtyWorkTreeError(
+            f"cannot verify governed repository cleanliness: {detail}"
+        )
+
+    changed = _porcelain_paths(status_result.stdout)
+    if scopes:
+        changed = [
+            path for path in changed if _path_within(path, scopes + controls)
+        ]
+
+    allowances = _normalize_ignored_allowances(
+        repo_root,
+        allowed_ignored_paths,
+    )
+    ignored_scope = scopes + controls
+    if scopes:
+        unexpected_ignored = [
+            path
+            for path in _ignored_untracked_paths(repo_root)
+            if not _path_within(path, allowances)
+            and _path_within(path, ignored_scope)
+        ]
+    else:
+        unexpected_ignored = [
+            path
+            for path in _ignored_untracked_paths(repo_root)
+            if not _path_within(path, allowances)
+        ]
+    return list(dict.fromkeys(changed)), unexpected_ignored
+
+
 def require_clean_working_tree(
     repo_root: str,
     *,
@@ -479,59 +564,22 @@ def require_clean_working_tree(
     if git_dir.returncode != 0:
         raise DirtyWorkTreeError("governed mutation requires a Git repository")
     base_sha = head_sha(repo_root)
-    try:
-        status_result = _run(
-            repo_root,
-            "status", "--porcelain=v1", "-z", "--no-renames",
-            "--untracked-files=all",
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise DirtyWorkTreeError(
-            f"cannot verify governed repository cleanliness: {exc}"
-        ) from exc
-    if status_result.returncode != 0:
-        detail = status_result.stderr.strip() or "git status failed"
-        raise DirtyWorkTreeError(
-            f"cannot verify governed repository cleanliness: {detail}"
-        )
-
-    scopes = _normalize_scope_prefixes(repo_root, scope_prefixes)
-    controls = _normalize_scope_prefixes(repo_root, control_paths)
-    if scopes:
-        offending = [
-            path
-            for path in _porcelain_paths(status_result.stdout)
-            if _path_within(path, scopes + controls)
-        ]
-        if offending:
+    changed, unexpected_ignored = governed_dirty_paths(
+        repo_root,
+        allowed_ignored_paths=allowed_ignored_paths,
+        scope_prefixes=scope_prefixes,
+        control_paths=control_paths,
+    )
+    if changed:
+        if _normalize_scope_prefixes(repo_root, scope_prefixes):
             raise DirtyWorkTreeError(
                 "governed mutation rejected: repository has tracked, staged, "
                 "or untracked changes within scope"
             )
-    elif status_result.stdout:
         raise DirtyWorkTreeError(
             "governed mutation rejected: repository has tracked, staged, "
             "or untracked changes"
         )
-
-    allowances = _normalize_ignored_allowances(
-        repo_root,
-        allowed_ignored_paths,
-    )
-    ignored_scope = scopes + controls
-    if scopes:
-        unexpected_ignored = [
-            path
-            for path in _ignored_untracked_paths(repo_root)
-            if not _path_within(path, allowances)
-            and _path_within(path, ignored_scope)
-        ]
-    else:
-        unexpected_ignored = [
-            path
-            for path in _ignored_untracked_paths(repo_root)
-            if not _path_within(path, allowances)
-        ]
     if unexpected_ignored:
         raise DirtyWorkTreeError(
             "governed mutation rejected: repository has ignored untracked "
@@ -669,6 +717,11 @@ def validate_runtime_state_tree(repo_root: str, directory: str) -> str:
     return normalized_directory
 
 
+def read_worktree_image(repo_root: str, path: str) -> FileImage:
+    """Return the exact live regular-file image of a transaction path."""
+    return _read_file_image(repo_root, path)
+
+
 def _read_file_image(repo_root: str, path: str) -> FileImage:
     normalized = _normalize_transaction_path(repo_root, path)
     exact_path = Path(repo_root).resolve() / normalized
@@ -689,6 +742,41 @@ def _read_file_image(repo_root: str, path: str) -> FileImage:
         exact_path.read_bytes(),
         stat.S_IMODE(file_stat.st_mode),
     )
+
+
+def _write_file_image(repo_root: str, path: str, image: FileImage) -> None:
+    """Apply one exact regular-file image to a transaction path."""
+    normalized = _normalize_transaction_path(repo_root, path)
+    exact_path = Path(repo_root).resolve() / normalized
+    if image.exists:
+        exact_path.parent.mkdir(parents=True, exist_ok=True)
+        exact_path.write_bytes(image.data)
+        if exact_path.stat().st_mode & stat.S_IFMT == stat.S_IFREG:
+            os.chmod(exact_path, stat.S_IMODE(image.mode))
+    else:
+        try:
+            exact_path.unlink()
+        except FileNotFoundError:
+            pass
+        except (IsADirectoryError, OSError):
+            if exact_path.is_dir():
+                shutil.rmtree(str(exact_path))
+
+
+def restore_paths_to_head(repo_root: str, paths: list[str]) -> None:
+    """Restore transaction paths to the exact images they have at HEAD.
+
+    Safe after a lost CAS publish: aligning the surviving scene with the
+    currently published commit leaves the worktree clean regardless of whether
+    a concurrent writer advanced ``HEAD``.
+    """
+    current = head_sha(repo_root)
+    if not current:
+        raise RollbackSafetyError("cannot restore transaction paths without a HEAD")
+    for path in validate_transaction_paths(repo_root, paths):
+        _write_file_image(
+            repo_root, path, commit_file_image(repo_root, current, path),
+        )
 
 
 def _reject_special_index_state(repo_root: str, path: str) -> None:
@@ -845,6 +933,42 @@ class TransactionJournal:
             "paths": [],
         }
 
+    def rollback_to_head(self) -> dict:
+        """Restore transaction paths to HEAD after a lost CAS publish race.
+
+        Refuses to touch a path whose live bytes no longer equal the exact
+        postimage the transaction wrote (an external change), preserving the
+        scene for manual recovery instead.  Returns ``ROLLED_BACK`` when every
+        transaction path was restored to HEAD, otherwise ``BROKEN``.
+        """
+        diverged = [
+            path
+            for path, expected in self._expected.items()
+            if _read_file_image(self.repo_root, path) != expected
+        ]
+        if diverged:
+            return {
+                "state": "BROKEN",
+                "detail": (
+                    "live transaction paths diverged from the review "
+                    "postimage; scene preserved for manual recovery"
+                ),
+                "paths": diverged,
+            }
+        try:
+            restore_paths_to_head(self.repo_root, list(self._expected))
+        except RollbackSafetyError as exc:
+            return {
+                "state": "BROKEN",
+                "detail": f"cannot restore transaction paths to HEAD: {exc}",
+                "paths": list(self._expected),
+            }
+        return {
+            "state": "ROLLED_BACK",
+            "detail": "transaction paths restored to HEAD",
+            "paths": list(self._expected),
+        }
+
 
 def changed_transaction_paths(repo_root: str) -> list[str]:
     """Return exact tracked/staged/untracked files changed since HEAD."""
@@ -870,6 +994,122 @@ def changed_transaction_paths(repo_root: str) -> list[str]:
             if path and path not in changed:
                 changed.append(path)
     return validate_transaction_paths(repo_root, changed)
+
+
+def untracked_not_ignored_paths(repo_root: str) -> list[str]:
+    """Return repo-relative untracked, non-ignored files."""
+    result = _run(repo_root, "ls-files", "--others", "--exclude-standard", "-z")
+    if result.returncode != 0:
+        raise RollbackSafetyError(
+            result.stderr.strip() or "git ls-files failed"
+        )
+    return [path for path in result.stdout.split("\0") if path]
+
+
+def tracked_modified_paths(repo_root: str) -> list[str]:
+    """Return repo-relative tracked files whose worktree content differs from HEAD."""
+    result = _run(repo_root, "diff", "--name-only", "-z", "HEAD")
+    if result.returncode != 0:
+        raise RollbackSafetyError(result.stderr.strip() or "git diff failed")
+    return [path for path in result.stdout.split("\0") if path]
+
+
+def staged_paths(repo_root: str) -> list[str]:
+    """Return repo-relative paths whose index entry differs from HEAD."""
+    result = _run(repo_root, "diff", "--cached", "--name-only", "-z")
+    if result.returncode != 0:
+        raise RollbackSafetyError(result.stderr.strip() or "git diff failed")
+    return [path for path in result.stdout.split("\0") if path]
+
+
+def worktree_matches_head(repo_root: str, path: str) -> bool:
+    """Return True when a tracked path's worktree bytes equal HEAD's image.
+
+    Only the content and the executable bit are compared; non-executable mode
+    bits (e.g. ``0664`` on disk vs. ``0644`` committed) are ignored, matching
+    Git's own blob-mode normalization.
+    """
+    try:
+        worktree = _read_file_image(repo_root, path)
+        committed = commit_file_image(repo_root, head_sha(repo_root), path)
+    except RollbackSafetyError:
+        return False
+    if worktree.exists != committed.exists:
+        return False
+    if not worktree.exists:
+        return True
+    if worktree.data != committed.data:
+        return False
+    return bool(worktree.mode & 0o111) == bool(committed.mode & 0o111)
+
+
+def unstage_paths(repo_root: str, paths: list[str]) -> None:
+    """Unstage paths without touching the worktree (``git reset``)."""
+    if not paths:
+        return
+    result = _run(repo_root, "reset", "-q", "HEAD", "--", *paths)
+    if result.returncode != 0:
+        raise RollbackSafetyError(
+            result.stderr.strip() or "git reset failed"
+        )
+
+
+def _complete_index_on_lock(repo_root: str, lock_path: Path) -> bool:
+    """True when a lock file already holds a complete, readable Git index.
+
+    ``.git/index.lock`` never contains the holder PID (Git's lockfile API does
+    not write one): the file is either the fully serialized replacement index
+    (beginning with the ``DIRC`` magic) or empty when the holder died before
+    writing.  Probing the lock through ``git ls-files --cached`` on a private
+    copy accepts a lock only when its serialization finished (entry count and
+    trailing checksum are consistent), so a live holder caught mid-write is
+    never mistaken for an orphan.
+    """
+    probe_path: str | None = None
+    try:
+        fd, probe_path = tempfile.mkstemp(
+            prefix="katana-probe-index-", dir=str(lock_path.parent),
+        )
+        os.close(fd)
+        shutil.copy2(str(lock_path), probe_path)
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = probe_path
+        probe = _run_env(repo_root, env, "ls-files", "--cached", "-z")
+        return probe.returncode == 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    finally:
+        if probe_path is not None:
+            try:
+                os.unlink(probe_path)
+            except OSError:
+                pass
+
+
+def orphan_index_lock_path(repo_root: str) -> str | None:
+    """Return the ``.git/index.lock`` path when it is provably an orphan.
+
+    Git's lockfile API never stores the holder PID: a genuine orphan lock is
+    either empty (the holder died before writing the replacement index) or a
+    complete serialized index (the holder died after writing but before the
+    atomic rename).  Governed index synchronization never touches the real
+    ``.git/index.lock`` and governed mutations are serialized by the repository
+    mutation lock, so the only legitimate holder is a non-governed Git process;
+    a lock whose serialization already completed has nothing left to protect.
+    """
+    try:
+        index_file = _git_index_file(repo_root)
+    except RollbackSafetyError:
+        return None
+    lock_path = Path(str(index_file) + ".lock")
+    try:
+        if not lock_path.exists():
+            return None
+        if lock_path.stat().st_size == 0:
+            return str(lock_path)
+    except OSError:
+        return None
+    return str(lock_path) if _complete_index_on_lock(repo_root, lock_path) else None
 
 
 def rollback_transaction_paths(
@@ -900,6 +1140,92 @@ def _restore_tree(repo_root: str) -> None:
         "repository-wide restore is disabled; transaction-scoped base SHA "
         "and exact paths are required"
     )
+
+
+def _git_index_file(repo_root: str) -> Path:
+    result = _run(repo_root, "rev-parse", "--git-dir")
+    if result.returncode != 0:
+        raise RollbackSafetyError(
+            "cannot resolve Git directory for index synchronization"
+        )
+    git_dir = Path(result.stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = Path(repo_root).resolve() / git_dir
+    return (git_dir / "index").resolve()
+
+
+def _sync_real_index_isolated(
+    repo_root: str,
+    commit_sha: str,
+    images: dict[str, FileImage],
+) -> str | None:
+    """Synchronize transaction entries into the real index without index.lock.
+
+    The current real index is copied into a temporary ``GIT_INDEX_FILE``, the
+    transaction entries are applied there, and the file is atomically swapped
+    back via ``os.replace``.  This never takes ``.git/index.lock``, so a stale
+    lock or a concurrent governed transaction cannot deadlock the shared index.
+    Non-allowlist staged entries remain untouched because the current index is
+    used as the base rather than ``HEAD``.
+    """
+    try:
+        index_file = _git_index_file(repo_root)
+    except RollbackSafetyError as exc:
+        return str(exc)
+
+    try:
+        fd, temp_index = tempfile.mkstemp(
+            prefix="katana-sync-index-", dir=str(index_file.parent),
+        )
+    except OSError as exc:
+        return f"exact index sync failed: {exc}"
+    os.close(fd)
+    try:
+        if index_file.exists():
+            shutil.copy2(str(index_file), temp_index)
+        else:
+            os.unlink(temp_index)
+
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = temp_index
+
+        for path, image in images.items():
+            if image.exists:
+                tree_entry = _run(repo_root, "ls-tree", commit_sha, "--", path)
+                fields = tree_entry.stdout.split()
+                if tree_entry.returncode != 0 or len(fields) < 3:
+                    return f"cannot resolve committed path: {path}"
+                sync = _run_env(
+                    repo_root,
+                    env,
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    fields[0],
+                    fields[2],
+                    path,
+                )
+            else:
+                sync = _run_env(
+                    repo_root,
+                    env,
+                    "update-index",
+                    "--force-remove",
+                    "--",
+                    path,
+                )
+            if sync.returncode != 0:
+                return sync.stderr.strip() or "exact index sync failed"
+
+        os.replace(temp_index, index_file)
+        return None
+    except OSError as exc:
+        return f"exact index sync failed: {exc}"
+    finally:
+        try:
+            os.unlink(temp_index)
+        except FileNotFoundError:
+            pass
 
 
 def _commit_exact(
@@ -1013,40 +1339,15 @@ def _commit_exact(
         if publish.returncode != 0:
             return {
                 "committed": False,
+                "code": "BASE_COMMIT_CONFLICT",
+                "retryable": True,
                 "detail": publish.stderr.strip() or "HEAD CAS publish failed",
+                "head": head_sha(repo_root),
             }
 
-        # Synchronize only transaction entries in the real index. Concurrent
-        # staged entries outside the allowlist remain untouched and uncommitted.
-        for path, image in images.items():
-            if image.exists:
-                tree_entry = _run(
-                    repo_root, "ls-tree", commit_sha, "--", path,
-                )
-                fields = tree_entry.stdout.split()
-                if tree_entry.returncode != 0 or len(fields) < 3:
-                    return {
-                        "committed": False,
-                        "detail": f"cannot resolve committed path: {path}",
-                    }
-                sync = _run(
-                    repo_root,
-                    "update-index",
-                    "--add",
-                    "--cacheinfo",
-                    fields[0],
-                    fields[2],
-                    path,
-                )
-            else:
-                sync = _run(
-                    repo_root, "update-index", "--force-remove", "--", path,
-                )
-            if sync.returncode != 0:
-                return {
-                    "committed": False,
-                    "detail": sync.stderr.strip() or "exact index sync failed",
-                }
+        sync_error = _sync_real_index_isolated(repo_root, commit_sha, images)
+        if sync_error is not None:
+            return {"committed": False, "detail": sync_error}
         return {"committed": True, "detail": commit_sha}
     finally:
         try:
