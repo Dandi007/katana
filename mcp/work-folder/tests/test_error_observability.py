@@ -14,7 +14,9 @@ Covers the frozen contract:
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -143,6 +145,19 @@ def test_server_mutation_catches_dirty_worktree(tmp_path, monkeypatch):
     assert result["retryable"] is True
 
 
+def test_server_mutation_redacts_physical_path(tmp_path, monkeypatch):
+    repo = os.path.realpath(str(tmp_path))
+    monkeypatch.setattr(server, "_repo_root", str(tmp_path))
+    result = server._server_mutation(
+        lambda: (_ for _ in ()).throw(
+            DirtyWorkTreeError(f"cannot verify cleanliness: {repo}/wf-abc123")
+        )
+    )
+    assert result["code"] == "WORKTREE_DIRTY"
+    assert repo not in result["message"]
+    assert "<work-folder-root>" in result["message"]
+
+
 def test_server_mutation_catches_cas_rejection(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_repo_root", str(tmp_path))
     result = server._server_mutation(
@@ -152,8 +167,20 @@ def test_server_mutation_catches_cas_rejection(tmp_path, monkeypatch):
     assert result["retryable"] is True
 
 
+def test_configure_logging_installs_info_stderr_handler():
+    server._configure_logging()
+
+    logger = logging.getLogger("katana_work_folder_mcp")
+    assert logger.level == logging.INFO
+    assert any(
+        isinstance(handler, logging.StreamHandler)
+        and getattr(handler, "stream", None) is sys.stderr
+        for handler in logger.handlers
+    )
+
+
 def test_failure_emits_structured_log_with_root_cause(env, caplog):
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.INFO, logger="katana_work_folder_mcp")
     _dirty_progress(env.repo, env.folder_id)
 
     result = env.store.append_progress(
@@ -175,7 +202,7 @@ def test_failure_emits_structured_log_with_root_cause(env, caplog):
 
 
 def test_success_emits_structured_log_with_mutation_and_commit(env, caplog):
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.INFO, logger="katana_work_folder_mcp")
 
     result = env.store.append_progress(
         env.folder_id,
