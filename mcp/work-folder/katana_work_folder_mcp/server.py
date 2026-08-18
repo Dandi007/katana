@@ -18,6 +18,8 @@ from fastmcp import FastMCP
 
 from katana_kb_mcp_shared import config, vault_search
 from katana_kernel import (
+    CASRejectionError,
+    DirtyWorkTreeError,
     GovernedKernel,
     GovernedVFS,
     IdempotencyConflictError,
@@ -142,6 +144,20 @@ def _server_mutation(call) -> dict:
             "code": "IDEMPOTENCY_CONFLICT",
             "message": str(exc),
             "retryable": False,
+        }
+    except DirtyWorkTreeError as exc:
+        return {
+            "ok": False,
+            "code": "WORKTREE_DIRTY",
+            "message": str(exc),
+            "retryable": True,
+        }
+    except CASRejectionError as exc:
+        return {
+            "ok": False,
+            "code": "BASE_COMMIT_CONFLICT",
+            "message": str(exc),
+            "retryable": True,
         }
     except MutationBrokenError as exc:
         return _public_payload(exc.as_error())

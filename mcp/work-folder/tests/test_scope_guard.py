@@ -129,14 +129,18 @@ def test_append_progress_rejected_when_folder_itself_dirty(repo_store):
     folder_a = store.create("alpha", _fixed_now)["folder_id"]
     _dirty_folder(repo, folder_a)
 
-    with pytest.raises(DirtyWorkTreeError):
-        store.append_progress(
-            folder_a,
-            "entry",
-            "session-1",
-            "key-dirty",
-            now_fn=_fixed_now,
-        )
+    result = store.append_progress(
+        folder_a,
+        "entry",
+        "session-1",
+        "key-dirty",
+        now_fn=_fixed_now,
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "WORKTREE_DIRTY"
+    assert result["retryable"] is True
+    assert folder_a in result["message"]
 
 
 def test_append_progress_rejected_when_control_index_dirty(repo_store):
@@ -146,14 +150,18 @@ def test_append_progress_rejected_when_control_index_dirty(repo_store):
     index_before = index.read_bytes()
     index.write_bytes(index_before + b"\nstale index\n")
 
-    with pytest.raises(DirtyWorkTreeError):
-        store.append_progress(
-            folder_a,
-            "entry",
-            "session-1",
-            "key-index",
-            now_fn=_fixed_now,
-        )
+    result = store.append_progress(
+        folder_a,
+        "entry",
+        "session-1",
+        "key-index",
+        now_fn=_fixed_now,
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "WORKTREE_DIRTY"
+    assert result["retryable"] is True
+    assert folder_a in result["message"]
 
 
 def test_create_succeeds_with_dirty_sister_folder(repo_store):
