@@ -110,6 +110,15 @@ def require_exact_git_root(repo_root: str) -> str:
     return str(resolved)
 
 
+def is_path_ignored(repo_root: str, path: str) -> bool:
+    """Return True when Git itself reports the path as ignored."""
+    try:
+        result = _run(repo_root, "check-ignore", "-q", "--no-index", "--", path)
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return result.returncode == 0
+
+
 def is_working_tree_clean(
     repo_root: str,
     *,
@@ -474,6 +483,67 @@ def _porcelain_paths(status_output: str) -> list[str]:
     return result
 
 
+def governed_dirty_paths(
+    repo_root: str,
+    *,
+    allowed_ignored_paths: list[str] | None = None,
+    scope_prefixes: list[str] | None = None,
+    control_paths: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Enumerate the dirt the governed clean guard would reject, without raising.
+
+    Returns ``(changed_status_paths, unexpected_ignored_paths)``.  With
+    ``scope_prefixes=None`` the whole repository is considered; with a non-empty
+    scope only dirt under ``scope_prefixes`` or ``control_paths`` is reported.
+    This is the read-only twin of :func:`require_clean_working_tree` and lets a
+    caller classify a scene *before* applying any recovery mutation.
+    """
+    scopes = _normalize_scope_prefixes(repo_root, scope_prefixes)
+    controls = _normalize_scope_prefixes(repo_root, control_paths)
+
+    try:
+        status_result = _run(
+            repo_root,
+            "status", "--porcelain=v1", "-z", "--no-renames",
+            "--untracked-files=all",
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise DirtyWorkTreeError(
+            f"cannot verify governed repository cleanliness: {exc}"
+        ) from exc
+    if status_result.returncode != 0:
+        detail = status_result.stderr.strip() or "git status failed"
+        raise DirtyWorkTreeError(
+            f"cannot verify governed repository cleanliness: {detail}"
+        )
+
+    changed = _porcelain_paths(status_result.stdout)
+    if scopes:
+        changed = [
+            path for path in changed if _path_within(path, scopes + controls)
+        ]
+
+    allowances = _normalize_ignored_allowances(
+        repo_root,
+        allowed_ignored_paths,
+    )
+    ignored_scope = scopes + controls
+    if scopes:
+        unexpected_ignored = [
+            path
+            for path in _ignored_untracked_paths(repo_root)
+            if not _path_within(path, allowances)
+            and _path_within(path, ignored_scope)
+        ]
+    else:
+        unexpected_ignored = [
+            path
+            for path in _ignored_untracked_paths(repo_root)
+            if not _path_within(path, allowances)
+        ]
+    return list(dict.fromkeys(changed)), unexpected_ignored
+
+
 def require_clean_working_tree(
     repo_root: str,
     *,
@@ -494,59 +564,22 @@ def require_clean_working_tree(
     if git_dir.returncode != 0:
         raise DirtyWorkTreeError("governed mutation requires a Git repository")
     base_sha = head_sha(repo_root)
-    try:
-        status_result = _run(
-            repo_root,
-            "status", "--porcelain=v1", "-z", "--no-renames",
-            "--untracked-files=all",
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise DirtyWorkTreeError(
-            f"cannot verify governed repository cleanliness: {exc}"
-        ) from exc
-    if status_result.returncode != 0:
-        detail = status_result.stderr.strip() or "git status failed"
-        raise DirtyWorkTreeError(
-            f"cannot verify governed repository cleanliness: {detail}"
-        )
-
-    scopes = _normalize_scope_prefixes(repo_root, scope_prefixes)
-    controls = _normalize_scope_prefixes(repo_root, control_paths)
-    if scopes:
-        offending = [
-            path
-            for path in _porcelain_paths(status_result.stdout)
-            if _path_within(path, scopes + controls)
-        ]
-        if offending:
+    changed, unexpected_ignored = governed_dirty_paths(
+        repo_root,
+        allowed_ignored_paths=allowed_ignored_paths,
+        scope_prefixes=scope_prefixes,
+        control_paths=control_paths,
+    )
+    if changed:
+        if _normalize_scope_prefixes(repo_root, scope_prefixes):
             raise DirtyWorkTreeError(
                 "governed mutation rejected: repository has tracked, staged, "
                 "or untracked changes within scope"
             )
-    elif status_result.stdout:
         raise DirtyWorkTreeError(
             "governed mutation rejected: repository has tracked, staged, "
             "or untracked changes"
         )
-
-    allowances = _normalize_ignored_allowances(
-        repo_root,
-        allowed_ignored_paths,
-    )
-    ignored_scope = scopes + controls
-    if scopes:
-        unexpected_ignored = [
-            path
-            for path in _ignored_untracked_paths(repo_root)
-            if not _path_within(path, allowances)
-            and _path_within(path, ignored_scope)
-        ]
-    else:
-        unexpected_ignored = [
-            path
-            for path in _ignored_untracked_paths(repo_root)
-            if not _path_within(path, allowances)
-        ]
     if unexpected_ignored:
         raise DirtyWorkTreeError(
             "governed mutation rejected: repository has ignored untracked "
@@ -1021,34 +1054,62 @@ def unstage_paths(repo_root: str, paths: list[str]) -> None:
         )
 
 
+def _complete_index_on_lock(repo_root: str, lock_path: Path) -> bool:
+    """True when a lock file already holds a complete, readable Git index.
+
+    ``.git/index.lock`` never contains the holder PID (Git's lockfile API does
+    not write one): the file is either the fully serialized replacement index
+    (beginning with the ``DIRC`` magic) or empty when the holder died before
+    writing.  Probing the lock through ``git ls-files --cached`` on a private
+    copy accepts a lock only when its serialization finished (entry count and
+    trailing checksum are consistent), so a live holder caught mid-write is
+    never mistaken for an orphan.
+    """
+    probe_path: str | None = None
+    try:
+        fd, probe_path = tempfile.mkstemp(
+            prefix="katana-probe-index-", dir=str(lock_path.parent),
+        )
+        os.close(fd)
+        shutil.copy2(str(lock_path), probe_path)
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = probe_path
+        probe = _run_env(repo_root, env, "ls-files", "--cached", "-z")
+        return probe.returncode == 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    finally:
+        if probe_path is not None:
+            try:
+                os.unlink(probe_path)
+            except OSError:
+                pass
+
+
 def orphan_index_lock_path(repo_root: str) -> str | None:
-    """Return the st.:git index.lock path when its holder is confirmed dead."""
+    """Return the ``.git/index.lock`` path when it is provably an orphan.
+
+    Git's lockfile API never stores the holder PID: a genuine orphan lock is
+    either empty (the holder died before writing the replacement index) or a
+    complete serialized index (the holder died after writing but before the
+    atomic rename).  Governed index synchronization never touches the real
+    ``.git/index.lock`` and governed mutations are serialized by the repository
+    mutation lock, so the only legitimate holder is a non-governed Git process;
+    a lock whose serialization already completed has nothing left to protect.
+    """
     try:
         index_file = _git_index_file(repo_root)
     except RollbackSafetyError:
         return None
     lock_path = Path(str(index_file) + ".lock")
-    if not lock_path.exists():
-        return None
     try:
-        holder_pid = int(lock_path.read_text(encoding="utf-8").strip() or "0")
-    except (OSError, ValueError):
-        holder_pid = 0
-    if holder_pid <= 0:
-        return None
-    return None if _pid_alive(holder_pid) else str(lock_path)
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+        if not lock_path.exists():
+            return None
+        if lock_path.stat().st_size == 0:
+            return str(lock_path)
     except OSError:
-        return True
-    return True
+        return None
+    return str(lock_path) if _complete_index_on_lock(repo_root, lock_path) else None
 
 
 def rollback_transaction_paths(

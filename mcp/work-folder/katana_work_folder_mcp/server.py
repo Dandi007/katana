@@ -133,7 +133,7 @@ def _public_payload(value: Any) -> Any:
     return value
 
 
-def _server_mutation(call) -> dict:
+def _server_mutation(call, *, reconcile: bool = False) -> dict:
     try:
         return _public_payload(call())
     except IdempotencyConflictError as exc:
@@ -144,6 +144,8 @@ def _server_mutation(call) -> dict:
             "retryable": False,
         }
     except MutationBrokenError as exc:
+        if reconcile:
+            return _reconcile_broken_envelope(exc)
         return _public_payload(exc.as_error())
 
 
@@ -587,18 +589,19 @@ async def wf_reindex(
 async def wf_reconcile(
     scope_prefixes: list[str] | None = None,
     control_paths: list[str] | None = None,
+    idempotency_key: str | None = None,
 ) -> dict:
     """执行 governed 状态的安全恢复清单，幂等；类型 6 保留 BROKEN 不动树。"""
-    try:
-        result = _require_kernel().reconcile(
+    return _server_mutation(
+        lambda: _require_kernel().reconcile(
             "work-folder",
             recover=True,
             scope_prefixes=scope_prefixes,
             control_paths=control_paths,
-        )
-        return _public_payload(result)
-    except MutationBrokenError as exc:
-        return _reconcile_broken_envelope(exc)
+            idempotency_key=idempotency_key,
+        ),
+        reconcile=True,
+    )
 
 
 @mcp.tool()

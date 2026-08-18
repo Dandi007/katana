@@ -162,8 +162,8 @@ def test_index_sync_does_not_contend_on_index_lock(git_repo):
         cwd=repo, check=True, capture_output=True, text=True,
     ).stdout.strip()
     lock_path = os.path.join(repo, git_dir, "index.lock")
-    with open(lock_path, "w") as f:
-        f.write("999999\n")
+    with open(lock_path, "wb") as f:
+        pass  # stale lock file exactly as Git leaves it after a crash
 
     path = os.path.join(repo, "file.txt")
     with open(path, "w") as f:

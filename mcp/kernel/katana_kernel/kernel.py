@@ -31,7 +31,9 @@ from katana_kernel.gitops import (
     commit_parents,
     find_commit_with_trailer,
     git_commit,
+    governed_dirty_paths,
     head_sha,
+    is_path_ignored,
     is_working_tree_clean,
     orphan_index_lock_path,
     read_katana_commit_trailers,
@@ -57,6 +59,18 @@ from katana_kernel.idempotency import (
 _RECEIPT_PROTOCOL = "katana-idempotency-v1"
 _RESERVED_TRAILER_PREFIX = "Katana-"
 _VERIFIED_HEAD_META = "verified_head"
+
+# EK-4 artifact-class judgment for reconcile recovery type 1: only generated
+# side-effect files are safe to auto-quarantine.  Primary content stays for the
+# governed commit path or an operator decision (type 6 diagnosis).
+_ARTIFACT_DIR_SEGMENTS = frozenset({
+    "artifacts", "products", "product", "build", "dist", "out",
+    "generated", "cache", "node_modules", "target", "__pycache__", ".cache",
+})
+_ARTIFACT_SUFFIXES = frozenset({
+    ".log", ".tmp", ".temp", ".part", ".swp", ".swo", ".bak",
+    ".download", ".crdownload", ".lock", ".pid",
+})
 
 
 @dataclasses.dataclass
@@ -163,15 +177,25 @@ class GovernedKernel:
             )
 
     @staticmethod
-    def _runtime_state_allowances(binding: DomainBinding) -> list[str]:
+    def _recovered_root(binding: DomainBinding) -> str:
+        """Return the quarantine/recovered runtime root for this binding."""
+        return os.path.join(
+            os.path.dirname(binding.manifest.manifests_dir), "recovered",
+        )
+
+    @classmethod
+    def _runtime_state_allowances(cls, binding: DomainBinding) -> list[str]:
         """Return the exact ignored runtime paths owned by this binding."""
+        recovered_root = cls._recovered_root(binding)
         if binding.manifest.git_tracked:
-            return []
+            # git_tracked manifests live under a tracked .katana directory, so
+            # there is no runtime manifests allowance; the recovered root is
+            # still the ignore-allowance used by reconcile (valid only when the
+            # repo actually ignores it).
+            return [recovered_root]
         allowances = [
             binding.manifest.manifests_dir,
-            os.path.join(
-                os.path.dirname(binding.manifest.manifests_dir), "recovered",
-            ),
+            recovered_root,
         ]
         if binding.mutation_ledger is not None:
             ledger_path = binding.mutation_ledger.path
@@ -212,18 +236,39 @@ class GovernedKernel:
         scope_prefixes: list[str] | None = None,
         control_paths: list[str] | None = None,
         recover: bool = False,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Validate and reconcile one runtime binding before serving traffic.
 
         With ``recover=False`` this is the legacy verify-only path: ``head`` and
         ``unresolved`` keys are preserved and a dirty scene fails closed.  With
-        ``recover=True`` the safe recovery checklist (types 1-5) is executed
-        before the clean guard; any remainder fails closed with a structured
-        ``BROKEN`` diagnosis and the tree left untouched (type 6).
+        ``recover=True`` the safe recovery checklist (types 1-5) is classified
+        *before* any mutation is applied; only when no unattributable residue
+        remains are the recoverable actions executed, and any remainder fails
+        closed with a structured ``BROKEN`` diagnosis and the tree left
+        untouched (type 6).
+
+        With an ``idempotency_key`` the completed recovery is recorded as a
+        governed mutation claim so an identical retry replays the recorded
+        response instead of re-executing quarantine moves, resets, or commits.
         """
         binding = self.get_binding(domain)
+        if idempotency_key is not None and binding.mutation_ledger is None:
+            raise ValueError(
+                "idempotency_key requires an opt-in SQLite mutation ledger"
+            )
         with repository_mutation_lock(binding.repo_root):
             self._validate_runtime_configuration(binding)
+            payload = {
+                "scope_prefixes": list(scope_prefixes or []),
+                "control_paths": list(control_paths or []),
+            }
+            if idempotency_key is not None:
+                replay = self._reconcile_replay(
+                    binding, idempotency_key, payload,
+                )
+                if replay is not None:
+                    return replay
             recovered: list[dict[str, Any]] = []
             if recover:
                 recovered = self._recover_governed_state(
@@ -270,47 +315,180 @@ class GovernedKernel:
             }
             if recover:
                 result["recovered"] = recovered
+            if idempotency_key is not None and recover:
+                result = self._record_reconcile_result(
+                    binding, idempotency_key, payload, result,
+                )
             return result
+
+    def _reconcile_replay(
+        self,
+        binding: DomainBinding,
+        idempotency_key: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return a previously committed reconcile response, if any."""
+        ledger = binding.mutation_ledger
+        if ledger is None:
+            return None
+        request_hash = self._request_hash(
+            binding.domain, "wf_reconcile", payload,
+        )
+        existing = ledger.lookup(
+            domain=binding.domain,
+            idempotency_key=idempotency_key,
+            op="wf_reconcile",
+            request_hash=request_hash,
+        )
+        if existing is None:
+            return None
+        if existing.state == "COMMITTED":
+            if existing.response is None:
+                raise self._unresolved_error(existing)
+            return copy.deepcopy(existing.response)
+        if existing.state != "ABORTED":
+            raise self._unresolved_error(existing)
+        return None
+
+    def _record_reconcile_result(
+        self,
+        binding: DomainBinding,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Record a completed reconcile as an idempotent governed mutation."""
+        ledger = binding.mutation_ledger
+        if ledger is None:
+            return result
+        request_hash = self._request_hash(
+            binding.domain, "wf_reconcile", payload,
+        )
+        base_sha = head_sha(binding.repo_root)
+        claim = ledger.claim(
+            domain=binding.domain,
+            op="wf_reconcile",
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            base_sha=base_sha,
+        )
+        record = claim.record
+        if not claim.created:
+            if record.state == "COMMITTED":
+                return copy.deepcopy(record.response or result)
+            raise self._unresolved_error(record)
+        changed_paths = sorted({
+            item.get("path")
+            for item in result.get("recovered", [])
+            if item.get("path")
+        })
+        ledger.prepare(
+            record.mutation_id,
+            result={"operation_result": result, "manifest_id": "wf_reconcile"},
+            changed_paths=changed_paths,
+            postimages={},
+        )
+        finalized = ledger.finalize(
+            record.mutation_id,
+            commit_sha=head_sha(binding.repo_root),
+            response=result,
+            verified_head=head_sha(binding.repo_root),
+        )
+        return finalized.response if finalized.response is not None else result
 
     @staticmethod
     def _under_scope(path: str, scope_prefixes: list[str] | None) -> bool:
+        """True only for an explicit, non-empty scope that contains ``path``."""
         if not scope_prefixes:
-            return True
+            return False
         for prefix in scope_prefixes:
             prefix = prefix.rstrip("/")
             if path == prefix or path.startswith(f"{prefix}/"):
                 return True
         return False
 
-    def _quarantine_untracked(self, binding: DomainBinding, path: str) -> str:
-        """Move one untracked file into the ignored runtime root and leave a
-        pointer record behind so the move is auditable and reversible."""
+    @staticmethod
+    def _is_artifact_class(path: str) -> bool:
+        """EK-4 artifact-class judgment for one repo-relative untracked path.
+
+        Only generated side-effect files are safe to auto-quarantine.  Primary
+        content stays for the governed commit path or an operator decision and
+        is therefore left untouched for the type-6 diagnosis.
+        """
+        parts = path.split("/")
+        if any(part in _ARTIFACT_DIR_SEGMENTS for part in parts[:-1]):
+            return True
+        name = parts[-1]
+        return any(name.endswith(suffix) for suffix in _ARTIFACT_SUFFIXES)
+
+    def _recovered_root_is_ignored(self, binding: DomainBinding) -> bool:
+        probe = os.path.join(self._recovered_root(binding), ".path-probe")
+        return is_path_ignored(binding.repo_root, probe)
+
+    def _quarantine_untracked(self, binding: DomainBinding, path: str) -> str | None:
+        """Move one untracked artifact into the ignored recovered root.
+
+        Returns the repo-relative destination on success, or ``None`` when the
+        recovered root is not an ignored runtime path (the caller then leaves
+        the file in place for the type-6 diagnosis instead of displacing it).
+        """
         repo = Path(binding.repo_root)
+        destination_root = Path(self._recovered_root(binding))
+        if not self._recovered_root_is_ignored(binding):
+            return None
+
         source = repo / path
-        destination_root = Path(
-            os.path.dirname(binding.manifest.manifests_dir)
-        ) / "recovered"
         digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
-        destination = destination_root / digest / source.name
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination_dir = destination_root / digest
+        destination_dir.mkdir(parents=True, exist_ok=True)
+
+        base_name = source.name
+        destination = destination_dir / base_name
+        suffix = 1
+        while destination.exists():
+            stem = Path(base_name).stem
+            ext = Path(base_name).suffix
+            destination = destination_dir / f"{stem}.{suffix}{ext}"
+            suffix += 1
+
+        moved_to = str(destination.relative_to(repo))
         shutil.move(str(source), str(destination))
 
         manifest_path = destination_root / "quarantine-manifest.json"
+        records = self._load_quarantine_manifest(manifest_path)
+        records.append({
+            "source": path,
+            "moved_to": moved_to,
+            "reason": "untracked-not-ignored-artifact-under-scope",
+        })
         try:
-            existing: list = []
-            if manifest_path.exists():
-                existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-            existing.append({
-                "source": path,
-                "moved_to": str(destination.relative_to(repo)),
-                "reason": "untracked-not-ignored-under-scope",
-            })
-            manifest_path.write_text(
-                json.dumps(existing, indent=2), encoding="utf-8",
-            )
+            self._write_quarantine_manifest(manifest_path, records)
+        except OSError as exc:
+            shutil.move(str(destination), str(source))
+            raise RollbackSafetyError(
+                f"cannot persist quarantine pointer for {path!r}"
+            ) from exc
+        return moved_to
+
+    @staticmethod
+    def _load_quarantine_manifest(manifest_path: Path) -> list:
+        if not manifest_path.exists():
+            return []
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            pass
-        return str(destination.relative_to(repo))
+            return []
+        return payload if isinstance(payload, list) else []
+
+    @staticmethod
+    def _write_quarantine_manifest(manifest_path: Path, records: list) -> None:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = manifest_path.with_name(f"{manifest_path.name}.tmp")
+        with temporary.open("wb") as output:
+            output.write(json.dumps(records, indent=2).encode("utf-8"))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(str(temporary), str(manifest_path))
 
     def _unrecoverable_scene_error(
         self,
@@ -319,7 +497,9 @@ class GovernedKernel:
         mutation_id: str | None = None,
         paths: list[str] | None = None,
     ) -> MutationBrokenError:
-        dirty = paths or self._enumerate_dirty_paths(binding)
+        dirty = list(paths) if paths is not None else self._enumerate_dirty_paths(binding)
+        if mutation_id is None:
+            mutation_id = self._attribute_mutation_id(binding, dirty)
         return MutationBrokenError(
             "governed reconciliation stopped: incompatible scene requires "
             "manual recovery",
@@ -339,6 +519,24 @@ class GovernedKernel:
             },
         )
 
+    def _attribute_mutation_id(
+        self,
+        binding: DomainBinding,
+        dirty: list[str],
+    ) -> str | None:
+        if binding.mutation_ledger is None:
+            return None
+        dirty_set = set(dirty)
+        fallback: str | None = None
+        for record in binding.mutation_ledger.list_unresolved():
+            if not (set(record.changed_paths) & dirty_set):
+                continue
+            if record.state == "BROKEN":
+                return record.mutation_id
+            if fallback is None:
+                fallback = record.mutation_id
+        return fallback
+
     def _enumerate_dirty_paths(self, binding: DomainBinding) -> list[str]:
         repo = binding.repo_root
         paths: list[str] = []
@@ -350,27 +548,19 @@ class GovernedKernel:
                 paths.append(path)
         return paths
 
-    def _recover_prepared_commits(self, binding: DomainBinding) -> list[str]:
-        """Type 2: resume PREPARED mutations whose worktree bytes match their
-        recorded postimages and whose commit never published."""
+    @staticmethod
+    def _prepared_records(binding: DomainBinding) -> list[Any]:
         ledger = binding.mutation_ledger
         if ledger is None:
             return []
-        resumed: list[str] = []
-        for record in ledger.list_by_states({"PREPARED"}):
-            if self._resume_prepared_commit(binding, record):
-                resumed.append(record.mutation_id)
-        return resumed
+        return ledger.list_by_states({"PREPARED"})
 
-    def _resume_prepared_commit(
+    def _prepared_commit_resumable(
         self,
         binding: DomainBinding,
         record: Any,
     ) -> bool:
         repo = binding.repo_root
-        ledger = binding.mutation_ledger
-        if ledger is None:
-            return False
         if find_commit_with_trailer(
             repo, "Katana-Mutation-Id", record.mutation_id,
         ) is not None:
@@ -383,15 +573,29 @@ class GovernedKernel:
                 image = read_worktree_image(repo, path)
                 if self._postimage_hash(image) != record.postimages.get(path):
                     return False
+            return True
+        except (RollbackSafetyError, KeyError, OSError):
+            return False
+
+    def _resume_prepared_commit(
+        self,
+        binding: DomainBinding,
+        record: Any,
+    ) -> bool:
+        if binding.mutation_ledger is None:
+            return False
+        if not self._prepared_commit_resumable(binding, record):
+            return False
+        try:
             message = self._receipt_commit_message(
                 f"chore({record.domain}): {record.op}",
                 record,
                 canonical_request_hash(record.result),
             )
             git_result = git_commit(
-                repo,
+                binding.repo_root,
                 message,
-                changed_paths,
+                list(record.changed_paths),
                 expected_base_sha=record.base_sha,
             )
             return bool(git_result.get("committed"))
@@ -405,42 +609,107 @@ class GovernedKernel:
         control_paths: list[str] | None,
     ) -> list[dict[str, Any]]:
         repo = binding.repo_root
-        recovered: list[dict[str, Any]] = []
+        allowances = self._runtime_state_allowances(binding)
+        controls = self._control_paths(binding, control_paths)
 
-        # Type 5: orphan `.git/index.lock` whose holder is already dead.
-        lock_path = orphan_index_lock_path(repo)
-        if lock_path:
-            os.unlink(lock_path)
-            recovered.append({"type": "orphan_index_lock", "path": ".git/index.lock"})
+        # Phase 1: read the blocking scene and classify *before* mutating.
+        changed, unexpected_ignored = governed_dirty_paths(
+            repo,
+            allowed_ignored_paths=allowances,
+            scope_prefixes=scope_prefixes,
+            control_paths=controls,
+        )
+        changed_set = set(changed)
+        tracked = set(tracked_modified_paths(repo))
+        staged = set(staged_paths(repo))
+        untracked = set(untracked_not_ignored_paths(repo))
 
-        # Type 2: resume prepared commits whose worktree matches postimages.
-        for mutation_id in self._recover_prepared_commits(binding):
-            recovered.append({
-                "type": "resume_commit",
-                "mutation_id": mutation_id,
-            })
+        blocked_tracked = sorted(changed_set & tracked)
+        blocked_staged_only = sorted((changed_set & staged) - tracked)
+        blocked_untracked = sorted(changed_set & untracked)
 
-        staged = staged_paths(repo)
-        tracked = tracked_modified_paths(repo)
-        untracked = untracked_not_ignored_paths(repo)
+        # Type 2: tracked dirt exactly matching a PREPARED postimage.
+        resumable_records = [
+            record for record in self._prepared_records(binding)
+            if self._prepared_commit_resumable(binding, record)
+        ]
+        resumable_paths = {
+            path for record in resumable_records for path in record.changed_paths
+        }
+        unrecoverable_tracked = sorted(
+            path for path in blocked_tracked if path not in resumable_paths
+        )
 
         # Type 3: index-only staged entry whose worktree matches HEAD.
-        for path in list(staged):
-            if path in tracked:
-                continue
+        recoverable_staged: list[str] = []
+        unrecoverable_staged: list[str] = []
+        for path in blocked_staged_only:
             if worktree_matches_head(repo, path):
-                unstage_paths(repo, [path])
+                recoverable_staged.append(path)
+            else:
+                unrecoverable_staged.append(path)
+
+        # Type 1: untracked artifact under an explicit scope with an ignored
+        # recovered root.  Non-artifact files and control-surface files are not
+        # auto-moved; they stay for the operator (type 6).
+        recoverable_untracked: list[str] = []
+        unrecoverable_untracked: list[str] = []
+        if (scope_prefixes and self._recovered_root_is_ignored(binding)):
+            for path in blocked_untracked:
+                if (
+                    self._under_scope(path, scope_prefixes)
+                    and self._is_artifact_class(path)
+                ):
+                    recoverable_untracked.append(path)
+                else:
+                    unrecoverable_untracked.append(path)
+        else:
+            unrecoverable_untracked = blocked_untracked
+
+        orphan_lock = orphan_index_lock_path(repo)
+        residue = sorted(
+            unrecoverable_tracked
+            + unrecoverable_staged
+            + unrecoverable_untracked
+            + list(unexpected_ignored)
+        )
+
+        # Type 6: refuse to touch a scene that will not reach a clean gate.
+        if residue:
+            raise self._unrecoverable_scene_error(binding, paths=residue)
+
+        recovered: list[dict[str, Any]] = []
+
+        # Type 5: the orphan .git/index.lock unblocks the primitives below.
+        if orphan_lock:
+            os.unlink(orphan_lock)
+            recovered.append({
+                "type": "orphan_index_lock",
+                "path": ".git/index.lock",
+            })
+
+        # Type 2: resume prepared commits whose worktree matches postimages.
+        for record in resumable_records:
+            if self._resume_prepared_commit(binding, record):
+                recovered.append({
+                    "type": "resume_commit",
+                    "mutation_id": record.mutation_id,
+                })
+
+        # Type 3: unstage index-only entries.
+        if recoverable_staged:
+            unstage_paths(repo, recoverable_staged)
+            for path in recoverable_staged:
                 recovered.append({"type": "index_only_staged", "path": path})
 
-        # Type 1: untracked-not-ignored under recovery scope -> quarantine.
-        for path in list(untracked):
-            if self._under_scope(path, scope_prefixes):
-                moved_to = self._quarantine_untracked(binding, path)
-                recovered.append({
-                    "type": "untracked_quarantined",
-                    "path": path,
-                    "moved_to": moved_to,
-                })
+        # Type 1: quarantine artifact-class untracked files.
+        for path in recoverable_untracked:
+            moved_to = self._quarantine_untracked(binding, path)
+            recovered.append({
+                "type": "untracked_quarantined",
+                "path": path,
+                "moved_to": moved_to,
+            })
 
         return recovered
 

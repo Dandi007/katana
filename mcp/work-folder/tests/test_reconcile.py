@@ -87,12 +87,15 @@ def test_fs_capabilities_echoes_wf_reconcile(env):
     assert "wf_reconcile" in capabilities["capabilities"]["operations"]
 
 
-def test_wf_reconcile_recovers_untracked_under_scope(env):
-    scratch = env.repo / env.folder_id / "scratch.txt"
-    scratch.write_text("scratch", encoding="utf-8")
-    assert "scratch.txt" in _porcelain(env.repo)
+def test_wf_reconcile_recovers_untracked_artifact_under_scope(env):
+    scratch = env.repo / env.folder_id / "artifacts" / "report.log"
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text("generated", encoding="utf-8")
+    assert "artifacts" in _porcelain(env.repo)
 
-    result = asyncio.run(server.wf_reconcile())
+    result = asyncio.run(
+        server.wf_reconcile(scope_prefixes=[env.folder_id]),
+    )
 
     assert result["ok"] is True
     assert any(
@@ -100,6 +103,56 @@ def test_wf_reconcile_recovers_untracked_under_scope(env):
         for item in result["recovered"]
     )
     assert _porcelain(env.repo) == ""
+    assert not scratch.exists()
+
+
+def test_wf_reconcile_leaves_non_artifact_for_operator(env):
+    scratch = env.repo / env.folder_id / "notes.md"
+    scratch.write_text("primary content", encoding="utf-8")
+    before = scratch.read_bytes()
+
+    result = asyncio.run(
+        server.wf_reconcile(scope_prefixes=[env.folder_id]),
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "BROKEN"
+    assert scratch.read_bytes() == before
+    assert "notes.md" in _porcelain(env.repo)
+
+
+def test_wf_reconcile_default_does_not_relocate_every_user_file(env):
+    scratch = env.repo / "root-notes.md"
+    scratch.write_text("ordinary file", encoding="utf-8")
+
+    result = asyncio.run(server.wf_reconcile())
+
+    assert result["ok"] is False
+    assert result["code"] == "BROKEN"
+    assert scratch.exists()
+
+
+def test_wf_reconcile_idempotency_key_replays(env):
+    scratch = env.repo / env.folder_id / "artifacts" / "report.log"
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text("generated", encoding="utf-8")
+
+    first = asyncio.run(
+        server.wf_reconcile(
+            scope_prefixes=[env.folder_id],
+            idempotency_key="wf-reconcile-once",
+        ),
+    )
+    assert first["ok"] is True
+
+    second = asyncio.run(
+        server.wf_reconcile(
+            scope_prefixes=[env.folder_id],
+            idempotency_key="wf-reconcile-once",
+        ),
+    )
+
+    assert second == first
     assert not scratch.exists()
 
 

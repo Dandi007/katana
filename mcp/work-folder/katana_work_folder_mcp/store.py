@@ -104,7 +104,7 @@ def _wf_policy() -> DomainPolicy:
     return DomainPolicy(
         domain="work-folder",
         allowed_ops={"wf_create", "wf_save", "wf_resume", "wf_reindex",
-            "wf_append_progress",
+            "wf_append_progress", "wf_reconcile",
             "fs_create", "fs_write", "fs_edit", "fs_copy", "fs_rename",
             "fs_delete", "fs_batch", "delete"},
         invariants=[_invariants],

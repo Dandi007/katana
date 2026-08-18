@@ -103,14 +103,15 @@ def _prepare_edit_record(kernel, binding, repo, ledger, content, manifest_id="m1
     return base, prepared
 
 
-def test_recover_type1_quarantines_untracked_under_scope(repo):
+def test_recover_type1_quarantines_artifact_class_under_scope(repo):
     kernel = _bind(repo)
-    untracked = os.path.join(repo, "scratch.txt")
+    untracked = os.path.join(repo, "folder-a", "artifacts", "scratch.log")
+    os.makedirs(os.path.dirname(untracked), exist_ok=True)
     with open(untracked, "w") as f:
-        f.write("scratch")
-    assert "scratch.txt" in _porcelain(repo)
+        f.write("generated scratch")
+    assert "folder-a" in _porcelain(repo)
 
-    result = kernel.reconcile("memory", recover=True)
+    result = kernel.reconcile("memory", recover=True, scope_prefixes=["folder-a"])
 
     assert "untracked_quarantined" in _types(result["recovered"])
     assert _porcelain(repo) == ""
@@ -118,6 +119,35 @@ def test_recover_type1_quarantines_untracked_under_scope(repo):
     # Quarantined under the ignored .katana runtime root with an audit pointer.
     recovered_root = os.path.join(repo, ".katana", "runtime", "recovered")
     assert os.path.exists(os.path.join(recovered_root, "quarantine-manifest.json"))
+
+
+def test_recover_type1_skips_non_artifact_untracked_under_scope(repo):
+    kernel = _bind(repo)
+    untracked = os.path.join(repo, "folder-a", "notes.md")
+    os.makedirs(os.path.dirname(untracked), exist_ok=True)
+    with open(untracked, "w") as f:
+        f.write("primary content")
+    before = open(untracked).read()
+
+    with pytest.raises(MutationBrokenError) as excinfo:
+        kernel.reconcile("memory", recover=True, scope_prefixes=["folder-a"])
+
+    assert excinfo.value.rollback.get("state") == "BROKEN"
+    assert "folder-a/notes.md" in excinfo.value.rollback.get("paths", [])
+    assert open(untracked).read() == before
+
+
+def test_recover_type1_requires_scope_does_not_relocate_default(repo):
+    kernel = _bind(repo)
+    untracked = os.path.join(repo, "scratch.txt")
+    with open(untracked, "w") as f:
+        f.write("ordinary user file")
+
+    with pytest.raises(MutationBrokenError) as excinfo:
+        kernel.reconcile("memory", recover=True)
+
+    assert "scratch.txt" in excinfo.value.rollback.get("paths", [])
+    assert os.path.exists(untracked)
 
 
 def test_recover_type2_resumes_prepared_commit(repo):
@@ -175,17 +205,45 @@ def test_recover_type4_finalizes_prepared_receipt_on_clean_tree(repo):
     assert ledger.list_by_states({"PENDING", "PREPARED"}) == []
 
 
-def test_recover_type5_removes_orphan_index_lock(repo):
+def test_recover_type5_removes_empty_orphan_index_lock(repo):
     kernel = _bind(repo)
     lock_path = os.path.join(repo, ".git", "index.lock")
-    with open(lock_path, "w") as f:
-        f.write("999999\n")
+    with open(lock_path, "wb") as f:
+        pass  # holder died before writing the replacement index
 
     result = kernel.reconcile("memory", recover=True)
 
     assert "orphan_index_lock" in _types(result["recovered"])
     assert not os.path.exists(lock_path)
     assert _porcelain(repo) == ""
+
+
+def test_recover_type5_removes_serialized_orphan_index_lock(repo):
+    kernel = _bind(repo)
+    # A fully serialized index left on the lock path — the holder died after
+    # writing but before the atomic rename (exactly what Git leaves behind).
+    index_path = os.path.join(repo, ".git", "index")
+    lock_path = os.path.join(repo, ".git", "index.lock")
+    with open(index_path, "rb") as src, open(lock_path, "wb") as dst:
+        dst.write(src.read())
+
+    result = kernel.reconcile("memory", recover=True)
+
+    assert "orphan_index_lock" in _types(result["recovered"])
+    assert not os.path.exists(lock_path)
+    assert _porcelain(repo) == ""
+
+
+def test_recover_type5_keeps_live_partial_lock(repo):
+    kernel = _bind(repo)
+    lock_path = os.path.join(repo, ".git", "index.lock")
+    with open(lock_path, "wb") as f:
+        f.write(b"DIRC")  # incomplete serialization: a live write in progress
+
+    result = kernel.reconcile("memory", recover=True)
+
+    assert "orphan_index_lock" not in _types(result["recovered"])
+    assert os.path.exists(lock_path)
 
 
 def test_recover_type6_unrecoverable_scene_fails_closed_without_touching_tree(repo):
@@ -213,3 +271,25 @@ def test_reconcile_verify_preserves_head_and_unresolved_keys(repo):
     assert result["head"] == head_sha(repo)
     assert result["unresolved"] == 0
     assert "recovered" not in result
+
+
+def test_reconcile_idempotency_key_replays_committed_response(repo):
+    kernel = _bind(repo)
+    untracked = os.path.join(repo, "folder-a", "artifacts", "scratch.log")
+    os.makedirs(os.path.dirname(untracked), exist_ok=True)
+    with open(untracked, "w") as f:
+        f.write("generated scratch")
+
+    kwargs = {
+        "recover": True,
+        "scope_prefixes": ["folder-a"],
+        "idempotency_key": "reconcile-once",
+    }
+    first = kernel.reconcile("memory", **kwargs)
+    assert "untracked_quarantined" in _types(first["recovered"])
+
+    # The scene is now clean, so a fresh reconcile would recover nothing; the
+    # idempotency replay must instead return the recorded first response.
+    second = kernel.reconcile("memory", **kwargs)
+    assert second == first
+    assert not os.path.exists(untracked)
