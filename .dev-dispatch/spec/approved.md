@@ -1,84 +1,70 @@
-# dev_katana_wf_verify_typing_01 —— work-folder 环境验证按资源类型判定，别把端点/记法当本地路径
+# SPEC EK-3 —— 错误上抛一致化 + 应用层结构化日志（spec 冻结稿）
 
-```
-development_id: dev_katana_wf_verify_typing_01
-status: ready-to-dispatch（先红证据已备）
-date: 2026-08-14
-repo: katana（单仓；本单不碰 goal-agent / agent-runtime）
-target_base: 由派发方按 katana 线分支实况定（本卷不代定）
-upstream: 考卷 C wf-9f3cfe 台账 G3
-先红证据: evidence/g3-red-20260814/（真机 echo，工装 ops/g3-red/probe.py）
-换号核对: dd attempts 无同名目录、三仓无同名 loopdev 分支（2026-08-13T18:0xZ 实核）
-```
+> 判据来源：`wf-caaeb6/evolution-backlog.md` EK-3（fs_* 吞 DirtyWorkTreeError 成 OPERATION_FAILED；wf_append_progress 反泄漏裸字符串；应用层零 logging）。
+> 交付仓：`Dandi007/katana`，**MR base 只许 `fix/governed-dirty-paths-diagnostic`@e3b6ac52c285e9c83b3f08c34cbe4c8f40fdb1a3，禁 main / 禁 katana-cutover 任何分支**（EK-0 钉死）。
+> 派单登记：`wf-caaeb6/dispatch-registry.md` §0/§1；dev 分支 `dd/katana/error-observability`。
+> 与 EK-1+EK-2 文件面**不交叠**（本单 work-folder 面 vs EK-1+EK-2 kernel 面），但同仓 base 均 = e3b6ac5 → 按本卷顺序在 EK-1+EK-2 之后发（spec 可先行冻结）。
+> 本 spec 由 coordinator 编写（wf-caaeb6 线）；实现与 review 全由 dev-dispatch 完成。
 
-## 1. 先红（真机实测，非推理）
+---
 
-`ops/g3-red/probe.py` 直接 import 生产同一份
-`katana/mcp/work-folder/katana_work_folder_mcp/verify.py`，在内存里喂四行样例表：
+## 0. 一句话
 
-```
-parse_context_paths 解析出 4 条资源：
-  name=反引号包裹的真实目录     path='`/data/work-records`'
-  name=dd Development MCP 端点  path='http://127.0.0.1:5606/mcp'
-  name=家目录记法               path='~/.claude'
-  name=裸真实目录（对照）        path='/data/work-records'
+同一真因 `DirtyWorkTreeError`，两个工具面两种行为：`fs_*` 的 `_mutation_error` isinstance 链漏收它 → 吞成通用 `OPERATION_FAILED`；`wf_append_progress` 的 except 链也没收它 → 反把裸字符串泄漏进响应；且全 work-folder + kernel 应用层零 `logging`，journald 只有 fastmcp access log。修复 = ①`_mutation_error` 补 `DirtyWorkTreeError`→`WORKTREE_DIRTY`（`_ERROR_CODES` 增码）+ `append_progress` except 链补齐 ②`_server_mutation` 收 `DirtyWorkTreeError`/`CASRejectionError` ③新增结构化 logger（mutation_id/commit_sha/op/domain/真因落 journald），实现「事务失败可归因」北极星。
 
-  反引号包裹的真实目录  -> BROKEN   路径不存在: `/data/work-records`
-  dd Development MCP 端点 -> BROKEN 路径不存在: http://127.0.0.1:5606/mcp
-  家目录记法            -> BROKEN   路径不存在: ~/.claude
-  裸真实目录（对照）     -> DRIFT    有未提交变更
+## 1. 现役基线（2026-08-18 真机，行号 = venv-wf-flat-e3b6ac5-r1 副本）
 
-overall_level = BROKEN
-G3-RED: CONFIRMED
-```
+- `mcp/work-folder/katana_work_folder_mcp/fs_tools.py`：
+  - `_ERROR_CODES`（L39-53）：无 `WORKTREE_DIRTY` 码。
+  - `_mutation_error`（L361-425）：isinstance 链收 `IdempotencyConflictError/CASRejectionError/MutationBrokenError/PolicyError/BatchError/ValueError`，**漏 `DirtyWorkTreeError`** → 落到 L419-425 通用 `OPERATION_FAILED "operation failed; inspect server-side logs"`。
+- `mcp/work-folder/katana_work_folder_mcp/store.py`：`append_progress`（L928-963）except 链（`IdempotencyConflictError/CASRejectionError/BriefError + ValueError`）**无 `DirtyWorkTreeError` 分支** → 未捕获 → 直抛给 fastmcp → 裸字符串「governed mutation rejected: repository has tracked, staged, or untracked changes within scope」泄漏进响应（12:22 journal 所见）。
+- `mcp/work-folder/katana_work_folder_mcp/server.py`：`_server_mutation`（L136-147）只收 `IdempotencyConflictError`/`MutationBrokenError`；`DirtyWorkTreeError`/`CASRejectionError` 未收 → 落到 fastmcp 打印 rich traceback，不落结构化日志。
+- 命令级证据：`grep -rn "import logging\|logging\." …/katana_work_folder_mcp …/katana_kernel`（排除 `audit_logger=` 参数）→ **0 命中**；`journalctl --user -u katana-work-folder-mcp --since 12:20 --until 12:27` 半落当刻仅 `INFO: … "POST /mcp HTTP/1.1" 200/202`，无 ref-publish / DirtyWorkTree 应用行。
 
-对照项判 DRIFT（而非 BROKEN）⇒ 探针不是恒红，红的确实是那三类。
+## 2. 变更契约（实现由 dd 落，此处冻结意图与边界）
 
-**断链定位（读码实核）**：`verify.py:79-101` 的 `parse_context_paths` 把表格第 2 列
-**原样**取出（只跳过空/`<` 开头/含"路径|地址"字样三种），`fs_git_probe`（:199）随即
-`os.path.exists(path)`。⇒ 反引号、URL、`~`、`repo:path` 一律被当成本地路径 stat。
+### 2.1 错误码一致化（`fs_tools.py`）
+- `_ERROR_CODES` 增 `WORKTREE_DIRTY`（含 retryable 语义：半落可经 reconcile 恢复 → retryable=true）。
+- `_mutation_error` isinstance 链增 `DirtyWorkTreeError`→ `WORKTREE_DIRTY`，message 含 scope/路径真因（非「inspect server-side logs」）。
 
-**后果（上游真机实证，本卷 backlog G3 已载）**：B 线泵 run `gdpump-20260813-211358-1a0446`
-第 7 轮 coordinator 调 `wf_resume` 得 `BROKEN` → 按「BROKEN 必停」契约裁 blocked → **整泵终局**。
-即：一张写得规范（带反引号）的 context 表，能把一条在跑的泵杀死。
+### 2.2 append_progress 收口（`store.py`）
+- `append_progress` except 链补 `DirtyWorkTreeError`，同因返回受控 envelope（`WORKTREE_DIRTY` + 路径/scope），**不再泄漏裸字符串**。与 fs_* 行为对齐（同一真因，同一 envelope 家族）。
 
-## 2. 变更契约（只动 katana work-folder MCP）
+### 2.3 server 面结构化日志（`server.py`）+ 可能 kernel
+- `_server_mutation` 收 `DirtyWorkTreeError` / `CASRejectionError`（不落 fastmcp traceback）。
+- 新增结构化 logger（`import logging`，journald 可见）：mutation_id、commit_sha、op、domain、异常真因（`DirtyWorkTreeError`/`update_ref`/error_code）。正常提交也留 `mutation_id`/`commit`（可归因闭环）。
+- 不改 kernel 代码（EK-1+EK-2 内核异常类型定义联动由其对侧实现，本单只在 work-folder 面映射；若 dd 判断需 kernel 加一个可注入 logger 传参，属本单文件面外的加法，须在返工说明里落档并走 review）。
 
-**2.1 资源分型.** `parse_context_paths` 产出的 `Resource` 增加类型判定（实现形态由实施方裁定）：
-- `local-path`：以 `/` 或 `./` 开头，或 `~` 开头（**须先 `expanduser`**）→ 走今天的 fs/git 探测；
-- `endpoint`：`http://`、`https://`、`ws://` 等 scheme → **不 stat**；探活与否见 2.3；
-- `repo-ref`：`repo:path` 一类记法 → 不 stat，标记为 client-verified；
-- `unknown`：其余 → 不 stat，判 `INFO`，**不得**因它把 overall 拉成 BROKEN。
+### 2.4 非目标 / 明确不碰
+- 不改 kernel 事务可靠性 / reconcile / scope 机制（EK-1+EK-2 面）；不改 manifest/ledger schema；不改既有 tool 语义（只改错误 envelope 与日志面）。
+- 生产数据仓零触碰；复现与验收全在副本仓 / 候选工作区。
 
-**2.2 装饰字符归一.** 第 2 列先剥 markdown 装饰再判类型：成对反引号、加粗 `**`、行内链接
-`[text](path)` 取 path。**这条是先红里最致命的一条**——写法规范反而被判死。
+## 3. 三服务恢复预案（同 EK-1+EK-2 模板，命令级）
 
-**2.3 端点探活是可选项，不是默认.** 默认只标 `endpoint` 不探活；若实现探活，必须
-超时 ≤2s、失败只降级为 `DRIFT`，**不得**产生 `BROKEN`（网络抖动不该杀泵）。
+> 本单触 work-folder 面，但 kernel 若被 dd 判需加 logger 传参则波及三服务；回滚预案同 EK-1+EK-2：`systemctl --user restart katana-{work-folder,memory,wiki}-mcp` + 逐服务最小探针 + 运行 commit 自证回基线 e3b6ac5。**只重启本卷测试实例，不重启他线在跑泵。**
 
-**2.4 overall 语义收窄.** `overall_level` 只由 `local-path` 类资源的 verdict 决定；
-其余类型最多贡献 `DRIFT`。**`BROKEN` 必须意味着「卷内声明的本地路径真的不在」**。
+## 4. 冻结的机器可验收命令（逐字收录自 backlog EK-3）
 
-**2.5 非目标.** 不动 `wf_resume` 的对外契约与返回结构；不动 guard-scope（G1/katana#116）；
-不改 context.md 的书写规范去迁就实现（**修实现，不是修所有卷的文档**）。
+1. 半落副本仓上 `fs_edit` → 响应 `code=="WORKTREE_DIRTY"` 且 message 含路径/scope（**非** OPERATION_FAILED）；`wf_append_progress` 同因响应同为受控 envelope（**非**泄漏裸字符串）。
+2. 触发一次 mutation 失败 → `journalctl --user -u katana-work-folder-mcp --since <t>` 命中结构化行（含 `mutation_id=<hex>` + 异常真因关键字 `DirtyWorkTreeError`/`update_ref`）。
+3. 反例：正常提交也在 journald 留 `mutation_id`/`commit`（可归因闭环）。
+4. 全仓 `bash mcp/run-tests.sh` → EXIT=0（含 dd 新增的错误码/日志回归测试，见 §5）。
 
-## 3. 验收标准（可机检）
+## 5. 实现者最小交付集（冻结，供 dd reviewer 对照）
 
-### 3.1 单测
-1. 反引号包裹的存在路径 → `MATCH`（先红为 BROKEN）。
-2. `http(s)://` → 不调用 fs 探测（用 fake probe_fn 断言**未被调用**），且不产生 BROKEN。
-3. `~/<存在目录>` → expanduser 后 `MATCH`。
-4. 不存在的裸路径 → 仍 `BROKEN`（**回归护栏**：不能为了不误杀就永不判死）。
-5. 混合表 → `overall_level` 只受 local-path 影响。
+1. `mcp/work-folder/katana_work_folder_mcp/fs_tools.py`：`_ERROR_CODES` + `_mutation_error` 补 `WORKTREE_DIRTY`。
+2. `mcp/work-folder/katana_work_folder_mcp/store.py`：`append_progress` except 链补收口。
+3. `mcp/work-folder/katana_work_folder_mcp/server.py`：`_server_mutation` 收新异常 + 结构化 logger。
+4. 回归测试：`mcp/work-folder/tests/`（错误码映射 + envelope 一致性 + journald 结构化行）。
+5. （若 dd 判定需 kernel logger 传参）返工说明落档 + review，三服务回滚预案随附。
 
-### 3.2 真机后绿（同一工装）
-`python3 ops/g3-red/probe.py` 重跑，末行须变成 `G3-RED: NOT_CONFIRMED`（先红三条转 MATCH/INFO）。
-> 该工装是**先红/后绿同一份**，判据方向相反即可，勿另写一份。
+## 6. 宪法检查（loop-engine constitution 逐条）
 
-### 3.3 回归
-B 卷 `wf-3c3dba` 迁去 `env-host.md` 的宿主资源表可迁回 context.md 而不再触发 BROKEN
-（属观察项，不作通过条件——迁回与否是那一卷的事）。
+- **Article I（Admission completeness）**：验收 `bash mcp/run-tests.sh` 自足跑通——满足。
+- **Article II（Total progress）**：错误被吞成 OPERATION_FAILED 使失败不可归因 → 本单让失败显式化为可重试 `WORKTREE_DIRTY`，消除「不可归因」的隐性自锁——满足（方向 3）。
+- **Article IV（Integrity fail-closed）**：不改 CAS/校验，只改错误面与日志面——满足。
+- **Article V（Test-reality parity）**：journald 结构化行回归用真实触发，非伪造——满足。
 
-## 4. 交付边界
-代码与 code review **全部走 dev-dispatch**。本 worker 只产出本 spec、先红证据与 `ops/g3-red/` 工装。
-**入队次序与授权不在本卷自决**：katana 仓不在授权硬线 1 的两仓之内，派发前需上游拍板（见 questions Q6-1）。
+## 7. 状态
+
+🔼 spec 已冻结（2026-08-18，wf-caaeb6）。梳理 digest 由派发轮复算落档 spec-digest-ledger；dev 分支 `dd/katana/error-observability`；base 见 §头。发单顺序在 EK-1+EK-2 之后。
