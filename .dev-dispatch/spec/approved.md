@@ -1,70 +1,63 @@
-# SPEC EK-3 —— 错误上抛一致化 + 应用层结构化日志（spec 冻结稿）
+# SPEC EK-4 —— audit-evidence 高频大体积产物落点收敛：进 runtime root、仓内留引用（spec 冻结稿）
 
-> 判据来源：`wf-caaeb6/evolution-backlog.md` EK-3（fs_* 吞 DirtyWorkTreeError 成 OPERATION_FAILED；wf_append_progress 反泄漏裸字符串；应用层零 logging）。
+> 判据来源：`wf-caaeb6/evolution-backlog.md` EK-4（24 份 / 161KB audit-evidence 误进 data repo，与 SOP wf-77510c 落点判据相悖，且 `audit-evidence-r15.md` 恰是 12:21 半落两件产物之一）。
 > 交付仓：`Dandi007/katana`，**MR base 只许 `fix/governed-dirty-paths-diagnostic`@e3b6ac52c285e9c83b3f08c34cbe4c8f40fdb1a3，禁 main / 禁 katana-cutover 任何分支**（EK-0 钉死）。
-> 派单登记：`wf-caaeb6/dispatch-registry.md` §0/§1；dev 分支 `dd/katana/error-observability`。
-> 与 EK-1+EK-2 文件面**不交叠**（本单 work-folder 面 vs EK-1+EK-2 kernel 面），但同仓 base 均 = e3b6ac5 → 按本卷顺序在 EK-1+EK-2 之后发（spec 可先行冻结）。
+> 派单登记：`wf-caaeb6/dispatch-registry.md` §0/§1；dev 分支 `dd/katana/evidence-runtime`（下附判据先冻结）。
+> 与 EK-3 同 work-folder 面 → 串行（EK-3 后）；与 EK-1+EK-2（kernel 面）可并行备 spec。顺序：EK-1+EK-2 → EK-3 → EK-4。
 > 本 spec 由 coordinator 编写（wf-caaeb6 线）；实现与 review 全由 dev-dispatch 完成。
 
 ---
 
 ## 0. 一句话
 
-同一真因 `DirtyWorkTreeError`，两个工具面两种行为：`fs_*` 的 `_mutation_error` isinstance 链漏收它 → 吞成通用 `OPERATION_FAILED`；`wf_append_progress` 的 except 链也没收它 → 反把裸字符串泄漏进响应；且全 work-folder + kernel 应用层零 `logging`，journald 只有 fastmcp access log。修复 = ①`_mutation_error` 补 `DirtyWorkTreeError`→`WORKTREE_DIRTY`（`_ERROR_CODES` 增码）+ `append_progress` except 链补齐 ②`_server_mutation` 收 `DirtyWorkTreeError`/`CASRejectionError` ③新增结构化 logger（mutation_id/commit_sha/op/domain/真因落 journald），实现「事务失败可归因」北极星。
+`audit-evidence-r*.md`（dispatch/审计回显，销毁可重生）以受治理文件身份写进 folder 并入库——24 份 / 161KB 占用治理仓，且该类文件高写入频率放大半落暴露面（`audit-evidence-r15.md` = 半落两件产物之一）。SOP `wf-77510c/sop-mcp-write.md` 明确：高频/大体积/可重生产物 → runtime root 不进仓、仓里留引用（hash+结论）。runtime root `.katana/runtime/` 已存在且 `.gitignore` 已忽略，但**无面向 folder 的产物落点 MCP tool** → worker 只能写 folder（入库）。修复 = 新增产物写入口（落 runtime root、不经 git 事务、不进仓）+ 仓内留引用收口规约 + 既存 24 份移交判定。
 
-## 1. 现役基线（2026-08-18 真机，行号 = venv-wf-flat-e3b6ac5-r1 副本）
+## 1. 现役基线（2026-08-18 真机，命令级）
 
-- `mcp/work-folder/katana_work_folder_mcp/fs_tools.py`：
-  - `_ERROR_CODES`（L39-53）：无 `WORKTREE_DIRTY` 码。
-  - `_mutation_error`（L361-425）：isinstance 链收 `IdempotencyConflictError/CASRejectionError/MutationBrokenError/PolicyError/BatchError/ValueError`，**漏 `DirtyWorkTreeError`** → 落到 L419-425 通用 `OPERATION_FAILED "operation failed; inspect server-side logs"`。
-- `mcp/work-folder/katana_work_folder_mcp/store.py`：`append_progress`（L928-963）except 链（`IdempotencyConflictError/CASRejectionError/BriefError + ValueError`）**无 `DirtyWorkTreeError` 分支** → 未捕获 → 直抛给 fastmcp → 裸字符串「governed mutation rejected: repository has tracked, staged, or untracked changes within scope」泄漏进响应（12:22 journal 所见）。
-- `mcp/work-folder/katana_work_folder_mcp/server.py`：`_server_mutation`（L136-147）只收 `IdempotencyConflictError`/`MutationBrokenError`；`DirtyWorkTreeError`/`CASRejectionError` 未收 → 落到 fastmcp 打印 rich traceback，不落结构化日志。
-- 命令级证据：`grep -rn "import logging\|logging\." …/katana_work_folder_mcp …/katana_kernel`（排除 `audit_logger=` 参数）→ **0 命中**；`journalctl --user -u katana-work-folder-mcp --since 12:20 --until 12:27` 半落当刻仅 `INFO: … "POST /mcp HTTP/1.1" 200/202`，无 ref-publish / DirtyWorkTree 应用行。
+- `find <work-folder-root> -name 'audit-evidence*.md' | wc -l` → **24**；`… -printf '%s\n' | awk '{s+=$1}END{print s}'` → **161672**（wf-8ba0a6 15 份 / wf-23add3 8 份 / wf-d726aa 1 份）。
+- `<work-folder-root>/.gitignore` → 已含 `/.katana/runtime/`（runtime root 已忽略；runtime 内 359MB mutations.sqlite 未进仓，佐证 runtime root 不进 git 事务）。
+- SOP `wf-77510c/sop-mcp-write.md`「产物往哪放」表：高频/大体积/可重生产物 → runtime root 不进仓，仓里留引用（hash+结论）。
+- commit-msg hook 提示语同判据。
 
-## 2. 变更契约（实现由 dd 落，此处冻结意图与边界）
+## 2. 判据先冻结（dd 实现前需按此定稿移交清单）
 
-### 2.1 错误码一致化（`fs_tools.py`）
-- `_ERROR_CODES` 增 `WORKTREE_DIRTY`（含 retryable 语义：半落可经 reconcile 恢复 → retryable=true）。
-- `_mutation_error` isinstance 链增 `DirtyWorkTreeError`→ `WORKTREE_DIRTY`，message 含 scope/路径真因（非「inspect server-side logs」）。
+- **进 runtime root、不进仓的类别**：`audit-evidence-*.md`（dispatch/审计回显，销毁可重生）；其它「高频/大体积/可重生」产物（evidence/**__pycache__**/trace 类，按 SOP wf-77510c 表核）。
+- **保留在仓的类别**：`goal.md`/`_brief.md`/`progress.md`/`evolution-backlog.md`/spec/登记/台账这类「治理事实、需版本化」的文档。
+- **既存 24 份处置**：`fs_rename`（或等价）从 folder 移入 `.katana/runtime/evidence/<wf-id>/`，仓内留引用文件（含 `sha256sum` + 一行为何重生/结论指针），一次性清扫 + 落 commit；不可直接删（避免破坏审计链，保留 runtime 原文 + 仓内指针）。
+- **新产物写入口**：新增 MCP tool（建议名 `wf_evidence_put` / `fs_put_artifact`，dd 定名），落 `.katana/runtime/evidence/<wf-id>/` 或等价 runtime root，不经 git 事务、不进仓，幂等；在 folder 内自动留引用文件（hash+结论）。
 
-### 2.2 append_progress 收口（`store.py`）
-- `append_progress` except 链补 `DirtyWorkTreeError`，同因返回受控 envelope（`WORKTREE_DIRTY` + 路径/scope），**不再泄漏裸字符串**。与 fs_* 行为对齐（同一真因，同一 envelope 家族）。
+## 3. 变更契约（实现由 dd 落，此处冻结意图与边界）
 
-### 2.3 server 面结构化日志（`server.py`）+ 可能 kernel
-- `_server_mutation` 收 `DirtyWorkTreeError` / `CASRejectionError`（不落 fastmcp traceback）。
-- 新增结构化 logger（`import logging`，journald 可见）：mutation_id、commit_sha、op、domain、异常真因（`DirtyWorkTreeError`/`update_ref`/error_code）。正常提交也留 `mutation_id`/`commit`（可归因闭环）。
-- 不改 kernel 代码（EK-1+EK-2 内核异常类型定义联动由其对侧实现，本单只在 work-folder 面映射；若 dd 判断需 kernel 加一个可注入 logger 传参，属本单文件面外的加法，须在返工说明里落档并走 review）。
+- **`mcp/work-folder/katana_work_folder_mcp/fs_tools.py` + `server.py`**：新增产物写入口 tool + `fs_capabilities` 回显；落点 `.katana/runtime/evidence/<wf-id>/`（runtime root），不经 governed git 事务（走 runtime state 写，参照 manifest/ledger 同门 runtime 路径）。
+- 引用文件收口规约：folder 内留 `audit-evidence-<t>.ref`（或 dd 定名），含 `sha256:<hex>` 指针 + 一行结论 + 原文 runtime 相对路径；体积从 161KB 收敛到指针级。
+- **不改 kernel**；不改 scope/reconcile/ledger schema；不改 manifest 语义。
+- 生产数据仓零直写：既存 24 份移交走 MCP governed 工具（本卷执行）或由 dd 实现提供工具后本卷执行，**不用 porcelain 绕道写**。
 
-### 2.4 非目标 / 明确不碰
-- 不改 kernel 事务可靠性 / reconcile / scope 机制（EK-1+EK-2 面）；不改 manifest/ledger schema；不改既有 tool 语义（只改错误 envelope 与日志面）。
-- 生产数据仓零触碰；复现与验收全在副本仓 / 候选工作区。
+## 4. 三服务恢复预案（同 EK-1+EK-2 模板，命令级）
 
-## 3. 三服务恢复预案（同 EK-1+EK-2 模板，命令级）
+> runtime root 写入口若走 kernel runtime state 路径，波及三服务仅「新增 tool 注册」，无 kernel 事务可靠性改动；回滚预案同 EK-1+EK-2：`systemctl --user restart katana-{work-folder,memory,wiki}-mcp` + 逐服务最小探针 + 运行 commit 自证回基线 e3b6ac5。**只重启本卷测试实例，不重启他线在跑泵。**
 
-> 本单触 work-folder 面，但 kernel 若被 dd 判需加 logger 传参则波及三服务；回滚预案同 EK-1+EK-2：`systemctl --user restart katana-{work-folder,memory,wiki}-mcp` + 逐服务最小探针 + 运行 commit 自证回基线 e3b6ac5。**只重启本卷测试实例，不重启他线在跑泵。**
+## 5. 冻结的机器可验收命令（逐字收录自 backlog EK-4）
 
-## 4. 冻结的机器可验收命令（逐字收录自 backlog EK-3）
+1. 观察窗内（`since <t0>`）：`find <work-folder-root> -name 'audit-evidence*.md' -newermt "<t0>" | wc -l` → **0**（无新增进仓），同时 `.katana/runtime/evidence/` 对应路径产物计数递增。
+2. `git log --oneline --since <t1> -- '**/audit-evidence*'` → 空（无该类别新 commit）。
+3. 引用完整性：folder 内引用文件可 `sha256sum` 复算出 runtime 产物 hash（仓留指针不留体积）。
+4. 全仓 `bash mcp/run-tests.sh` → EXIT=0（含 dd 新增落点回归测试）。
 
-1. 半落副本仓上 `fs_edit` → 响应 `code=="WORKTREE_DIRTY"` 且 message 含路径/scope（**非** OPERATION_FAILED）；`wf_append_progress` 同因响应同为受控 envelope（**非**泄漏裸字符串）。
-2. 触发一次 mutation 失败 → `journalctl --user -u katana-work-folder-mcp --since <t>` 命中结构化行（含 `mutation_id=<hex>` + 异常真因关键字 `DirtyWorkTreeError`/`update_ref`）。
-3. 反例：正常提交也在 journald 留 `mutation_id`/`commit`（可归因闭环）。
-4. 全仓 `bash mcp/run-tests.sh` → EXIT=0（含 dd 新增的错误码/日志回归测试，见 §5）。
+## 6. 实现者最小交付集（冻结，供 dd reviewer 对照）
 
-## 5. 实现者最小交付集（冻结，供 dd reviewer 对照）
+1. `mcp/work-folder/katana_work_folder_mcp/fs_tools.py` + `server.py`：新增产物写入口 tool + `fs_capabilities` 回显 + 引用文件收口。
+2. 既存 24 份移交判定 + 一次性清扫工具（或提供 tool 后由本卷执行）。移交动作归属 Ops（本卷自执行），**代码实现不代跑生产移交**。
+3. 回归测试：`mcp/work-folder/tests/`（产物落点不进 git 事务 + 引用 hash 复算）。
+4. 三服务回滚预案随附。
 
-1. `mcp/work-folder/katana_work_folder_mcp/fs_tools.py`：`_ERROR_CODES` + `_mutation_error` 补 `WORKTREE_DIRTY`。
-2. `mcp/work-folder/katana_work_folder_mcp/store.py`：`append_progress` except 链补收口。
-3. `mcp/work-folder/katana_work_folder_mcp/server.py`：`_server_mutation` 收新异常 + 结构化 logger。
-4. 回归测试：`mcp/work-folder/tests/`（错误码映射 + envelope 一致性 + journald 结构化行）。
-5. （若 dd 判定需 kernel logger 传参）返工说明落档 + review，三服务回滚预案随附。
-
-## 6. 宪法检查（loop-engine constitution 逐条）
+## 7. 宪法检查（loop-engine constitution 逐条）
 
 - **Article I（Admission completeness）**：验收 `bash mcp/run-tests.sh` 自足跑通——满足。
-- **Article II（Total progress）**：错误被吞成 OPERATION_FAILED 使失败不可归因 → 本单让失败显式化为可重试 `WORKTREE_DIRTY`，消除「不可归因」的隐性自锁——满足（方向 3）。
-- **Article IV（Integrity fail-closed）**：不改 CAS/校验，只改错误面与日志面——满足。
-- **Article V（Test-reality parity）**：journald 结构化行回归用真实触发，非伪造——满足。
+- **Article II（Total progress）**：audit-evidence 高写入频率放大半落暴露面 → 收敛到 runtime root 缩小半落窗口——满足（方向 2×3）。
+- **Article IV（Integrity fail-closed）**：不移/不删原文审计链，仓内留指针 + runtime 原文——满足。
+- **Article V（Test-reality parity）**：落点回归测试真实触发 runtime root 写，非伪造——满足。
 
-## 7. 状态
+## 8. 状态
 
-🔼 spec 已冻结（2026-08-18，wf-caaeb6）。梳理 digest 由派发轮复算落档 spec-digest-ledger；dev 分支 `dd/katana/error-observability`；base 见 §头。发单顺序在 EK-1+EK-2 之后。
+🔼 spec 已冻结（2026-08-18，wf-caaeb6）。digest 由派发轮复算落档 spec-digest-ledger；dev 分支 `dd/katana/evidence-runtime`；发单顺序在 EK-3 之后。
