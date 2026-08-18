@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+from pathlib import Path
 from typing import Any
 
 from katana_kernel import (
@@ -38,6 +39,13 @@ _MAX_FILE_SIZE = 1_000_000
 _EXCLUDE_PARTS = {".git", ".katana"}
 _CRITICAL_FILES = {"progress.md", "golden-order.md"}
 _GOVERNED_FILES = {"context.md", "CLAUDE.md", "AGENTS.md"}
+
+_EVIDENCE_RUNTIME_DIR = ".katana/runtime/evidence"
+_EVIDENCE_REF_DIR = "evidence"
+_DEFAULT_EVIDENCE_CONCLUSION = (
+    "dispatch/audit echo artifact; regenerable at runtime; committed only as a "
+    "hash pointer"
+)
 _ERROR_CODES = {
     "BASE_COMMIT_CONFLICT",
     "BINARY_CONTENT",
@@ -68,6 +76,30 @@ def _content_hash(content: str) -> str:
 
 def _bytes_hash(content: bytes) -> str:
     return "sha256:" + hashlib.sha256(content).hexdigest()
+
+
+def _evidence_runtime_rel(folder_id: str, filename: str) -> str:
+    return f"{_EVIDENCE_RUNTIME_DIR}/{folder_id}/{filename}"
+
+
+def _evidence_ref_filename(sha256_hex: str) -> str:
+    return f"{_EVIDENCE_REF_DIR}/{sha256_hex}.sha256"
+
+
+def _render_evidence_ref(
+    *,
+    sha256_hex: str,
+    folder_id: str,
+    filename: str,
+    runtime_path: str,
+    conclusion: str,
+) -> str:
+    return (
+        f"sha256:{sha256_hex}\n"
+        f"filename: {filename}\n"
+        f"runtime_path: {runtime_path}\n"
+        f"conclusion: {conclusion}\n"
+    )
 
 
 def _make_error(
@@ -729,6 +761,14 @@ class FSTools:
                     "idempotency_key + expected_base_commit + "
                     "expected_resource_revision"
                 ),
+                "evidence": {
+                    "tools": ["wf_evidence_put", "wf_evidence_migrate"],
+                    "landing": f"{_EVIDENCE_RUNTIME_DIR}/<folder_id>/<filename>",
+                    "reference": (
+                        "<folder_id>/" + _evidence_ref_filename("<sha256>")
+                    ),
+                    "git": "runtime-only; never committed",
+                },
             },
         )
 
@@ -1610,6 +1650,324 @@ class FSTools:
             git=mutation.get("git"),
             mutation_id=_mutation_id(mutation),
         )
+
+    # -- Evidence runtime ---------------------------------------------------
+    #
+    # audit-evidence-*.md 属于「高频/大体积/销毁可重生」产物：原文落在
+    # runtime root（`.katana/runtime/evidence/<folder_id>/<filename>`，经
+    # `.gitignore` 忽略、绝不进 git 事务），folder 内只留含 sha256 指针 +
+    # 结论 + 原文 runtime 相对路径的引用文件。这样 161KB 的审计回显收敛为
+    # 指针级，且不破坏原文审计链（runtime 原文保留、仓内留指针）。
+    #
+
+    def _evidence_success(self, mutation: dict) -> dict:
+        sha256 = mutation.get("sha256")
+        result = _make_success(
+            folder_id=mutation.get("folder_id"),
+            filename=mutation.get("filename"),
+            node_type="file",
+            size=mutation.get("size"),
+            content_revision=mutation.get("content_revision") or sha256,
+            commit=(mutation.get("git") or {}).get("detail") or self._commit(),
+            git=mutation.get("git"),
+            mutation_id=_mutation_id(mutation),
+        )
+        result["reference_filename"] = mutation.get("reference_filename")
+        result["sha256"] = sha256
+        result["runtime_path"] = mutation.get("runtime_path")
+        result["conclusion"] = mutation.get("conclusion")
+        return result
+
+    def _validate_evidence_filename(self, folder_id: str, filename: str) -> dict | None:
+        filename_error = self._validate_filename(filename)
+        if filename_error:
+            return _make_error(
+                "INVALID_PATH",
+                filename_error,
+                folder_id=folder_id,
+                filename=filename,
+                current_commit=self._commit(),
+            )
+        if filename == BRIEF_NAME or _basename(filename) in (
+            _CRITICAL_FILES | _GOVERNED_FILES
+        ):
+            return _make_error(
+                "POLICY_VIOLATION",
+                "lifecycle-managed files are not runtime evidence artifacts",
+                folder_id=folder_id,
+                filename=filename,
+                current_commit=self._commit(),
+            )
+        return None
+
+    def _evidence_put_write(
+        self,
+        binder,
+        args,
+        *,
+        folder_id: str,
+        filename: str,
+        data: bytes,
+        sha256_hex: str,
+        reference_filename: str,
+        runtime_rel: str,
+        ref_internal: str,
+        conclusion: str,
+        op: str,
+    ) -> dict:
+        runtime_abs = Path(self._repo_root) / runtime_rel
+        runtime_abs.parent.mkdir(parents=True, exist_ok=True)
+        runtime_abs.write_bytes(data)
+        ref_content = _render_evidence_ref(
+            sha256_hex=sha256_hex,
+            folder_id=folder_id,
+            filename=filename,
+            runtime_path=runtime_rel,
+            conclusion=conclusion,
+        )
+        binder.vfs.write(ref_internal, ref_content, op=op, args=args)
+        return {
+            "folder_id": folder_id,
+            "filename": filename,
+            "reference_filename": reference_filename,
+            "sha256": "sha256:" + sha256_hex,
+            "runtime_path": runtime_rel,
+            "conclusion": conclusion,
+            "size": len(data),
+            "content_revision": "sha256:" + sha256_hex,
+            "changed_paths": [ref_internal],
+        }
+
+    def wf_evidence_put(
+        self,
+        folder_id: str,
+        filename: str,
+        content: str,
+        conclusion: str | None = None,
+        expected_base_commit: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        args = {
+            "folder_id": folder_id,
+            "filename": filename,
+            "content": content,
+            "conclusion": conclusion,
+        }
+        if idem_error := self._check_idempotency(idempotency_key):
+            return idem_error
+        try:
+            replay = self._replay("wf_evidence_put", args, idempotency_key)
+        except Exception as exc:
+            return self._mutation_error(
+                exc,
+                folder_id=folder_id,
+                filename=filename,
+                expected_base_commit=expected_base_commit,
+            )
+        if replay is not None:
+            return self._evidence_success(replay)
+
+        _, error = self._validate_folder(folder_id)
+        if error:
+            return error
+        if filename_error := self._validate_evidence_filename(folder_id, filename):
+            return filename_error
+        if not isinstance(content, str) or not content:
+            return _make_error(
+                "INVALID_CONTENT",
+                "content must be a non-empty string",
+                folder_id=folder_id,
+                filename=filename,
+                current_commit=self._commit(),
+            )
+
+        data = content.encode("utf-8")
+        sha256_hex = hashlib.sha256(data).hexdigest()
+        runtime_rel = _evidence_runtime_rel(folder_id, filename)
+        reference_filename = _evidence_ref_filename(sha256_hex)
+        ref_internal = f"{folder_id}/{reference_filename}"
+        conclusion = conclusion or _DEFAULT_EVIDENCE_CONCLUSION
+
+        def write(binding, args):
+            return self._evidence_put_write(
+                binding,
+                args,
+                folder_id=folder_id,
+                filename=filename,
+                data=data,
+                sha256_hex=sha256_hex,
+                reference_filename=reference_filename,
+                runtime_rel=runtime_rel,
+                ref_internal=ref_internal,
+                conclusion=conclusion,
+                op="wf_evidence_put",
+            )
+
+        try:
+            mutation = self._call_mutate(
+                "wf_evidence_put",
+                args,
+                write,
+                expected_base_commit,
+                f"chore(wf): evidence pointer {folder_id}:{filename}",
+                idempotency_key=idempotency_key,
+                idempotency_payload=args,
+                **self._folder_scope(folder_id),
+            )
+        except Exception as exc:
+            return self._mutation_error(
+                exc,
+                folder_id=folder_id,
+                filename=filename,
+                expected_base_commit=expected_base_commit,
+            )
+        return self._evidence_success(mutation)
+
+    def wf_evidence_migrate(
+        self,
+        folder_id: str,
+        dry_run: bool = False,
+        expected_base_commit: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        args = {"folder_id": folder_id, "dry_run": dry_run}
+        if idem_error := self._check_idempotency(idempotency_key):
+            return idem_error
+        try:
+            replay = self._replay("wf_evidence_migrate", args, idempotency_key)
+        except Exception as exc:
+            return self._mutation_error(
+                exc,
+                folder_id=folder_id,
+                filename=None,
+                expected_base_commit=expected_base_commit,
+            )
+        if replay is not None:
+            replay_result = _make_success(
+                folder_id=replay.get("folder_id", folder_id),
+                node_type="directory",
+                commit=(replay.get("git") or {}).get("detail") or self._commit(),
+                git=replay.get("git"),
+                mutation_id=_mutation_id(replay),
+            )
+            replay_result["migrated"] = replay.get("migrated", [])
+            return replay_result
+
+        _, error = self._validate_folder(folder_id)
+        if error:
+            return error
+        try:
+            matches = self._vfs.ls(f"{folder_id}/**/audit-evidence*", include_hidden=True)
+        except VFSError:
+            return _make_error(
+                "INVALID_PATH",
+                "unable to list evidence files",
+                folder_id=folder_id,
+                current_commit=self._commit(),
+            )
+
+        plan: list[dict[str, Any]] = []
+        for internal in sorted(matches):
+            filename = internal[len(folder_id) + 1 :]
+            data = self._vfs.read_bytes(internal)
+            sha256_hex = hashlib.sha256(data).hexdigest()
+            runtime_rel = _evidence_runtime_rel(folder_id, filename)
+            reference_filename = _evidence_ref_filename(sha256_hex)
+            plan.append(
+                {
+                    "folder_id": folder_id,
+                    "filename": filename,
+                    "sha256": "sha256:" + sha256_hex,
+                    "runtime_path": runtime_rel,
+                    "reference_filename": reference_filename,
+                    "size": len(data),
+                    "internal": internal,
+                    "ref_internal": f"{folder_id}/{reference_filename}",
+                    "data": data,
+                }
+            )
+
+        if dry_run:
+            preview = [
+                {key: value for key, value in item.items() if key not in
+                 ("internal", "ref_internal", "data")}
+                for item in plan
+            ]
+            result = _make_success(
+                folder_id=folder_id,
+                node_type="directory",
+                commit=self._commit(),
+            )
+            result["migrated"] = preview
+            result["dry_run"] = True
+            return result
+
+        def write(binding, args):
+            changed: list[str] = []
+            migrated: list[dict[str, Any]] = []
+            for item in plan:
+                runtime_abs = Path(self._repo_root) / item["runtime_path"]
+                runtime_abs.parent.mkdir(parents=True, exist_ok=True)
+                runtime_abs.write_bytes(item["data"])
+                ref_content = _render_evidence_ref(
+                    sha256_hex=item["sha256"].removeprefix("sha256:"),
+                    folder_id=item["folder_id"],
+                    filename=item["filename"],
+                    runtime_path=item["runtime_path"],
+                    conclusion=_DEFAULT_EVIDENCE_CONCLUSION,
+                )
+                binding.vfs.write(
+                    item["ref_internal"],
+                    ref_content,
+                    op="wf_evidence_migrate",
+                    args=args,
+                )
+                binding.vfs.delete(
+                    item["internal"],
+                    op="wf_evidence_migrate",
+                    args=args,
+                )
+                changed.append(item["ref_internal"])
+                changed.append(item["internal"])
+                migrated.append(
+                    {
+                        "folder_id": item["folder_id"],
+                        "filename": item["filename"],
+                        "reference_filename": item["reference_filename"],
+                        "sha256": item["sha256"],
+                        "runtime_path": item["runtime_path"],
+                        "size": item["size"],
+                    }
+                )
+            return {"migrated": migrated, "changed_paths": changed}
+
+        try:
+            mutation = self._call_mutate(
+                "wf_evidence_migrate",
+                args,
+                write,
+                expected_base_commit,
+                f"chore(wf): migrate evidence {folder_id}",
+                idempotency_key=idempotency_key,
+                idempotency_payload={"folder_id": folder_id, "dry_run": False},
+                **self._folder_scope(folder_id),
+            )
+        except Exception as exc:
+            return self._mutation_error(
+                exc,
+                folder_id=folder_id,
+                filename=None,
+                expected_base_commit=expected_base_commit,
+            )
+        result = _make_success(
+            folder_id=folder_id,
+            node_type="directory",
+            commit=(mutation.get("git") or {}).get("detail") or self._commit(),
+            git=mutation.get("git"),
+            mutation_id=_mutation_id(mutation),
+        )
+        result["migrated"] = mutation.get("migrated", [])
+        return result
 
     # -- Batch -------------------------------------------------------------
 

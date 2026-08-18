@@ -106,13 +106,26 @@ def _wf_policy() -> DomainPolicy:
         elif op == "fs_batch":
             if not args.get("operations"):
                 raise PolicyViolationError("operations is required for fs_batch")
+        elif op == "wf_evidence_put":
+            if not args.get("folder_id") or not args.get("filename"):
+                raise PolicyViolationError(
+                    "folder_id and filename are required for wf_evidence_put"
+                )
+            if not args.get("content"):
+                raise PolicyViolationError("content is required for wf_evidence_put")
+        elif op == "wf_evidence_migrate":
+            if not args.get("folder_id"):
+                raise PolicyViolationError(
+                    "folder_id is required for wf_evidence_migrate"
+                )
 
     return DomainPolicy(
         domain="work-folder",
         allowed_ops={"wf_create", "wf_save", "wf_resume", "wf_reindex",
             "wf_append_progress",
             "fs_create", "fs_write", "fs_edit", "fs_copy", "fs_rename",
-            "fs_delete", "fs_batch", "delete"},
+            "fs_delete", "fs_batch", "delete",
+            "wf_evidence_put", "wf_evidence_migrate"},
         invariants=[_invariants],
     )
 

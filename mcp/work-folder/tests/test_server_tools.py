@@ -171,6 +171,8 @@ def test_registered_tools_have_id_only_surface():
         "fs_rename",
         "fs_delete",
         "fs_batch",
+        "wf_evidence_put",
+        "wf_evidence_migrate",
     } <= names
     assert "fs_glob" not in names
     assert list(inspect.signature(server.wf_save).parameters)[0] == "folder_id"

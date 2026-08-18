@@ -781,6 +781,46 @@ async def fs_batch(
     )
 
 
+@mcp.tool()
+async def wf_evidence_put(
+    folder_id: str,
+    filename: str,
+    content: str,
+    conclusion: str | None = None,
+    expected_base_commit: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict:
+    """将高频/大体积/可重生证据产物写入 runtime root，folder 内只留引用。"""
+    return _public_payload(
+        _require_fs_tools().wf_evidence_put(
+            folder_id,
+            filename,
+            content,
+            conclusion=conclusion,
+            expected_base_commit=expected_base_commit,
+            idempotency_key=idempotency_key,
+        )
+    )
+
+
+@mcp.tool()
+async def wf_evidence_migrate(
+    folder_id: str,
+    dry_run: bool = False,
+    expected_base_commit: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict:
+    """一次性把既存 audit-evidence*.md 移交到 runtime root 并留引用指针。"""
+    return _public_payload(
+        _require_fs_tools().wf_evidence_migrate(
+            folder_id,
+            dry_run=dry_run,
+            expected_base_commit=expected_base_commit,
+            idempotency_key=idempotency_key,
+        )
+    )
+
+
 def build_remote_app(
     repo_root: str,
     credential_registry,
