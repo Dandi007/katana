@@ -14,6 +14,7 @@ from typing import Any
 
 from katana_kernel import (
     CASRejectionError,
+    DirtyWorkTreeError,
     GovernedKernel,
     GovernedVFS,
     IdempotencyConflictError,
@@ -22,6 +23,7 @@ from katana_kernel import (
 )
 from katana_kernel.policy import PolicyViolationError
 from katana_kernel.vfs import VFSError
+from katana_work_folder_mcp import log_mutation
 from katana_work_folder_mcp.brief import (
     BRIEF_NAME,
     VALID_STATUS,
@@ -50,6 +52,7 @@ _ERROR_CODES = {
     "RESOURCE_NOT_FOUND",
     "RESOURCE_REPLACED",
     "REVISION_CONFLICT",
+    "WORKTREE_DIRTY",
 }
 
 
@@ -108,6 +111,24 @@ def _mutation_id(result: dict) -> str | None:
         value = manifest.get("manifest_id")
         return str(value) if value else None
     return None
+
+
+def _exception_error_code(exc: Exception) -> str:
+    if isinstance(exc, CASRejectionError):
+        return "BASE_COMMIT_CONFLICT"
+    if isinstance(exc, DirtyWorkTreeError):
+        return "WORKTREE_DIRTY"
+    if isinstance(exc, IdempotencyConflictError):
+        return "IDEMPOTENCY_CONFLICT"
+    if isinstance(exc, MutationBrokenError):
+        return "BROKEN"
+    if isinstance(exc, PolicyViolationError):
+        return "POLICY_VIOLATION"
+    if isinstance(exc, BatchOpError):
+        return exc.code
+    if isinstance(exc, ValueError):
+        return "INVALID_CONTENT"
+    return "OPERATION_FAILED"
 
 
 def _make_success(
@@ -311,20 +332,36 @@ class FSTools:
         scope_prefixes: list[str] | None = None,
         control_paths: list[str] | None = None,
     ) -> dict:
-        return self._kernel.mutate(
-            "work-folder",
+        try:
+            result = self._kernel.mutate(
+                "work-folder",
+                op,
+                args,
+                expected_base_sha=expected_base_commit,
+                write_fn=write_fn,
+                commit_msg=commit_msg,
+                idempotency_key=idempotency_key,
+                idempotency_payload=(
+                    idempotency_payload if idempotency_key is not None else None
+                ),
+                scope_prefixes=scope_prefixes,
+                control_paths=control_paths,
+            )
+        except Exception as exc:
+            log_mutation(
+                op,
+                error_code=_exception_error_code(exc),
+                error_type=type(exc).__name__,
+                detail=str(exc),
+            )
+            raise
+        git = result.get("git") if isinstance(result, dict) else None
+        log_mutation(
             op,
-            args,
-            expected_base_sha=expected_base_commit,
-            write_fn=write_fn,
-            commit_msg=commit_msg,
-            idempotency_key=idempotency_key,
-            idempotency_payload=(
-                idempotency_payload if idempotency_key is not None else None
-            ),
-            scope_prefixes=scope_prefixes,
-            control_paths=control_paths,
+            mutation_id=_mutation_id(result) if isinstance(result, dict) else None,
+            commit_sha=git.get("detail") if isinstance(git, dict) else None,
         )
+        return result
 
     def _folder_scope(
         self,
@@ -373,6 +410,21 @@ class FSTools:
                 folder_id=folder_id,
                 filename=filename,
                 expected_revision=expected_base_commit,
+                current_commit=self._commit(),
+                retryable=True,
+            )
+        if isinstance(exc, DirtyWorkTreeError):
+            scope = "/".join(
+                part for part in (folder_id, filename) if part
+            )
+            message = str(exc)
+            if scope:
+                message = f"{message} [scope: {scope}]"
+            return _make_error(
+                "WORKTREE_DIRTY",
+                message,
+                folder_id=folder_id,
+                filename=filename,
                 current_commit=self._commit(),
                 retryable=True,
             )

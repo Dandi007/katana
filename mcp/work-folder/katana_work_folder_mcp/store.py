@@ -13,10 +13,16 @@ import re
 import threading
 from dataclasses import asdict
 
-from katana_kernel import CASRejectionError, IdempotencyConflictError, head_sha
-from katana_kernel.kernel import GovernedKernel
+from katana_kernel import (
+    CASRejectionError,
+    DirtyWorkTreeError,
+    IdempotencyConflictError,
+    head_sha,
+)
+from katana_kernel.kernel import GovernedKernel, MutationBrokenError
 from katana_kernel.policy import DomainPolicy, PolicyViolationError
 from katana_work_folder_mcp import artifacts as _art
+from katana_work_folder_mcp import log_mutation
 from katana_work_folder_mcp import reindex as _reindex
 from katana_work_folder_mcp import verify as _ver
 from katana_work_folder_mcp.brief import BRIEF_NAME, BriefError, parse_brief, render_brief
@@ -163,6 +169,40 @@ def _append_error(
     return result
 
 
+def _exception_error_code(exc: Exception) -> str:
+    if isinstance(exc, CASRejectionError):
+        return "BASE_COMMIT_CONFLICT"
+    if isinstance(exc, DirtyWorkTreeError):
+        return "WORKTREE_DIRTY"
+    if isinstance(exc, IdempotencyConflictError):
+        return "IDEMPOTENCY_CONFLICT"
+    if isinstance(exc, MutationBrokenError):
+        return "BROKEN"
+    if isinstance(exc, PolicyViolationError):
+        return "POLICY_VIOLATION"
+    if isinstance(exc, (BriefError, ValueError)):
+        return "INVALID_CONTENT"
+    return "OPERATION_FAILED"
+
+
+def _result_mutation_id(result: dict) -> str | None:
+    value = result.get("mutation_id")
+    if value:
+        return str(value)
+    manifest = result.get("manifest")
+    if isinstance(manifest, dict):
+        value = manifest.get("manifest_id")
+        return str(value) if value else None
+    return None
+
+
+def _result_commit_sha(result: dict) -> str | None:
+    git = result.get("git")
+    if isinstance(git, dict):
+        return str(git.get("detail") or "") or None
+    return None
+
+
 def _append_fingerprint(
     folder_id: str,
     entry: str,
@@ -246,18 +286,33 @@ class WorkFolderStore:
         scope_prefixes: list[str] | None = None,
         control_paths: list[str] | None = None,
     ) -> dict:
-        return self._kernel.mutate(
-            "work-folder", op, args,
-            expected_base_sha=expected_base_sha,
-            write_fn=write_fn,
-            commit_msg=commit_msg,
-            idempotency_key=idempotency_key,
-            idempotency_payload=(
-                idempotency_payload if idempotency_key is not None else None
-            ),
-            scope_prefixes=scope_prefixes,
-            control_paths=control_paths,
+        try:
+            result = self._kernel.mutate(
+                "work-folder", op, args,
+                expected_base_sha=expected_base_sha,
+                write_fn=write_fn,
+                commit_msg=commit_msg,
+                idempotency_key=idempotency_key,
+                idempotency_payload=(
+                    idempotency_payload if idempotency_key is not None else None
+                ),
+                scope_prefixes=scope_prefixes,
+                control_paths=control_paths,
+            )
+        except Exception as exc:
+            log_mutation(
+                op,
+                error_code=_exception_error_code(exc),
+                error_type=type(exc).__name__,
+                detail=str(exc),
+            )
+            raise
+        log_mutation(
+            op,
+            mutation_id=_result_mutation_id(result),
+            commit_sha=_result_commit_sha(result),
         )
+        return result
 
     def _folder_scope(
         self,
@@ -948,6 +1003,15 @@ class WorkFolderStore:
                 return _append_error(
                     "BASE_COMMIT_CONFLICT",
                     "repository changed since expected base commit",
+                    folder_id=folder_id,
+                    source_session_id=source_session_id,
+                    retryable=True,
+                    commit=head_sha(self._binding.repo_root) or "",
+                )
+            except DirtyWorkTreeError as exc:
+                return _append_error(
+                    "WORKTREE_DIRTY",
+                    f"{exc} [scope: {folder_id}]",
                     folder_id=folder_id,
                     source_session_id=source_session_id,
                     retryable=True,

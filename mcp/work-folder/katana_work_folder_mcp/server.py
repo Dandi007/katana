@@ -10,7 +10,9 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import logging
 import os
+import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -18,6 +20,8 @@ from fastmcp import FastMCP
 
 from katana_kb_mcp_shared import config, vault_search
 from katana_kernel import (
+    CASRejectionError,
+    DirtyWorkTreeError,
     GovernedKernel,
     GovernedVFS,
     IdempotencyConflictError,
@@ -142,6 +146,20 @@ def _server_mutation(call, *, reconcile: bool = False) -> dict:
             "code": "IDEMPOTENCY_CONFLICT",
             "message": str(exc),
             "retryable": False,
+        }
+    except DirtyWorkTreeError as exc:
+        return {
+            "ok": False,
+            "code": "WORKTREE_DIRTY",
+            "message": _redact_string(str(exc)),
+            "retryable": True,
+        }
+    except CASRejectionError as exc:
+        return {
+            "ok": False,
+            "code": "BASE_COMMIT_CONFLICT",
+            "message": _redact_string(str(exc)),
+            "retryable": True,
         }
     except MutationBrokenError as exc:
         if reconcile:
@@ -352,9 +370,29 @@ def _validate_flat_index(kernel: GovernedKernel, root: str) -> None:
         raise ValueError("flat repository INDEX.md is stale")
 
 
+_APP_LOGGER_NAME = "katana_work_folder_mcp"
+
+
+def _configure_logging() -> None:
+    """Raise the app logger to INFO on stderr so mutation lines reach journald.
+
+    The app logger has no level of its own by default and inherits root's
+    WARNING default with no dedicated handler, which silently drops every
+    ``log_mutation`` INFO record before it is ever formatted. ``configure`` is
+    the single service entry point shared by ``main`` and ``build_remote_app``,
+    so installing the handler here covers the real service; keep it idempotent
+    because tests and repeated callers may invoke ``configure`` more than once.
+    """
+    logger = logging.getLogger(_APP_LOGGER_NAME)
+    logger.setLevel(logging.INFO)
+    if not any(isinstance(handler, logging.StreamHandler) for handler in logger.handlers):
+        logger.addHandler(logging.StreamHandler(sys.stderr))
+
+
 def configure(repo_root: str) -> None:
     """将 MCP 绑定到单一 existing Git data root。"""
     global _repo_root, _kernel, _store, _fs_tools
+    _configure_logging()
     root = _require_git_root(repo_root)
     _validate_flat_topology(root)
 
