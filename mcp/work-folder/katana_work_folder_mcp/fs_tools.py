@@ -658,6 +658,7 @@ class FSTools:
             capabilities={
                 "operations": [
                     "fs_capabilities",
+                    "wf_reconcile",
                     "fs_resolve",
                     "fs_stat",
                     "fs_list",

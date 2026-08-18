@@ -11,11 +11,15 @@ import dataclasses
 import hashlib
 import json
 import os
+import shutil
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from katana_kernel.gitops import (
+    BaseCommitConflictError,
     CASRejectionError,
+    DirtyWorkTreeError,
     FileImage,
     RollbackSafetyError,
     TransactionJournal,
@@ -29,13 +33,20 @@ from katana_kernel.gitops import (
     git_commit,
     head_sha,
     is_working_tree_clean,
+    orphan_index_lock_path,
     read_katana_commit_trailers,
+    read_worktree_image,
     repository_mutation_lock,
     require_exact_git_root,
     require_clean_working_tree,
+    staged_paths,
+    tracked_modified_paths,
+    unstage_paths,
+    untracked_not_ignored_paths,
     validate_runtime_state_paths,
     validate_runtime_state_tree,
     validate_transaction_paths,
+    worktree_matches_head,
 )
 from katana_kernel.idempotency import (
     MutationRecord,
@@ -156,7 +167,12 @@ class GovernedKernel:
         """Return the exact ignored runtime paths owned by this binding."""
         if binding.manifest.git_tracked:
             return []
-        allowances = [binding.manifest.manifests_dir]
+        allowances = [
+            binding.manifest.manifests_dir,
+            os.path.join(
+                os.path.dirname(binding.manifest.manifests_dir), "recovered",
+            ),
+        ]
         if binding.mutation_ledger is not None:
             ledger_path = binding.mutation_ledger.path
             allowances.extend(
@@ -195,20 +211,54 @@ class GovernedKernel:
         *,
         scope_prefixes: list[str] | None = None,
         control_paths: list[str] | None = None,
+        recover: bool = False,
     ) -> dict[str, Any]:
-        """Validate and reconcile one runtime binding before serving traffic."""
+        """Validate and reconcile one runtime binding before serving traffic.
+
+        With ``recover=False`` this is the legacy verify-only path: ``head`` and
+        ``unresolved`` keys are preserved and a dirty scene fails closed.  With
+        ``recover=True`` the safe recovery checklist (types 1-5) is executed
+        before the clean guard; any remainder fails closed with a structured
+        ``BROKEN`` diagnosis and the tree left untouched (type 6).
+        """
         binding = self.get_binding(domain)
         with repository_mutation_lock(binding.repo_root):
             self._validate_runtime_configuration(binding)
-            require_clean_working_tree(
-                binding.repo_root,
-                allowed_ignored_paths=self._runtime_state_allowances(binding),
-                scope_prefixes=scope_prefixes,
-                control_paths=self._control_paths(binding, control_paths),
-            )
+            recovered: list[dict[str, Any]] = []
+            if recover:
+                recovered = self._recover_governed_state(
+                    binding, scope_prefixes, control_paths,
+                )
+            try:
+                require_clean_working_tree(
+                    binding.repo_root,
+                    allowed_ignored_paths=self._runtime_state_allowances(binding),
+                    scope_prefixes=scope_prefixes,
+                    control_paths=self._control_paths(binding, control_paths),
+                )
+            except DirtyWorkTreeError as exc:
+                if not recover:
+                    raise
+                raise self._unrecoverable_scene_error(binding) from exc
             if binding.mutation_ledger is not None:
+                before_unresolved = {
+                    record.mutation_id: record.state
+                    for record in binding.mutation_ledger.list_unresolved()
+                }
                 self._reconcile_runtime_ledger(binding)
-            return {
+                if recover:
+                    for mutation_id, state in before_unresolved.items():
+                        resolved = (
+                            binding.mutation_ledger.get(mutation_id).state
+                            not in {"PENDING", "PREPARED", "BROKEN", "ORPHANED"}
+                        )
+                        if resolved:
+                            recovered.append({
+                                "type": "ledger_reconciled",
+                                "mutation_id": mutation_id,
+                                "from": state,
+                            })
+            result: dict[str, Any] = {
                 "ok": True,
                 "domain": domain,
                 "head": head_sha(binding.repo_root),
@@ -218,6 +268,181 @@ class GovernedKernel:
                     else 0
                 ),
             }
+            if recover:
+                result["recovered"] = recovered
+            return result
+
+    @staticmethod
+    def _under_scope(path: str, scope_prefixes: list[str] | None) -> bool:
+        if not scope_prefixes:
+            return True
+        for prefix in scope_prefixes:
+            prefix = prefix.rstrip("/")
+            if path == prefix or path.startswith(f"{prefix}/"):
+                return True
+        return False
+
+    def _quarantine_untracked(self, binding: DomainBinding, path: str) -> str:
+        """Move one untracked file into the ignored runtime root and leave a
+        pointer record behind so the move is auditable and reversible."""
+        repo = Path(binding.repo_root)
+        source = repo / path
+        destination_root = Path(
+            os.path.dirname(binding.manifest.manifests_dir)
+        ) / "recovered"
+        digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
+        destination = destination_root / digest / source.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(destination))
+
+        manifest_path = destination_root / "quarantine-manifest.json"
+        try:
+            existing: list = []
+            if manifest_path.exists():
+                existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            existing.append({
+                "source": path,
+                "moved_to": str(destination.relative_to(repo)),
+                "reason": "untracked-not-ignored-under-scope",
+            })
+            manifest_path.write_text(
+                json.dumps(existing, indent=2), encoding="utf-8",
+            )
+        except (OSError, json.JSONDecodeError):
+            pass
+        return str(destination.relative_to(repo))
+
+    def _unrecoverable_scene_error(
+        self,
+        binding: DomainBinding,
+        *,
+        mutation_id: str | None = None,
+        paths: list[str] | None = None,
+    ) -> MutationBrokenError:
+        dirty = paths or self._enumerate_dirty_paths(binding)
+        return MutationBrokenError(
+            "governed reconciliation stopped: incompatible scene requires "
+            "manual recovery",
+            {
+                "state": "BROKEN",
+                "mutation_id": mutation_id,
+                "paths": dirty,
+                "suggested_commands": [
+                    "git status --porcelain=v1 --no-renames",
+                    f"git diff -- {(' '.join(dirty)) if dirty else '.'}",
+                    "git log --oneline -5",
+                ],
+                "detail": (
+                    "residual tracked/untracked state could not be attributed "
+                    "to a safely recoverable transaction"
+                ),
+            },
+        )
+
+    def _enumerate_dirty_paths(self, binding: DomainBinding) -> list[str]:
+        repo = binding.repo_root
+        paths: list[str] = []
+        for path in untracked_not_ignored_paths(repo):
+            if path not in paths:
+                paths.append(path)
+        for path in tracked_modified_paths(repo):
+            if path not in paths:
+                paths.append(path)
+        return paths
+
+    def _recover_prepared_commits(self, binding: DomainBinding) -> list[str]:
+        """Type 2: resume PREPARED mutations whose worktree bytes match their
+        recorded postimages and whose commit never published."""
+        ledger = binding.mutation_ledger
+        if ledger is None:
+            return []
+        resumed: list[str] = []
+        for record in ledger.list_by_states({"PREPARED"}):
+            if self._resume_prepared_commit(binding, record):
+                resumed.append(record.mutation_id)
+        return resumed
+
+    def _resume_prepared_commit(
+        self,
+        binding: DomainBinding,
+        record: Any,
+    ) -> bool:
+        repo = binding.repo_root
+        ledger = binding.mutation_ledger
+        if ledger is None:
+            return False
+        if find_commit_with_trailer(
+            repo, "Katana-Mutation-Id", record.mutation_id,
+        ) is not None:
+            return False
+        changed_paths = list(record.changed_paths)
+        if not changed_paths:
+            return False
+        try:
+            for path in changed_paths:
+                image = read_worktree_image(repo, path)
+                if self._postimage_hash(image) != record.postimages.get(path):
+                    return False
+            message = self._receipt_commit_message(
+                f"chore({record.domain}): {record.op}",
+                record,
+                canonical_request_hash(record.result),
+            )
+            git_result = git_commit(
+                repo,
+                message,
+                changed_paths,
+                expected_base_sha=record.base_sha,
+            )
+            return bool(git_result.get("committed"))
+        except (RollbackSafetyError, KeyError, OSError):
+            return False
+
+    def _recover_governed_state(
+        self,
+        binding: DomainBinding,
+        scope_prefixes: list[str] | None,
+        control_paths: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        repo = binding.repo_root
+        recovered: list[dict[str, Any]] = []
+
+        # Type 5: orphan `.git/index.lock` whose holder is already dead.
+        lock_path = orphan_index_lock_path(repo)
+        if lock_path:
+            os.unlink(lock_path)
+            recovered.append({"type": "orphan_index_lock", "path": ".git/index.lock"})
+
+        # Type 2: resume prepared commits whose worktree matches postimages.
+        for mutation_id in self._recover_prepared_commits(binding):
+            recovered.append({
+                "type": "resume_commit",
+                "mutation_id": mutation_id,
+            })
+
+        staged = staged_paths(repo)
+        tracked = tracked_modified_paths(repo)
+        untracked = untracked_not_ignored_paths(repo)
+
+        # Type 3: index-only staged entry whose worktree matches HEAD.
+        for path in list(staged):
+            if path in tracked:
+                continue
+            if worktree_matches_head(repo, path):
+                unstage_paths(repo, [path])
+                recovered.append({"type": "index_only_staged", "path": path})
+
+        # Type 1: untracked-not-ignored under recovery scope -> quarantine.
+        for path in list(untracked):
+            if self._under_scope(path, scope_prefixes):
+                moved_to = self._quarantine_untracked(binding, path)
+                recovered.append({
+                    "type": "untracked_quarantined",
+                    "path": path,
+                    "moved_to": moved_to,
+                })
+
+        return recovered
 
     def replay_idempotent(
         self,
@@ -541,6 +766,33 @@ class GovernedKernel:
             if reconciled.state in {"BROKEN", "ORPHANED"}:
                 raise self._unresolved_error(reconciled)
 
+    def _handle_base_commit_conflict(
+        self,
+        binding: DomainBinding,
+        journal: TransactionJournal,
+        claim_record: MutationRecord | None,
+        git_result: dict[str, Any],
+    ) -> None:
+        """Restore a lost CAS race to a clean scene and signal a retryable loser.
+
+        The loser's transaction bytes are rolled back to HEAD's committed
+        images (rather than a BROKEN fail-stop), so the killed volume is never
+        locked by leftover uncommitted writes.  A caller receives a retryable
+        ``BaseCommitConflictError`` carrying the winner's head SHA.
+        """
+        rollback = journal.rollback_to_head()
+        self._record_failed_claim(binding, claim_record, rollback)
+        if rollback["state"] == "BROKEN":
+            raise MutationBrokenError(
+                "governed commit lost the CAS race but the scene could not be "
+                "restored; manual recovery required",
+                rollback,
+            )
+        raise BaseCommitConflictError(
+            git_result.get("detail") or "governed commit lost the CAS race",
+            head=git_result.get("head"),
+        )
+
     @staticmethod
     def _record_failed_claim(
         binding: DomainBinding,
@@ -817,6 +1069,13 @@ class GovernedKernel:
                 ) from exc
 
             if not git_result.get("committed"):
+                if git_result.get("code") == "BASE_COMMIT_CONFLICT":
+                    self._handle_base_commit_conflict(
+                        binding,
+                        journal,
+                        claim_record,
+                        git_result,
+                    )
                 rollback = journal.rollback()
                 self._record_failed_claim(
                     binding, claim_record, rollback,

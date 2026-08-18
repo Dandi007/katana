@@ -400,6 +400,39 @@ def _require_fs_tools() -> FSTools:
     return _fs_tools
 
 
+def _require_kernel() -> GovernedKernel:
+    if _kernel is None:
+        raise RuntimeError("work-folder store not initialized; call configure() first")
+    return _kernel
+
+
+def _reconcile_broken_envelope(exc: MutationBrokenError) -> dict:
+    """Return a redacted, structured BROKEN diagnosis for ``wf_reconcile``.
+
+    Physical repo roots are masked, but the mutation id, affected repo-relative
+    paths, and copy-paste recovery commands are preserved for an operator.
+    """
+    envelope = exc.as_error()
+    rollback = envelope.get("rollback") or {}
+    return {
+        "ok": False,
+        "code": "BROKEN",
+        "message": envelope.get("message"),
+        "manual_recovery_required": True,
+        "mutation_id": rollback.get("mutation_id"),
+        "diagnostics": {
+            "detail": _redact_string(str(rollback.get("detail") or "")),
+            "paths": [
+                _redact_string(str(path)) for path in (rollback.get("paths") or [])
+            ],
+            "suggested_commands": [
+                _redact_string(str(command))
+                for command in (rollback.get("suggested_commands") or [])
+            ],
+        },
+    }
+
+
 def _do_search(query: str, top_k: int) -> list[dict]:
     """先限定 Work Folder source，再把 locator 收敛为 ID + filename。"""
     if _repo_root is None:
@@ -548,6 +581,24 @@ async def wf_reindex(
             idempotency_key=idempotency_key,
         )
     )
+
+
+@mcp.tool()
+async def wf_reconcile(
+    scope_prefixes: list[str] | None = None,
+    control_paths: list[str] | None = None,
+) -> dict:
+    """执行 governed 状态的安全恢复清单，幂等；类型 6 保留 BROKEN 不动树。"""
+    try:
+        result = _require_kernel().reconcile(
+            "work-folder",
+            recover=True,
+            scope_prefixes=scope_prefixes,
+            control_paths=control_paths,
+        )
+        return _public_payload(result)
+    except MutationBrokenError as exc:
+        return _reconcile_broken_envelope(exc)
 
 
 @mcp.tool()
