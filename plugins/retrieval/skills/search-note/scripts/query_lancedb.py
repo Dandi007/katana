@@ -29,6 +29,12 @@ OPCODE_TABLE = "opencode_sessions"
 DEFAULT_OPCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_ZHIPU_EMBEDDING_MODEL = "embedding-3"
+# 2026-08-21 收束宪法二（所有 API 走 New API 网关 15722）：embedding 不再直连
+# open.bigmodel.cn。网关 asr group 的 channel 7 提供 embedding-3；端点与 key 变量
+# 都可用环境变量覆盖，便于离网/回滚。
+DEFAULT_ZHIPU_EMBEDDING_ENDPOINT = os.environ.get(
+    "ZHIPU_EMBEDDING_ENDPOINT", "http://127.0.0.1:15722/v1/embeddings"
+)
 DEFAULT_HTTP_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 DEFAULT_HTTP_EMBEDDING_ENDPOINT = "http://172.22.62.133:18081/v1/embeddings"
 DEFAULT_HTTP_EMBEDDING_API_KEY_ENV = "EMBEDDING_API_KEY"
@@ -155,7 +161,7 @@ def zhipu_query_embedding(query: str, *, api_key_env: str, model: str, dimension
         raise RuntimeError("Configured Zhipu API key environment variable is unset")
     body = json.dumps({"model": model, "input": query, "dimensions": dimensions}).encode("utf-8")
     request = urllib.request.Request(
-        "https://open.bigmodel.cn/api/paas/v4/embeddings",
+        DEFAULT_ZHIPU_EMBEDDING_ENDPOINT,
         data=body,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         method="POST",
@@ -510,7 +516,7 @@ def main() -> int:
     parser.add_argument("--embedding-backend", choices=["auto", "local", "zhipu", "http"], default="auto", help="Embedding backend for semantic query. Default: auto from manifest.")
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL, help="Embedding model for semantic vector search.")
     parser.add_argument("--dimensions", type=int, default=0, help="Embedding dimensions for zhipu semantic query. Default: manifest value or 1024.")
-    parser.add_argument("--zhipu-api-key-env", default="ZHIPU_API_KEY", help="Environment variable containing Zhipu API key.")
+    parser.add_argument("--zhipu-api-key-env", default="NEW_API_GATEWAY_TOKEN_ASR", help="Environment variable containing the embedding API key (default: New API gateway asr-group token).")
     parser.add_argument("--embedding-endpoint", default=DEFAULT_HTTP_EMBEDDING_ENDPOINT, help="HTTP embedding endpoint for --embedding-backend=http.")
     parser.add_argument("--embedding-api-key-env", default=DEFAULT_HTTP_EMBEDDING_API_KEY_ENV, help="Environment variable containing HTTP embedding API key.")
     parser.add_argument("--embedding-api-key-file", default=str(DEFAULT_HTTP_EMBEDDING_API_KEY_FILE), help="File containing HTTP embedding API key. Used when env is unset.")
