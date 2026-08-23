@@ -775,9 +775,19 @@ def build_remote_app(
 
 def main() -> None:
     repo_root = config.kb_root()
-    configure(repo_root)
     host = os.environ.get("KATANA_WORK_FOLDER_MCP_HOST", "127.0.0.1")
     port = int(os.environ.get("KATANA_WORK_FOLDER_MCP_PORT", "5602"))
+    creds = os.environ.get("KATANA_REMOTE_CREDENTIALS")
+    if creds:
+        import uvicorn
+
+        from katana_remote.credstore import load_registry
+        from katana_remote.runtime import audit_logger_from_env
+        app = build_remote_app(repo_root, load_registry(creds),
+                               audit_logger=audit_logger_from_env())
+        uvicorn.run(app, host=host, port=port)
+        return
+    configure(repo_root)
     mcp.run(transport="streamable-http", host=host, port=port)
 
 

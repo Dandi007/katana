@@ -413,9 +413,19 @@ def build_remote_app(
 def main() -> None:
     wiki_root = config.resolve("wiki_root", default=".", env_var="KATANA_WIKI_ROOT")
     kb = config.kb_root()
-    configure(wiki_root, kb)
     host = os.environ.get("KATANA_WIKI_MCP_HOST", "127.0.0.1")
     port = int(os.environ.get("KATANA_WIKI_MCP_PORT", "5601"))
+    creds = os.environ.get("KATANA_REMOTE_CREDENTIALS")
+    if creds:
+        import uvicorn
+
+        from katana_remote.credstore import load_registry
+        from katana_remote.runtime import audit_logger_from_env
+        app = build_remote_app(wiki_root, kb, load_registry(creds),
+                               audit_logger=audit_logger_from_env())
+        uvicorn.run(app, host=host, port=port)
+        return
+    configure(wiki_root, kb)
     mcp.run(transport="streamable-http", host=host, port=port)
 
 

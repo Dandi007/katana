@@ -41,9 +41,17 @@ from katana_remote.readiness import (
 )
 from katana_remote.audit import (
     AuditLogger,
+    FileAuditLogger,
     AuditEntry,
     audit_log,
     sanitize,
+)
+from katana_remote.credstore import (
+    ENV_CREDENTIALS,
+    generate_token,
+    load_entries,
+    load_registry,
+    save_entries,
 )
 from katana_remote.middleware import (
     AuthMiddleware,
@@ -83,9 +91,15 @@ __all__ = [
     "read_ready",
     "write_ready",
     "AuditLogger",
+    "FileAuditLogger",
     "AuditEntry",
     "audit_log",
     "sanitize",
+    "ENV_CREDENTIALS",
+    "generate_token",
+    "load_entries",
+    "load_registry",
+    "save_entries",
     "AuthMiddleware",
     "create_remote_app",
     "wrap_fastmcp",

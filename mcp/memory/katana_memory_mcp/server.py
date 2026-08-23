@@ -433,7 +433,15 @@ def main() -> None:
     data_root = _resolve_data_root()
     host = os.environ.get("KATANA_MEMORY_MCP_HOST", "127.0.0.1")
     port = int(os.environ.get("KATANA_MEMORY_MCP_PORT", "5605"))
-    uvicorn.run(build_app(data_root), host=host, port=port)
+    creds = os.environ.get("KATANA_REMOTE_CREDENTIALS")
+    if creds:
+        from katana_remote.credstore import load_registry
+        from katana_remote.runtime import audit_logger_from_env
+        app = build_remote_app(data_root, load_registry(creds),
+                               audit_logger=audit_logger_from_env())
+    else:
+        app = build_app(data_root)
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
