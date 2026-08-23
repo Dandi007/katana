@@ -9,8 +9,12 @@ full body in audit.
 
 from __future__ import annotations
 
+import json
+import os
 import time
 import uuid
+from dataclasses import asdict
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -83,6 +87,23 @@ def sanitize(data: dict[str, Any]) -> dict[str, Any]:
         else:
             result[k] = v
     return result
+
+
+class FileAuditLogger(AuditLogger):
+    """Append-only JSONL audit sink with a bounded in-memory tail for query()."""
+
+    def __init__(self, path: str | os.PathLike, memory_limit: int = 1000) -> None:
+        super().__init__()
+        self._path = Path(path)
+        self._memory_limit = memory_limit
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log(self, entry: AuditEntry) -> None:
+        super().log(entry)
+        if len(self._entries) > self._memory_limit:
+            del self._entries[: -self._memory_limit]
+        with open(self._path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(asdict(entry), ensure_ascii=False, default=str) + "\n")
 
 
 def audit_log(

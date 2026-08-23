@@ -143,6 +143,10 @@ class CredentialRegistry:
         self._entries[new_entry.token_hash] = new_entry
         return new_entry
 
+    def add_entry(self, entry: CredentialEntry) -> None:
+        """Insert a pre-hashed entry (e.g. loaded from a credstore file)."""
+        self._entries[entry.token_hash] = entry
+
     def get_entry(self, token: str) -> CredentialEntry | None:
         return self._entries.get(hash_token(token))
 
