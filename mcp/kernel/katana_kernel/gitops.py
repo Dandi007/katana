@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
+import base64
 import stat
 import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import fcntl
 from dataclasses import dataclass
@@ -714,11 +715,37 @@ def _reject_special_index_state(repo_root: str, path: str) -> None:
 class TransactionJournal:
     """Explicit touched-path journal with byte-exact pre/post images."""
 
-    def __init__(self, repo_root: str, base_sha: str):
+    def __init__(
+        self, repo_root: str, base_sha: str,
+        recovery_hook: Callable[[dict], None] | None = None,
+    ):
         self.repo_root = str(Path(repo_root).resolve())
         self.base_sha = base_sha
         self._preimages: dict[str, FileImage] = {}
         self._expected: dict[str, FileImage] = {}
+        self._recovery_hook = recovery_hook
+
+    @staticmethod
+    def _image_payload(image: FileImage) -> dict:
+        return {
+            "exists": image.exists,
+            "data": base64.b64encode(image.data).decode("ascii"),
+            "mode": image.mode,
+        }
+
+    def _persist(self) -> None:
+        if self._recovery_hook is not None:
+            self._recovery_hook({
+                "base_sha": self.base_sha,
+                "paths": {
+                    path: {
+                        "preimage": self._image_payload(preimage),
+                        "postimage": self._image_payload(self._expected[path]),
+                    }
+                    for path, preimage in self._preimages.items()
+                    if path in self._expected
+                },
+            })
 
     def _capture(self, path: str) -> str:
         normalized = _normalize_transaction_path(self.repo_root, path)
@@ -737,6 +764,7 @@ class TransactionJournal:
         preimage = self._preimages[normalized]
         expected_mode = mode or (preimage.mode if preimage.exists else 0o644)
         self._expected[normalized] = FileImage(True, bytes(data), expected_mode)
+        self._persist()
 
     def confirm_write(self, path: str, data: bytes) -> None:
         normalized = _normalize_transaction_path(self.repo_root, path)
@@ -746,10 +774,12 @@ class TransactionJournal:
                 f"transaction write postimage mismatch: {normalized!r}"
             )
         self._expected[normalized] = current
+        self._persist()
 
     def record_delete(self, path: str) -> None:
         normalized = self._capture(path)
         self._expected[normalized] = FileImage(False)
+        self._persist()
 
     def record_rename(self, old_path: str, new_path: str) -> None:
         old_normalized = self._capture(old_path)
@@ -761,6 +791,7 @@ class TransactionJournal:
             )
         self._expected[old_normalized] = FileImage(False)
         self._expected[new_normalized] = source
+        self._persist()
 
     def record_new_from_disk(self, path: str) -> None:
         normalized = _normalize_transaction_path(self.repo_root, path)
@@ -776,12 +807,14 @@ class TransactionJournal:
             )
         self._preimages[normalized] = FileImage(False)
         self._expected[normalized] = current
+        self._persist()
 
     def record_disk_state(self, path: str) -> None:
         normalized = self._capture(path)
         self._expected[normalized] = _read_file_image(
             self.repo_root, normalized,
         )
+        self._persist()
 
     @property
     def paths(self) -> list[str]:
