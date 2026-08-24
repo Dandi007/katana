@@ -6,6 +6,7 @@ Orchestrates the full governance chain:
 
 from __future__ import annotations
 
+import base64
 import copy
 import dataclasses
 import hashlib
@@ -21,6 +22,7 @@ from katana_kernel.gitops import (
     TransactionJournal,
     amend_commit,
     cas_guard,
+    changed_transaction_paths,
     commit_changed_paths,
     commit_file_image,
     commit_is_ancestor,
@@ -200,14 +202,16 @@ class GovernedKernel:
         binding = self.get_binding(domain)
         with repository_mutation_lock(binding.repo_root):
             self._validate_runtime_configuration(binding)
+            # A durable journal owns only its recorded paths and is reconciled
+            # before the ordinary dirty-tree guard rejects the repository.
+            if binding.mutation_ledger is not None:
+                self._reconcile_runtime_ledger(binding)
             require_clean_working_tree(
                 binding.repo_root,
                 allowed_ignored_paths=self._runtime_state_allowances(binding),
                 scope_prefixes=scope_prefixes,
                 control_paths=self._control_paths(binding, control_paths),
             )
-            if binding.mutation_ledger is not None:
-                self._reconcile_runtime_ledger(binding)
             return {
                 "ok": True,
                 "domain": domain,
@@ -405,6 +409,73 @@ class GovernedKernel:
         ledger = binding.mutation_ledger
         if ledger is None:
             return record
+        if record.state == "PENDING" and record.recovery:
+            recovery = record.recovery
+            entries = recovery.get("paths", {})
+            try:
+                from katana_kernel.gitops import _read_file_image
+
+                if (
+                    head_sha(binding.repo_root) != record.base_sha
+                    or not set(changed_transaction_paths(binding.repo_root)).issubset(entries)
+                ):
+                    raise RollbackSafetyError("recovery scene is no longer owned")
+
+                def decode(value: dict[str, Any]) -> FileImage:
+                    return FileImage(
+                        bool(value["exists"]),
+                        base64.b64decode(value["data"]), int(value["mode"]),
+                    )
+
+                expected = {
+                    path: decode(value["postimage"])
+                    for path, value in entries.items()
+                }
+                if entries and all(
+                    _read_file_image(binding.repo_root, path) == expected[path]
+                    for path in entries
+                ):
+                    committed = git_commit(
+                        binding.repo_root,
+                        f"chore({record.domain}): recover {record.op}",
+                        list(entries), expected_images=expected,
+                        expected_base_sha=record.base_sha,
+                    )
+                    if not committed.get("committed"):
+                        raise RollbackSafetyError(committed.get("detail", "recovery commit failed"))
+                    return ledger.mark_aborted(
+                        record.mutation_id,
+                        {"action": "resume", "commit_sha": committed["detail"]},
+                    )
+
+                preimages = {
+                    path: decode(value["preimage"])
+                    for path, value in entries.items()
+                }
+                if not all(
+                    _read_file_image(binding.repo_root, path)
+                    in {preimages[path], expected[path]}
+                    for path in entries
+                ):
+                    raise RollbackSafetyError("recovery images are not recognizable")
+                for path, value in entries.items():
+                    preimage = preimages[path]
+                    target = os.path.join(binding.repo_root, path)
+                    if preimage.exists:
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with open(target, "wb") as handle:
+                            handle.write(preimage.data)
+                        os.chmod(target, preimage.mode)
+                    elif os.path.exists(target):
+                        os.unlink(target)
+                return ledger.mark_aborted(
+                    record.mutation_id, {"action": "rollback", "paths": list(entries)},
+                )
+            except Exception as exc:
+                ledger.mark_broken(record.mutation_id, {
+                    "action": "fail-closed", "detail": str(exc),
+                })
+                raise self._unresolved_error(ledger.get(record.mutation_id)) from exc
         commit_sha = find_commit_with_trailer(
             binding.repo_root,
             "Katana-Mutation-Id",
@@ -677,23 +748,34 @@ class GovernedKernel:
             )
         validate_transaction_paths(binding.repo_root, [binding.ledger.path])
         self._validate_runtime_configuration(binding)
-        journal = TransactionJournal(binding.repo_root, base_sha)
-        binding.vfs.begin_transaction(journal)
         claim_record = None
-        try:
+        if binding.mutation_ledger is not None:
             if idempotency_key is not None:
                 claim = binding.mutation_ledger.claim(
-                    domain=domain,
-                    op=op,
-                    idempotency_key=idempotency_key,
-                    request_hash=request_hash,
-                    base_sha=base_sha,
+                    domain=domain, op=op, idempotency_key=idempotency_key,
+                    request_hash=request_hash, base_sha=base_sha,
                     folder_id=args.get("folder_id"),
                     source_session_id=args.get("source_session_id"),
                 )
                 claim_record = claim.record
                 if not claim.created:
                     raise self._unresolved_error(claim.record)
+            else:
+                claim_record = binding.mutation_ledger.claim_recovery(
+                    domain=domain, op=op, base_sha=base_sha,
+                )
+        journal = TransactionJournal(
+            binding.repo_root, base_sha,
+            (
+                lambda recovery: binding.mutation_ledger.persist_recovery(
+                    claim_record.mutation_id, recovery,
+                )
+                if binding.mutation_ledger is not None and claim_record is not None
+                else None
+            ),
+        )
+        binding.vfs.begin_transaction(journal)
+        try:
             try:
                 result = write_fn(binding=binding, args=args)
                 if not isinstance(result, dict):

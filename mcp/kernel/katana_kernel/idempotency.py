@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _UNRESOLVED_STATES = ("PENDING", "PREPARED", "BROKEN", "ORPHANED")
 
 
@@ -86,6 +86,7 @@ class MutationRecord:
     error: Any
     created_at: int
     updated_at: int
+    recovery: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,7 @@ class SQLiteMutationLedger:
                     commit_sha TEXT,
                     response_json TEXT,
                     error_json TEXT,
+                    recovery_json TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     UNIQUE(domain, key_hash)
@@ -187,6 +189,15 @@ class SQLiteMutationLedger:
                 """,
                 (str(_SCHEMA_VERSION),),
             )
+            # Existing runtime databases predate the crash journal column.
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(mutation_ledger)")
+            }
+            if "recovery_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE mutation_ledger ADD COLUMN recovery_json TEXT"
+                )
             connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             connection.commit()
         except Exception:
@@ -229,6 +240,7 @@ class SQLiteMutationLedger:
             error=_load_json(row["error_json"], None),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            recovery=_load_json(row["recovery_json"], None),
         )
 
     @staticmethod
@@ -323,6 +335,50 @@ class SQLiteMutationLedger:
                 )
 
             return MutationClaim(False, self._record(row))
+
+    def claim_recovery(
+        self, *, domain: str, op: str, base_sha: str,
+    ) -> MutationRecord:
+        """Create a durable claim for a mutation without a caller supplied key."""
+        mutation_id = str(uuid.uuid4())
+        now = time.time_ns()
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO mutation_ledger(
+                    mutation_id, domain, op, key_hash, request_hash, state,
+                    base_sha, attempt, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, 1, ?, ?)
+                """,
+                (
+                    mutation_id, domain, op,
+                    "internal:" + mutation_id,
+                    "internal:" + mutation_id,
+                    base_sha, now, now,
+                ),
+            )
+            return self._record(self._select(connection, mutation_id))
+
+    def persist_recovery(
+        self, mutation_id: str, recovery: dict[str, Any],
+    ) -> MutationRecord:
+        """Persist journal images before a filesystem write can become visible."""
+        now = time.time_ns()
+        with self._transaction() as connection:
+            current = self._select(connection, mutation_id)
+            if current["state"] not in {"PENDING", "PREPARED"}:
+                raise InvalidMutationTransitionError(
+                    f"cannot update recovery journal in {current['state']}"
+                )
+            connection.execute(
+                """
+                UPDATE mutation_ledger
+                SET recovery_json = ?, updated_at = ?
+                WHERE mutation_id = ?
+                """,
+                (_canonical_json(recovery), now, mutation_id),
+            )
+            return self._record(self._select(connection, mutation_id))
 
     def get(self, mutation_id: str) -> MutationRecord:
         connection = self._connect()
