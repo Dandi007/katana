@@ -7,6 +7,8 @@ description: GitLab 检索源。查 project/branch/MR/issue/CI/code search。gla
 
 优先通过 `glab` 访问公司 GitLab；当 `glab` 没有对应子命令、需要原始 API、或本机尚未完成 `glab` 认证时，再回退到 `glab api` / `curl`。
 
+**硬约束**：凡查询 GitLab 平台数据（MR / issue / pipeline / 成员 / code search 等），**必须走 glab 或 GitLab API**，不得转用本地 clone 的 git 操作（fetch / log / remote）替代——本地视角不完整且答非所问（2026-08 盘点实锤的绕过案例）。
+
 ## 认证（env-var-name 间接引用）
 
 token 和 host 均从 `.katana` 读取配置，**不在任何文件中硬编码 secret 值**。
@@ -139,7 +141,7 @@ curl -s --header "PRIVATE-TOKEN: $TOK" \
 
 ## 网络代理
 
-公司内网 GitLab 走本机 mihomo：`127.0.0.1:7897`。
+公司内网 GitLab 走本机 mihomo：`127.0.0.1:7897`。**不要把 glab / git 的代理直接固定到上游出口（如 `172.22.62.133:17897`）**——那会绕过本机 mihomo 的路由、fallback 与环境一致性。
 
 ```bash
 # 检查代理配置
