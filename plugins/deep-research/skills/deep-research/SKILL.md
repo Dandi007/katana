@@ -17,7 +17,7 @@ wiki MCP `fs_*`，不解析或暴露 client 上的知识库物理根。
 `deep_research_sources` 声明 KB 可用的命名信息源（飞书/GitLab/Linear/GitHub/任意），探索时 worker 可按线索性质检索这些源：
 
 ```
-deep_research_sources=feishu:/retrieval:feishu,gitlab:/retrieval:gitlab,linear:/retrieval:linear,github:/retrieval:github,reddit:/retrieval:reddit,web:/retrieval:web,code:/retrieval:code
+deep_research_sources=feishu:/retrieval:feishu,gitlab:/retrieval:gitlab,linear:/retrieval:linear,github:/retrieval:github,reddit:/retrieval:reddit,code:/retrieval:code
 ```
 
 - 格式：逗号分隔的 `name:entry` 对，每段按**第一个冒号**切分

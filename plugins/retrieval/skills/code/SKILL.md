@@ -11,7 +11,7 @@ description: 代码求真源。Use when 要确认代码入口/调用链/配置�
 
 1. **本地 code root 直读（主路）**：`$AGENT_CODE_ROOT/{third_party,self,company}/`，回退 `$AGENT_CODE_ROOT_FALLBACK/...`。操作前 `[ -n "$AGENT_CODE_ROOT" ] && [ -d "$AGENT_CODE_ROOT" ]` 判可用。
 2. 用户给的本地路径：先读其 `AGENTS.md`/`CLAUDE.md`。
-3. **本地没有 → 搜 repo**：经 /retrieval:github、/retrieval:gitlab、/retrieval:web 定位。
+3. **本地没有 → 搜 repo**：经 /retrieval:github、/retrieval:gitlab 或原生 WebSearch 定位。
 4. **自动 clone ingest（默认）**：搜到/需要但本地缺的 repo，**默认自动** `git clone` 到 `$AGENT_CODE_ROOT/<code_clone_category_default>/<repo>`（默认 third_party），再从本地读。非 opt-in。
 
 ## 约束
