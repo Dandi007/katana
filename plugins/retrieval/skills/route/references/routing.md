@@ -20,7 +20,7 @@
 |-------|------|
 | local_text | `/retrieval:search-note` |
 | code | `/retrieval:code` |
-| web | `/retrieval:web` |
+| web | 原生 `WebFetch`/`WebSearch`；JS 重/被墙站用 exa MCP，可信度封顶 medium（skill 已退役） |
 | feishu | `/retrieval:feishu` |
 | github | `/retrieval:github` |
 | gitlab | `/retrieval:gitlab` |

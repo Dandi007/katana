@@ -25,7 +25,7 @@ and chains fallbacks so you always get an answer.
 /retrieval:SOURCE
 ```
 
-示例：`/retrieval:web`、`/retrieval:github`、`/retrieval:search-note`
+示例：`/retrieval:github`、`/retrieval:search-note`、`/retrieval:feishu`
 
 不带 SOURCE 时触发 intent routing，自动选择最合适的适配器。
 
