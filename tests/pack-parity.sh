@@ -27,18 +27,17 @@ PKG="${WORK}/package"
 [ -d "$PKG" ] || fail "extracted package/ not found"
 
 # --- assert runtime assets actually shipped ---------------------------------
-[ -f "${PKG}/plugins/memory/hooks/scan-memory.awk" ] || fail "memory scanner not in package"
+[ -f "${PKG}/plugins/memory/hooks/session-start" ] || fail "memory session-start hook not in package"
 [ -f "${PKG}/plugins/work-folder/rules/work-folder.md" ] || fail "work-folder rules/ not in package"
 
-# --- memory hook must inject <memory-index> from the packed copy -------------
-echo "==> memory hook (from packed artifact)"
-mem_out="$(CLAUDE_MEMORY_SYSTEM_DIR="${ROOT}/plugins/memory/tests/fixtures/system" \
-           CLAUDE_MEMORY_PROJECT_DIR="${ROOT}/plugins/memory/tests/fixtures/project" \
+# --- memory hook must emit valid fallback JSON from the packed copy ----------
+# (memory 已 MCP 化：hook 查询 katana-memory-mcp，服务不可达时必须降级出合法 JSON)
+echo "==> memory hook (from packed artifact, service unreachable)"
+mem_out="$(KATANA_MEMORY_MCP_URL=http://127.0.0.1:1 \
            bash "${PKG}/plugins/memory/hooks/session-start" <<<'{"source":"startup"}')"
-case "$mem_out" in
-    *'<memory-index>'*) echo "   ok: memory injected <memory-index>" ;;
-    *) fail "memory hook produced no <memory-index> from packed artifact" ;;
-esac
+echo "$mem_out" | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'unavailable' in d['hookSpecificOutput']['additionalContext']" \
+    || fail "memory hook fallback JSON invalid from packed artifact"
+echo "   ok: memory hook emitted valid fallback JSON"
 
 # --- work-folder hook must inject its convention from the packed copy --------
 echo "==> work-folder hook (from packed artifact)"
