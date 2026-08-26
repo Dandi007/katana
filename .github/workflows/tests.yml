@@ -9,8 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: memory scanner byte-parity (golden)
-        run: bash plugins/memory/tests/scan-memory.test.sh
+      - name: memory hook fallback + kimi prompt hook regressions
+        # scan-memory 已随 memory MCP 化（#65）退役；现测 hook 降级路径与 kimi hook
+        run: |
+          bash plugins/memory/tests/session-start.test.sh
+          bash plugins/memory/tests/kimi-user-prompt-hook.test.sh
 
   pack-parity:
     # Guards the "published artifact is missing runtime assets" failure class:

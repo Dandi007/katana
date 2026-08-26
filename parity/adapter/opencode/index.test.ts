@@ -167,7 +167,9 @@ describe('KatanaParity adapter', () => {
     expect(output.parts[0].text).toBe('Response');
   });
 
-  test('handles tool.execute.after for Write', async () => {
+  test('tool.execute.after no-ops when postToolUse table is empty', async () => {
+    // fpa 退役（30bb6a7）后 table.json 的 postToolUse 为空：
+    // Write/Edit 的 after 事件必须干净 resolve 且不 spawn 任何 hook。
     const plugin = await KatanaParity({ directory: '/test/project' });
 
     await plugin['tool.execute.after'](
@@ -180,30 +182,7 @@ describe('KatanaParity adapter', () => {
       { output: 'File written' }
     );
 
-    // Should spawn fpa validation hook
-    expect(mockSpawn).toHaveBeenCalled();
-    const call = mockSpawn.mock.calls.find((c: any) =>
-      c[1][0].includes('validate_fpa.py')
-    );
-    expect(call).toBeDefined();
-    expect(call[0]).toBe('python3');
-  });
-
-  test('handles tool.execute.after for Edit', async () => {
-    const plugin = await KatanaParity({ directory: '/test/project' });
-
-    await plugin['tool.execute.after'](
-      {
-        tool: 'edit',
-        sessionID: 'test-session-123',
-        callID: 'call-1',
-        args: { filePath: '/test/file.md', oldString: 'old', newString: 'new' }
-      },
-      { output: 'File edited' }
-    );
-
-    // Should spawn fpa validation hook
-    expect(mockSpawn).toHaveBeenCalled();
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   test('ignores tool.execute.after for non-Write/Edit tools', async () => {
@@ -221,42 +200,6 @@ describe('KatanaParity adapter', () => {
 
     // Should not spawn fpa validation
     expect(mockSpawn).not.toHaveBeenCalled();
-  });
-
-  test('throws on fpa validation failure (exit code 2)', async () => {
-    const plugin = await KatanaParity({ directory: '/test/project' });
-
-    // Mock spawn to return exit code 2
-    mockSpawn.mockImplementation((cmd: string, args: string[], opts: any) => ({
-      stdout: { on: mock((event: string, cb: Function) => {
-        if (event === 'data') {
-          cb(Buffer.from('FPA validation failed'));
-        }
-      })},
-      stderr: { on: mock((event: string, cb: Function) => {
-        if (event === 'data') {
-          cb(Buffer.from('Missing required sections'));
-        }
-      })},
-      on: mock((event: string, cb: Function) => {
-        if (event === 'close') {
-          setTimeout(() => cb(2), 10);
-        }
-      }),
-      unref: mock()
-    }));
-
-    await expect(
-      plugin['tool.execute.after'](
-        {
-          tool: 'write',
-          sessionID: 'test-session-123',
-          callID: 'call-1',
-          args: { filePath: '/test/FPA-test.md', content: 'test' }
-        },
-        { output: 'File written' }
-      )
-    ).rejects.toThrow('Missing required sections');
   });
 
   test('respects KATANA_DISABLED_PLUGINS', async () => {
@@ -294,27 +237,4 @@ describe('KatanaParity adapter', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  test('converts camelCase args to snake_case', async () => {
-    const plugin = await KatanaParity({ directory: '/test/project' });
-
-    await plugin['tool.execute.after'](
-      {
-        tool: 'write',
-        sessionID: 'test-session-123',
-        callID: 'call-1',
-        args: { filePath: '/test/file.md', content: 'test' }
-      },
-      { output: 'File written' }
-    );
-
-    // Verify spawn was called with snake_case args
-    expect(mockSpawn).toHaveBeenCalled();
-    const call = mockSpawn.mock.calls[0];
-    const opts = call[2];
-    const stdinFd = opts.stdio[0];
-
-    // Read the temp file to verify payload
-    // (In real test, we'd mock fs.readFileSync or capture the payload differently)
-    expect(stdinFd).toBeDefined();
-  });
 });
