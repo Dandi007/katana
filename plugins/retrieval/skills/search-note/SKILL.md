@@ -1,6 +1,6 @@
 ---
 name: search-note
-description: 未迁本地知识子树的只读检索源；已迁 wiki/work-folder 域分别路由 wiki_search/wf_search。query_lancedb.py --mode auto（vector→keyword 自降级）。
+description: 未迁本地知识子树的只读检索源（含 DeepThought/、转换文档/ —— 它们没进 wiki-v3）；已迁 wiki/work-folder 域分别路由 wiki_search/wf_search。query_lancedb.py --mode auto（vector→keyword 自降级）。
 ---
 
 # /retrieval:search-note
@@ -24,7 +24,8 @@ description: 未迁本地知识子树的只读检索源；已迁 wiki/work-folde
 
 | 范围 | 检索方式 |
 |------|----------|
-| wiki 域（根知识页 `*.md`、`DeepThought/`、`转换文档/`、`WIKI.md`）| `wiki_search`（深读用 wiki MCP `fs_read`） |
+| wiki 域（Zettelkasten 那 824 篇）| `wiki_search`（深读用 `wiki_page_get`） |
+| `DeepThought/`、`转换文档/` | **本 skill** —— 2026-08-27 cutover 时没迁进 wiki-v3，留在旧库 `/data/wiki` 只读归档，`wiki_search` 搜不到它们 |
 | `智元工作/工作记录/` | `wf_search`（深读用 work-folder MCP `fs_read`） |
 | `智元工作/op/`、`智元工作/具身中心工程OKR/` | 本 source 的本地只读检索 |
 | `Ideas/`、`Templates/`、`Incubator/`、`docs/`、`.runtime/` 及其它未迁子树 | 本 source 的本地只读检索 |

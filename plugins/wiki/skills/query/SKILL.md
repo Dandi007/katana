@@ -1,9 +1,16 @@
 ---
 name: query
-description: Answer any knowledge question the wiki may cover, in any language. The read path for the wiki — orient, read candidate pages, synthesize a cited answer, and judge whether the synthesis should be backfilled. Triggered by iron rule 1 (orient before answering); never answer bare from parametric knowledge.
+description: DEPRECATED 2026-08-27 — the wiki moved to wiki-v3 MCP. Use `wiki_search` to find candidates then `wiki_page_get` to read them in full before answering. This skill is kept only so an accidental invocation lands on this notice.
 ---
 
 # Query
+
+> **已退役（2026-08-27）。** wiki 域整体切到 wiki-v3 MCP（server 名 `wiki`），旧 katana-wiki-mcp 已停。
+> 
+> 检索改用 `wiki_search`（FTS5 + jieba）拿候选，再用 `wiki_page_get` 读全文后回答 —— 铁律没变：**先查再答，不凭记忆裸答**。
+> 
+> 本文件保留只是为了让误调用落在这条说明上；下面的内容是历史实现，不要再照做。
+> 
 
 The read path. toolboxmd's karpathy-wiki once lost its read protocol in a refactor —
 the agent answered bare from parametric knowledge and the wiki stopped mattering.

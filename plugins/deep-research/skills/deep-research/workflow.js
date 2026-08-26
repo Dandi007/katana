@@ -142,7 +142,7 @@ function workerPrompt(clue, round) {
   return `TASK: 针对线索 "${clue.text}" 收集证据。建议起点 source: ${suggestedSources.join(', ') || '自行判断'}。
 
 MUST DO:
-- wiki 已迁移内容通过 wiki_search 检索，并用 wiki MCP fs_read 读取返回的逻辑路径；工作记录通过 wf_search 检索并用 work-folder MCP fs_read 深挖。仅未迁本地子树可走 /retrieval:search-note|code。外部源优先调用 /retrieval:<source>，不可用时才用 WebSearch/WebFetch 或平台只读 CLI。${sourceHints()}
+- wiki 已迁移内容（Zettelkasten 824 篇）通过 wiki_search 检索，并用 wiki_page_get 读全文；DeepThought/ 与 转换文档/ 未迁入 wiki-v3，走 /retrieval:search-note；工作记录通过 wf_search 检索并用 work-folder MCP fs_read 深挖。仅未迁本地子树可走 /retrieval:search-note|code。外部源优先调用 /retrieval:<source>，不可用时才用 WebSearch/WebFetch 或平台只读 CLI。${sourceHints()}
 - 按 suggested_sources 每个源单独探索并生成一个 per-source 文件：
   · 逻辑路径："${findingsPath}/r${round}-c${clue.id}__<源名>.md"
   · 按 "${TPL}/finding.md" 模板生成内容，通过 wiki MCP fs_write 写入；frontmatter 填 source/anchor/evidence_credibility/digest/entities。
