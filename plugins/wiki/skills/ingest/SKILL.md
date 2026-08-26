@@ -1,9 +1,21 @@
 ---
 name: ingest
-description: The wiki's single write pipeline. Use whenever content should be saved into the wiki — importing a source (file/URL), capturing a durable insight from this conversation, or processing the inbox. Triggers on any "put X into the wiki / 把 X 入库 / 收录这个" intent, in any language. This is the only governed path that writes pages; direct Write is an anti-pattern.
+description: DEPRECATED 2026-08-27 — the wiki moved to wiki-v3 MCP. Writing now goes through line-level primitives (`wiki_page_create` / `append` / `insert` / `replace_lines` / `delete_lines`), not this pipeline. Kept only as a signpost.
 ---
 
 # Ingest
+
+> **已退役（2026-08-27）。** wiki 域整体切到 wiki-v3 MCP，写入改走**行级原语**：
+> 
+> - 新建 `wiki_page_create`
+> - 改动 `wiki_page_append` / `wiki_page_insert` / `wiki_page_replace_lines` / `wiki_page_delete_lines`
+>   —— **除新建外不整篇覆盖**；先 `wiki_page_get` 拿 `revision` 传回去做 CAS，被拒就重读再试
+> - frontmatter 用 `wiki_page_set_meta`（字段名用中文：摘要/类型/tags/sources）
+> 
+> 治理不在 skill 里了，在写门本身：跨进程锁 + 原子写（临时文件 + rename）+ CAS + 语义化 commit + push 作为事务收尾。
+> 
+> 本文件保留只是为了让误调用落在这条说明上；下面的内容是历史实现，不要再照做。
+> 
 
 The single write pipeline. Every page, link, index entry, and log line the wiki
 gains is created here — never by a bare `Write`. This pipeline is where the four

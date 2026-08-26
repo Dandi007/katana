@@ -18,7 +18,8 @@ mkdir -p "$KB"
 
 # ---------------------------------------------------------------------------
 # Case A: wiki_interface=mcp via env var
-# Expected: output contains short MCP trigger keywords (wiki_query, wiki_ingest)
+# Expected: output contains short MCP trigger keywords (wiki_search, wiki_page_create)
+# 2026-08-27 cutover：旧 katana-wiki-mcp 退役，工具面换成 wiki-v3 的 wiki_* op 名
 #           and does NOT contain full SKILL.md-exclusive strings.
 # ---------------------------------------------------------------------------
 out_mcp="$(
@@ -32,13 +33,13 @@ out_mcp="$(
 )"
 
 case "$out_mcp" in
-    *wiki_query*) ok "mcp mode: output contains wiki_query" ;;
-    *) bad "mcp mode: output contains wiki_query" "output: $out_mcp" ;;
+    *wiki_search*) ok "mcp mode: output contains wiki_search" ;;
+    *) bad "mcp mode: output contains wiki_search" "output: $out_mcp" ;;
 esac
 
 case "$out_mcp" in
-    *wiki_ingest*) ok "mcp mode: output contains wiki_ingest" ;;
-    *) bad "mcp mode: output contains wiki_ingest" "output: $out_mcp" ;;
+    *wiki_page_create*) ok "mcp mode: output contains wiki_page_create" ;;
+    *) bad "mcp mode: output contains wiki_page_create" "output: $out_mcp" ;;
 esac
 
 # The full SKILL.md has "using-wiki" in its title/frontmatter; short trigger must not.
@@ -65,7 +66,7 @@ case "$out_mcp" in
 esac
 
 case "$out_mcp" in
-    *fs_read*fs_glob*) ok "mcp mode: output names wiki MCP deep-read tools" ;;
+    *wiki_page_get*) ok "mcp mode: output names wiki MCP deep-read tools" ;;
     *) bad "mcp mode: output names wiki MCP deep-read tools" "output: $out_mcp" ;;
 esac
 
@@ -87,8 +88,8 @@ out_mcp2="$(
 )"
 
 case "$out_mcp2" in
-    *wiki_query*) ok "mcp mode via .katana: output contains wiki_query" ;;
-    *) bad "mcp mode via .katana: output contains wiki_query" "output: $out_mcp2" ;;
+    *wiki_search*) ok "mcp mode via .katana: output contains wiki_search" ;;
+    *) bad "mcp mode via .katana: output contains wiki_search" "output: $out_mcp2" ;;
 esac
 
 case "$out_mcp2" in

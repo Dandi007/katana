@@ -1,9 +1,16 @@
 ---
 name: lint
-description: The wiki's periodic health check. Use whenever the user wants to audit / 体检 / lint the wiki, hunt contradictions, find orphan or stale pages, or check provenance and index consistency — in any language. Mechanical checks plus LLM semantic checks; reports findings and proposes fixes, but never builds pages or merges them (that is ingest).
+description: DEPRECATED 2026-08-27 — the wiki moved to wiki-v3 MCP. Use `wiki_lint_broken_links` for the mechanical pass. Kept only as a signpost.
 ---
 
 # Lint
+
+> **已退役（2026-08-27）。** wiki 域整体切到 wiki-v3 MCP。
+> 
+> 机械体检用 `wiki_lint_broken_links`（按被引用次数排出「该补哪一页」），反链用 `wiki_page_backlinks`，整体统计用 `wiki_stats`。
+> 
+> 本文件保留只是为了让误调用落在这条说明上；下面的内容是历史实现，不要再照做。
+> 
 
 The adversarial pass. The headline failure of AI-maintained knowledge is
 **mediocrity collapse** — *left ungoverned, the compiler does not think; it

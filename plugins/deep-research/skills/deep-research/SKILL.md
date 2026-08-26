@@ -112,7 +112,7 @@ Workflow 返回后：展示 Executive Summary + Key Takeaways；提议
 则从 Frontier 重建线索；有 topics 无 report 则只综合；有 findings/index.md 可跳过 Harvest。
 
 ## 通用规则
-- 探索源只读；wiki 域只用 `wiki_search`/`fs_read`，工作记录只用 `wf_search`/work-folder `fs_read`，未迁子树才可用 `/retrieval:search-note|code`。
+- 探索源只读；wiki 域只用 `wiki_search`/`wiki_page_get`，工作记录只用 `wf_search`/work-folder `fs_read`，未迁子树（含 `DeepThought/`、`转换文档/`）才可用 `/retrieval:search-note|code`。
 - 外部源优先经 `/retrieval:<source>`，无则 fallback WebSearch/WebFetch / 平台只读 CLI。
 - 来源标注 `[本地]/[互联网]/[平台:<源名>]/[AI]`；可信度 high/medium/low/conflicted。
 
