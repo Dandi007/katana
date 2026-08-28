@@ -14,8 +14,8 @@
 #
 # 用法：
 #   静态检查（默认）：bash plugins/deep-research/tests/e2e/per-source-a2a-e2e.sh
-#   完整动态（需 wiki MCP harness）：
-#     E2E_DYNAMIC=1 KATANA_WIKI_MCP_E2E=1 bash plugins/deep-research/tests/e2e/per-source-a2a-e2e.sh
+#   完整动态（需 wiki MCP 检索 harness + work-folder MCP 产物 harness）：
+#     E2E_DYNAMIC=1 KATANA_WIKI_MCP_E2E=1 KATANA_WF_MCP_E2E=1 bash plugins/deep-research/tests/e2e/per-source-a2a-e2e.sh
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -61,8 +61,8 @@ if [ "${E2E_DYNAMIC:-0}" != "1" ]; then
   echo ""
   echo "跳过 P5+R1（动态真机，需 E2E_DYNAMIC=1 + claude CLI 可用）"
 else
-  if [ "${KATANA_WIKI_MCP_E2E:-0}" != "1" ]; then
-    echo "跳过 P5+R1：已迁移 DeepThought 域需要 KATANA_WIKI_MCP_E2E=1 的 MCP test harness"
+  if [ "${KATANA_WIKI_MCP_E2E:-0}" != "1" ] || [ "${KATANA_WF_MCP_E2E:-0}" != "1" ]; then
+    echo "跳过 P5+R1：需要 KATANA_WIKI_MCP_E2E=1（wiki 检索 harness）与 KATANA_WF_MCP_E2E=1（work-folder MCP harness）"
     echo ""
     echo "=== 结果: PASS=$PASS FAIL=$FAIL ==="
     [ "$FAIL" -eq 0 ]
@@ -73,7 +73,6 @@ else
   CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
   NONCE="E2EPS$(date +%s)$$"
   WORK="$(mktemp -d -t dr-persource.XXXXXX)"
-  TOPIC_PATH="DeepThought/$NONCE"
 
   # driver workflow：注入精确 args，两个本地源 → 期望产出 ≥2 个 per-source 文件（离线确定性）
   # 使用 return await workflow(...) 与已验证的 model-routing-e2e.sh 同款 idiom
@@ -82,7 +81,7 @@ else
 export const meta = { name: 'dr-persource-e2e-driver', description: 'per-source a2a e2e driver', phases: [{ title: 'Run' }] }
 const childArgs = {
   topic: "[$NONCE] 总结两条 wiki 笔记关于手冲咖啡萃取的要点",
-  topicPath: "$TOPIC_PATH",
+  // 不传 folderId：让 Setup 节点自行 wf_create（topic 含 NONCE，事后 wf_search 可定位）
   skillDir: "$SKILL_DIR",
   sources: {},
   maxWidth: 1,
@@ -90,7 +89,7 @@ const childArgs = {
   // 写出终稿 report.md，haiku 易在 report 前停笔，给 sonnet 保证端到端跑完
   models: { worker: "haiku", triage: "sonnet", synth: "sonnet", harvest: "haiku" },
   initialClues: [
-    { id: "c0", text: "[$NONCE] 用 wiki_search 分别检索 MCP harness 预置的两条咖啡萃取笔记并提取关键因素", local: true,
+    { id: "c0", text: "[$NONCE] 用 katana-wiki-mcp search 分别检索 MCP harness 预置的两条咖啡萃取笔记并提取关键因素", local: true,
       suggested_sources: ["wiki-primary", "wiki-secondary"], depth: 0 }
   ],
 }
@@ -103,40 +102,40 @@ DRIVER_JS
 
   printf '%s' "用 Workflow 工具跑这个脚本文件，只调用一次，scriptPath=${DRIVER}。不要传 args，不要做别的，跑完把返回简述即可。" \
     | claude -p --permission-mode acceptEdits \
-        --allowedTools Workflow,Agent,mcp__katana-wiki-mcp__wiki_search,mcp__katana-wiki-mcp__fs_create,mcp__katana-wiki-mcp__fs_read,mcp__katana-wiki-mcp__fs_write,mcp__katana-wiki-mcp__fs_glob \
+        --allowedTools Workflow,Agent,mcp__katana-wiki-mcp__search,mcp__katana-wiki-mcp__page_get,mcp__katana-work-folder-mcp__wf_create,mcp__katana-work-folder-mcp__wf_search,mcp__katana-work-folder-mcp__fs_create,mcp__katana-work-folder-mcp__fs_write,mcp__katana-work-folder-mcp__fs_read,mcp__katana-work-folder-mcp__fs_list \
         > "$WORK/claude.log" 2>&1
   CL_EXIT=$?
 
   [ "$CL_EXIT" -eq 0 ]
   result "P5-a: claude -p 正常退出(exit=$CL_EXIT)" "$?"
 
-  # 经 wiki MCP 拉取逻辑目录快照；client 不挂载 DeepThought 存储。
-  printf '%s' "只调用 wiki MCP：fs_glob 列出 ${TOPIC_PATH}/findings/*.md，并 fs_read ${TOPIC_PATH}/findings/index.md。逐行输出逻辑路径，随后原样输出 index 内容，不要加解释。" \
-    | claude -p --allowedTools mcp__katana-wiki-mcp__fs_glob,mcp__katana-wiki-mcp__fs_read \
-        > "$WORK/wiki-snapshot.log" 2>&1
+  # 经 work-folder MCP 拉取研究 folder 快照；client 不挂载 work folder 存储。
+  printf '%s' "只调用 work-folder MCP：先 wf_search 检索 \"$NONCE\" 找到本次研究 work folder，然后 fs_list 列出该 folder 内 findings/ 下全部文件名，再 fs_read findings/index.md。逐行输出文件名（folder 相对路径），随后原样输出 index 内容，不要加解释。" \
+    | claude -p --allowedTools mcp__katana-work-folder-mcp__wf_search,mcp__katana-work-folder-mcp__fs_list,mcp__katana-work-folder-mcp__fs_read \
+        > "$WORK/wf-snapshot.log" 2>&1
   SNAP_EXIT=$?
   [ "$SNAP_EXIT" -eq 0 ]
-  result "P5-b0: wiki MCP 快照正常退出(exit=$SNAP_EXIT)" "$?"
+  result "P5-b0: work-folder MCP 快照正常退出(exit=$SNAP_EXIT)" "$?"
 
-  # P5-b: MCP 返回的 per-source 逻辑路径含 __ 分隔符，≥2 个确认多源拆分
-  PS_COUNT="$(grep -oE 'r[^ /]*-c[^ /]*__[^ /]*\.md' "$WORK/wiki-snapshot.log" 2>/dev/null | sort -u | wc -l | tr -d ' ')"
+  # P5-b: MCP 返回的 per-source 文件名含 __ 分隔符，≥2 个确认多源拆分
+  PS_COUNT="$(grep -oE 'r[^ /]*-c[^ /]*__[^ /]*\.md' "$WORK/wf-snapshot.log" 2>/dev/null | sort -u | wc -l | tr -d ' ')"
   [ "$PS_COUNT" -ge 2 ]
-  result "P5-b: MCP 返回 per-source 逻辑路径(含 __, ≥2 源拆分，实际: $PS_COUNT)" "$?"
+  result "P5-b: MCP 返回 per-source 文件名(含 __, ≥2 源拆分，实际: $PS_COUNT)" "$?"
 
   # P5-c: index.md 可经 MCP 读取
-  grep -q 'findings/index.md' "$WORK/wiki-snapshot.log" 2>/dev/null
-  result "P5-c: findings/index.md 可经 wiki MCP 读取" "$?"
+  grep -q 'findings/index.md' "$WORK/wf-snapshot.log" 2>/dev/null
+  result "P5-c: findings/index.md 可经 work-folder MCP 读取" "$?"
 
   # P5-d: index.md 含 reports 格式内容
-  grep -qi "reports\|source\|evidence_credibility" "$WORK/wiki-snapshot.log" 2>/dev/null
+  grep -qi "reports\|source\|evidence_credibility" "$WORK/wf-snapshot.log" 2>/dev/null
   result "P5-d: index.md 含索引内容(reports/source/evidence_credibility)" "$?"
 
   # P5-e: 经 MCP 读取 synth 终稿，证顶层 return 链路完成
-  printf '%s' "只调用 wiki MCP fs_read 读取 ${TOPIC_PATH}/report.md，原样输出文件内容，不要加解释。" \
-    | claude -p --allowedTools mcp__katana-wiki-mcp__fs_read > "$WORK/report-snapshot.md" 2>&1
+  printf '%s' "只调用 work-folder MCP：先 wf_search 检索 \"$NONCE\" 找到本次研究 work folder，然后 fs_read 该 folder 的 report.md，原样输出文件内容，不要加解释。" \
+    | claude -p --allowedTools mcp__katana-work-folder-mcp__wf_search,mcp__katana-work-folder-mcp__fs_read > "$WORK/report-snapshot.md" 2>&1
   REPORT_EXIT=$?
   [ "$REPORT_EXIT" -eq 0 ] && [ "$(wc -c < "$WORK/report-snapshot.md")" -ge 500 ]
-  result "P5-e: report.md 经 wiki MCP 取回且非空(≥500B)" "$?"
+  result "P5-e: report.md 经 work-folder MCP 取回且非空(≥500B)" "$?"
 
   # R1: agent-*.jsonl trace 中 nonce 命中 worker + synth
   python3 - "$CFG" "$NONCE" <<'PY'

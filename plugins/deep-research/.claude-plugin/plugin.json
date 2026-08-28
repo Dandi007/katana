@@ -1,7 +1,7 @@
 {
   "name": "deep-research",
-  "description": "Deep research through wiki/work-folder MCP, the web, and named sources declared in config — multi-round Workflow orchestration, judgment-driven stop, cited report",
-  "version": "0.6.2",
+  "description": "Deep research landing artifacts in a dedicated work folder (work-folder MCP) — multi-round Workflow orchestration over wiki/work-folder MCP, the web, and named sources; judgment-driven stop, cited report",
+  "version": "0.7.0",
   "author": {
     "name": "Dandi007"
   },

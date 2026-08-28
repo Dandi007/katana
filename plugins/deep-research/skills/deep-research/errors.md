@@ -19,3 +19,6 @@
 7. **Skill 层撞名**：宿主环境可能装有其他同名 `deep-research` skill（如 web 对抗验证 harness）。裸 `/deep-research` 可能路由到别家——**调用必须用全限定名 `/deep-research:deep-research`**。判别走错：报告只到 stdout、无 `DeepThought/<主题>/` 落盘、出现"候选→验证→击杀"话术（2026-06-04 实测）。
 
 8. **Workflow 层撞名**：即使 Skill 路由正确，阶段 B 若用 `Workflow({name: "deep-research"})` 仍会被环境里同名 named workflow 劫持——阶段 A 正常建目录、报告也会生成，但 clue_board / findings L2 / sources / topics 全缺，平台源证据丢失（2026-06-04 实测）。必须 `scriptPath` 指向本 skill base directory 的 workflow.js（SKILL.md 已加 MUST 硬约束）。
+
+9. **wiki-v3 cutover 后 skill 不可用（2026-08-28 实测）**：skill 0.6.2 的 Stage A / workflow.js 依赖 wiki MCP `fs_create/fs_glob/fs_read/fs_write` 往 `DeepThought/<主题>/` 写产物，但 2026-08-27 起 katana-wiki-mcp 由 wiki-v3 服务实现，**不再暴露任何 `fs_*` 工具**（只有 search/page_*/repo_write_file 等），且 `DeepThought/` 未迁入新库、旧 `/data/wiki` 已定位为只读归档。Setup 阶段即断。修复方向：skill 产物落位改到 work-folder MCP（有完整 `fs_*`）或新 wiki 的 page 原语。当前 workaround：不跑本 skill workflow，主 agent 自建 subagent fan-out，产物落 work folder。
+   → 已修复：0.7.0 起产物落位迁 work-folder MCP（fs_create/fs_write/fs_list + wf_create），wiki 域仅作检索源（search/page_get）。本条保留作历史。
