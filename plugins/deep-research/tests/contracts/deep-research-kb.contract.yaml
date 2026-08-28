@@ -4,22 +4,27 @@ setup:
   requires:
     - env:KATANA_E2E_NETWORK
     - env:KATANA_WIKI_MCP_E2E
+    - env:KATANA_WF_MCP_E2E
 trigger:
   prompt: |
     用 /deep-research:deep-research 研究：本知识库中影响咖啡萃取质量的全部因素及其相互关系，
-    重点通过 wiki MCP 综合 harness 预置笔记。topicPath 固定为
-    DeepThought/katana-e2e-coffee，报告写到该逻辑路径的 report.md。
+    重点通过 katana-wiki-mcp 的 search/page_get 综合 harness 预置笔记。
+    研究主题名固定为 katana-e2e-coffee（研究 work folder 的 topic 即
+    deep-research: katana-e2e-coffee，供 wf_search 定位），报告写到该 folder 的 report.md。
     控制在最小规模（宽度≤4，单轮）。
   tools:
     - Workflow
     - Agent
     - WebSearch
     - WebFetch
-    - mcp__katana-wiki-mcp__wiki_search
-    - mcp__katana-wiki-mcp__fs_create
-    - mcp__katana-wiki-mcp__fs_read
-    - mcp__katana-wiki-mcp__fs_write
-    - mcp__katana-wiki-mcp__fs_glob
+    - mcp__katana-wiki-mcp__search
+    - mcp__katana-wiki-mcp__page_get
+    - mcp__katana-work-folder-mcp__wf_create
+    - mcp__katana-work-folder-mcp__wf_search
+    - mcp__katana-work-folder-mcp__fs_create
+    - mcp__katana-work-folder-mcp__fs_write
+    - mcp__katana-work-folder-mcp__fs_read
+    - mcp__katana-work-folder-mcp__fs_list
   timeout: 3600
 expect:
   process:

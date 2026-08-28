@@ -21,7 +21,7 @@
     },
     {
       "name": "deep-research",
-      "description": "Deep research over your local knowledge base (DEEP_RESEARCH_KB_DIR), the web, and any named sources declared in config — multi-round Workflow orchestration, judgment-driven stop, cited report",
+      "description": "Deep research landing artifacts in a dedicated work folder (work-folder MCP) — multi-round Workflow orchestration over wiki/work-folder MCP, the web, and named sources; judgment-driven stop, cited report",
       "category": "productivity",
       "source": "./plugins/deep-research",
       "homepage": "https://github.com/Dandi007/katana"

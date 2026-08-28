@@ -11,13 +11,14 @@
 #   driver 用 workflow({scriptPath}) 把精确 args 注入真身 workflow.js（不让模型手抄 JSON）。
 #   断言：worker 跑 haiku、triage 跑 sonnet、synth 跑 opus（trace 里 "model" 字段为准）。
 #
-# 前置：默认鉴权 claude 能路由 haiku/sonnet/opus，且 wiki MCP test harness
-# 已配置。没有 MCP harness 时显式 SKIP，避免为已迁移域建立 client-fs fixture。
+# 前置：默认鉴权 claude 能路由 haiku/sonnet/opus，且 wiki MCP（检索源，预置笔记）
+# 与 work-folder MCP（产物落位）两套 test harness 已配置。没有 harness 时显式 SKIP，
+# 避免为 MCP 域建立 client-fs fixture。
 # 用法：bash plugins/deep-research/tests/e2e/model-routing-e2e.sh
 set -uo pipefail
 
-if [ "${KATANA_WIKI_MCP_E2E:-0}" != "1" ]; then
-  echo "SKIP: model-routing e2e requires KATANA_WIKI_MCP_E2E=1 and a seeded wiki MCP harness"
+if [ "${KATANA_WIKI_MCP_E2E:-0}" != "1" ] || [ "${KATANA_WF_MCP_E2E:-0}" != "1" ]; then
+  echo "SKIP: model-routing e2e requires KATANA_WIKI_MCP_E2E=1 (seeded wiki MCP harness) and KATANA_WF_MCP_E2E=1 (work-folder MCP harness)"
   exit 0
 fi
 
@@ -30,7 +31,6 @@ command -v claude >/dev/null || { echo "ABORT: claude CLI 未安装"; exit 2; }
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 NONCE="E2EMR$(date +%s)$$"
 WORK="$(mktemp -d -t dr-modelroute.XXXXXX)"
-TOPIC_PATH="DeepThought/$NONCE"
 
 # ── driver workflow：硬编码 childArgs，调用真身 workflow.js（嵌套仅一层，合法）────
 DRIVER="$WORK/driver.mjs"
@@ -38,13 +38,13 @@ cat > "$DRIVER" <<JS
 export const meta = { name: 'dr-modelroute-e2e-driver', description: '注入精确 args 跑真身 deep-research workflow.js 验三档路由', phases: [{ title: 'Run' }] }
 const childArgs = {
   topic: "[$NONCE] 总结 wiki 笔记里影响手冲咖啡萃取的要点",
-  topicPath: "$TOPIC_PATH",
+  // 不传 folderId：让 Setup 节点自行 wf_create（topic 含 NONCE，事后 wf_search 可定位）
   skillDir: "$SKILL_DIR",
   sources: {},
   maxWidth: 1,
   models: { worker: "haiku", triage: "sonnet", synth: "opus" },
   initialClues: [
-    { id: "c0", text: "[$NONCE] 用 wiki_search 检索 harness 预置的咖啡萃取笔记，列出 3 个因素", local: true, suggested_sources: ["wiki"], depth: 0 }
+    { id: "c0", text: "[$NONCE] 用 katana-wiki-mcp search 检索 harness 预置的咖啡萃取笔记，列出 3 个因素", local: true, suggested_sources: ["wiki"], depth: 0 }
   ],
 }
 return await workflow({ scriptPath: "$WORKFLOW_JS" }, childArgs)
@@ -59,7 +59,7 @@ echo "running headless claude -p (default auth)…"
 # ── 默认鉴权跑 driver（prompt 走 stdin，规避 --allowedTools 吞位置参数的坑）────────
 printf '%s' "用 Workflow 工具跑这个脚本文件，只调用一次，scriptPath=${DRIVER} 。不要传 args，不要做别的，跑完把返回简述即可。" \
   | claude -p --permission-mode acceptEdits \
-      --allowedTools Workflow,Agent,mcp__katana-wiki-mcp__wiki_search,mcp__katana-wiki-mcp__fs_create,mcp__katana-wiki-mcp__fs_read,mcp__katana-wiki-mcp__fs_write,mcp__katana-wiki-mcp__fs_glob \
+      --allowedTools Workflow,Agent,mcp__katana-wiki-mcp__search,mcp__katana-wiki-mcp__page_get,mcp__katana-work-folder-mcp__wf_create,mcp__katana-work-folder-mcp__wf_search,mcp__katana-work-folder-mcp__fs_create,mcp__katana-work-folder-mcp__fs_write,mcp__katana-work-folder-mcp__fs_read,mcp__katana-work-folder-mcp__fs_list \
       > "$WORK/claude.log" 2>&1
 CL_EXIT=$?
 echo "claude -p exit: $CL_EXIT"
