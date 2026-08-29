@@ -15,6 +15,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
 
 from katana_kb_mcp_shared import config, vault_search
 from katana_kernel import (
@@ -42,6 +44,19 @@ mcp = FastMCP(
         "filename；返回值不暴露物理路径。"
     ),
 )
+
+
+@mcp.custom_route("/metrics", methods=["GET"])
+async def metrics_route(request: Request) -> PlainTextResponse:
+    """自暴露「HTTP 进程存活」单指标，供 fleet-sentinel scrape。
+
+    process-local、零依赖、不触碰 kernel/store/git，也不因数据面异常而 5xx；
+    进程面存活交给 Prometheus ``up`` 判据，二者同源即可。
+    """
+    return PlainTextResponse(
+        "katana_work_folder_up 1\n",
+        media_type="text/plain; version=0.0.4",
+    )
 
 _repo_root: str | None = None
 _kernel: GovernedKernel | None = None
