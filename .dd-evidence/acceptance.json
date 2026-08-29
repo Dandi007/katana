@@ -1,0 +1,17 @@
+{
+ "development_id": "dev-fg-0d9bd303c817",
+ "attempt": 1,
+ "passed": true,
+ "results": [
+  {
+   "command": [
+    "bash",
+    "-lc",
+    "V=\"$(mktemp -d)\"; python3 -m venv \"$V/venv\" && \"$V/venv/bin/pip\" install -q -e mcp/shared -e mcp/kernel -e mcp/memory pytest httpx && \"$V/venv/bin/python\" -m pytest -q mcp/memory/tests --import-mode=importlib -p no:cacheprovider"
+   ],
+   "exit_code": 0,
+   "stdout_tail": "........................................................................ [ 31%]\n........................................................................ [ 62%]\n........................................................................ [ 93%]\n................                                                         [100%]\n=============================== warnings summary ===============================\nmcp/memory/tests/test_memory_server.py:7\n  /data/worktrees/katana-h0-dev_fleet_katana_memory_onboard_01_20260829/mcp/memory/tests/test_memory_server.py:7: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n232 passed, 1 warning in 23.15s\n",
+   "stderr_tail": ""
+  }
+ ]
+}
