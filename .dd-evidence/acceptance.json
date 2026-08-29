@@ -1,0 +1,17 @@
+{
+ "development_id": "dev-fg-6abec86fda07",
+ "attempt": 1,
+ "passed": true,
+ "results": [
+  {
+   "command": [
+    "bash",
+    "-lc",
+    "V=\"$(mktemp -d)\"; python3 -m venv \"$V/venv\" && \"$V/venv/bin/pip\" install -q -e mcp/shared -e mcp/kernel -e mcp/work-folder pytest && \"$V/venv/bin/python\" -m pytest -q mcp/work-folder/tests --import-mode=importlib -p no:cacheprovider"
+   ],
+   "exit_code": 0,
+   "stdout_tail": "........................................................................ [ 22%]\n........................................................................ [ 44%]\n........................................................................ [ 66%]\n........................................................................ [ 88%]\n.......................................                                  [100%]\n327 passed in 30.32s\n",
+   "stderr_tail": ""
+  }
+ ]
+}
