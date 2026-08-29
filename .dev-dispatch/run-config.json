@@ -1,0 +1,13 @@
+{
+ "development_id": "dev-fg-0d9bd303c817",
+ "generation": 1,
+ "acceptance_commands": [
+  [
+   "bash",
+   "-lc",
+   "V=\"$(mktemp -d)\"; python3 -m venv \"$V/venv\" && \"$V/venv/bin/pip\" install -q -e mcp/shared -e mcp/kernel -e mcp/memory pytest httpx && \"$V/venv/bin/python\" -m pytest -q mcp/memory/tests --import-mode=importlib -p no:cacheprovider"
+  ]
+ ],
+ "setup_commands": [],
+ "acceptance_env": {}
+}
