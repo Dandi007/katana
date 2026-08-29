@@ -311,6 +311,18 @@ def _tenants(data_root: str) -> list[str]:
                   if d.is_dir() and not d.name.startswith("."))
 
 
+def _metrics_endpoint(request) -> PlainTextResponse:
+    """自暴露「HTTP 进程存活」单指标，供 fleet-sentinel scrape。
+
+    process-local、零依赖、不触碰 kernel/store/git，也不因数据面异常而 5xx；
+    进程面存活交给 Prometheus ``up`` 判据，二者同源即可。
+    """
+    return PlainTextResponse(
+        "katana_memory_up 1\n",
+        media_type="text/plain; version=0.0.4",
+    )
+
+
 def build_app(data_root: str) -> Starlette:
     tenants = _tenants(data_root)
 
@@ -389,6 +401,7 @@ def build_app(data_root: str) -> Starlette:
 
     return Starlette(
         routes=[
+            Route("/metrics", _metrics_endpoint),
             Route("/t/{tenant}/index", index_endpoint),
             Route("/t/{tenant}/index.md", index_md_endpoint),
             *mounts,
