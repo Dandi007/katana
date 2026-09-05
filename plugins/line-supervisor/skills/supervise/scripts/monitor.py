@@ -134,8 +134,14 @@ while True:
         for m in d.get("messages", []):
             p = m.get("payload", {})
             t = json.dumps(p, ensure_ascii=False)
-            mine = LINE in t or any(dev in t for dev in devs)
-            if mine and (p.get("note_type") == "question" or m.get("kind") == "work.decision.v1"):
+            # 归属判定：本线派出的单号出现在正文，或裁决的 decided_by 就是本线。
+            # 不用「LINE 子串出现在任何字段」——别的线在 rationale 里引用「同舰先例 wf-xxx」会误报
+            # （2026-09-06 01:43 看板 2893/2894 实例）。
+            mine_dev = any(dev in t for dev in devs)
+            is_decision = m.get("kind") == "work.decision.v1"
+            is_question = p.get("note_type") == "question"
+            mine = mine_dev or (is_decision and p.get("decided_by") == LINE) or (is_question and LINE in str(p.get("note") or ""))
+            if mine and (is_question or is_decision):
                 print(f"board {m['channel_seq']} {m.get('sender_agent_id')} {m['kind']}/{p.get('note_type','')} decided_by={p.get('decided_by','')}: {(p.get('note') or p.get('question') or p.get('rationale') or '')[:300]}", flush=True)
         last = d.get("head_seq", last) or last
     except Exception:  # noqa: BLE001
