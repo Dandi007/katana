@@ -23,6 +23,7 @@
 
 - 引擎侧：dd 单目录 `agent-runs/<run>/<stamp>/launcher.stdout` 结构化结果里的 `route_attempts`（模型、耗时、http_status）；`launches.jsonl` 里实际生效的模型。
 - 会话侧（最可信）：`scripts/opencode-tokens.py [hours]` 直接汇总各 run 的 `opencode.db`（input / output / cache_read，按单 / 线分组）。
+  ⚠️ 单被重新 dispatch 后，generation≥2 的 run root 落在 `dd/<dev>/g<N>/agent-runs/`——**只看 `dd/<dev>/agent-runs/` 会整代漏计**（实测 22.0M 只读到 1.5M）。脚本已两种布局都扫；自己临时写 glob 取数时同样要补 `g<N>` 层。
 - 指标侧：Prometheus `agent_runtime_tokens_*_total` 与 `cost_obs:*`；**用前先核 `usage_source` 是否 missing**——agent-run 做 conformance retry 后 `run_dir` 指向新 stamp 目录，采集器找不到会话库时指标恒 0。
 - 判据：连续两小时消耗上升而 progress 无新事实，视为不赚钱，进处置阶梯。
 
