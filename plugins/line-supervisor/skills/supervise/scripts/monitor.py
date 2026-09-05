@@ -2,7 +2,7 @@
 """monitor.py <line_id> — 给 Monitor 用的事件脚本：每条 stdout 是一次唤醒。
 
 事件：① 线进入非 dd 驻停的 blocked / done / failed / fault / absent / probe-error；
-② 看板 board:work-notes 出现本线的 question note 或 work.decision.v1；
+② 看板 board:work-notes 出现本线（线 id 或本线派出的 dd 单号）的 question note 或 work.decision.v1；
 ③ autowake：本线的单到 awaiting_gate 超 GATE_LAG_S、线 unit 不在跑、调度器仍在
    no_progress backoff（streak>0）→ 把 streak 归零，让调度器下一 tick 点火（X-2 类探针缺陷的止血）。
 健康的 dd 驻停（blocked + waiting_on=dd）不是事件。环境变量同 readings.sh。
@@ -66,6 +66,18 @@ def line_unit_active():
         return True  # fail closed：当它在跑，不动
 
 
+def line_dev_ids():
+    """本线派出的 dd 单号：看板 note 正文常只写单号不写线号（gate question 即如此），过滤要同时认这两种。"""
+    ids = set()
+    for rec in glob.glob(f"{FG_ROOT}/dd/*/record.json"):
+        try:
+            if json.load(open(rec)).get("dispatched_by") == LINE:
+                ids.add(os.path.basename(os.path.dirname(rec)))
+        except Exception:  # noqa: BLE001
+            pass
+    return ids
+
+
 _woken = {}
 
 
@@ -118,10 +130,12 @@ while True:
         prev = st
     try:
         d = get(f"{BUS_URL}/v1/channels/board:work-notes/messages?limit=50&after_seq={last}", True)
+        devs = line_dev_ids()
         for m in d.get("messages", []):
             p = m.get("payload", {})
             t = json.dumps(p, ensure_ascii=False)
-            if LINE in t and (p.get("note_type") == "question" or m.get("kind") == "work.decision.v1"):
+            mine = LINE in t or any(dev in t for dev in devs)
+            if mine and (p.get("note_type") == "question" or m.get("kind") == "work.decision.v1"):
                 print(f"board {m['channel_seq']} {m.get('sender_agent_id')} {m['kind']}/{p.get('note_type','')} decided_by={p.get('decided_by','')}: {(p.get('note') or p.get('question') or p.get('rationale') or '')[:300]}", flush=True)
         last = d.get("head_seq", last) or last
     except Exception:  # noqa: BLE001
