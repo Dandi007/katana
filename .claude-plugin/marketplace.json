@@ -88,6 +88,13 @@
       "category": "productivity",
       "source": "./plugins/jury",
       "homepage": "https://github.com/Dandi007/katana"
+    },
+    {
+      "name": "line-supervisor",
+      "description": "Single-line supervisor — hourly checklist + event monitor for one fleet-graph goal line; three-rung repair ladder (change facts / fix supervisor tooling / file defects for the line), gates stay self-judged by the line",
+      "category": "productivity",
+      "source": "./plugins/line-supervisor",
+      "homepage": "https://github.com/Dandi007/katana"
     }
   ]
 }

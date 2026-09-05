@@ -75,6 +75,12 @@
       "source": { "source": "local", "path": "./plugins/jury" },
       "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
       "category": "Productivity"
+    },
+    {
+      "name": "line-supervisor",
+      "source": { "source": "local", "path": "./plugins/line-supervisor" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
     }
   ]
 }

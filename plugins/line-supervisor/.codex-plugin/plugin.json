@@ -1,0 +1,19 @@
+{
+  "name": "line-supervisor",
+  "version": "0.1.0",
+  "description": "Supervise one fleet-graph goal line: liveness, spend, blockers; repair without taking over.",
+  "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
+  "repository": "https://github.com/Dandi007/katana",
+  "license": "MIT",
+  "keywords": ["katana", "fleet-graph", "supervision", "ops"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Katana Line Supervisor",
+    "shortDescription": "Watch one goal line; fix what blocks it; never approve for it.",
+    "longDescription": "Hourly baseline checklist plus event monitor for a single fleet-graph goal line. Three-rung incident ladder: change facts so the line wakes itself, fix supervisor tooling, file engine defects for the line to dispatch. Gates stay self-judged by the line.",
+    "developerName": "Dandi007",
+    "category": "Productivity",
+    "capabilities": ["Skills"],
+    "defaultPrompt": ["Use line-supervisor to run the hourly checklist for line wf-xxxxxx."]
+  }
+}
