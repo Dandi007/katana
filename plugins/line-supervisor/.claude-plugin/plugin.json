@@ -1,0 +1,7 @@
+{
+  "name": "line-supervisor",
+  "description": "单线监督者 — 盯住一条 fleet-graph goal 线是否活着、是否在赚钱、卡在哪；三层处置阶梯（改事实让线自醒 / 修监督面工具 / 缺陷立案给线），不代批 gate、不替线开发；每小时保底巡检 + Monitor 事件驱动，结论落值守卷",
+  "version": "0.1.0",
+  "author": { "name": "Dandi007" },
+  "license": "MIT"
+}

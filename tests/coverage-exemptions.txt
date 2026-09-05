@@ -6,3 +6,4 @@ retrieval:using-retrieval  SessionStart 注入约定（非 Skill tool load），
 retrieval:_shared  内部 reference holder，仅为 Codex plugin packaging 提供 SKILL.md，不作为用户入口
 wiki:using-wiki  SessionStart 注入约定（非 Skill tool load），改由 plugins/wiki/tests/session-start-inject.test.sh 机械测试
 writing:using-writing  SessionStart 注入约定（非 Skill tool load），改由 plugins/writing/tests/session-start-inject.test.sh 机械测试
+line-supervisor:supervise  需要活的 fleet-graph 生产面（:7494/:7490/dd root），契约 fixture 无法提供；脚本层由 plugins/line-supervisor/tests/scripts-smoke.test.sh 机械测试
