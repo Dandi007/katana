@@ -5,11 +5,14 @@
 ② 看板 board:work-notes 出现本线（线 id 或本线派出的 dd 单号）的 question note 或 work.decision.v1；
 ③ autowake：本线的单到 awaiting_gate 超 GATE_LAG_S、线 unit 不在跑、调度器仍在
    no_progress backoff（streak>0）→ 把 streak 归零，让调度器下一 tick 点火（X-2 类探针缺陷的止血）。
+④ 调度器看门狗：fleet-graphd unit active 但 journal 超 SCHED_SILENT_S 无 folder_id 行（正常 tick ≈2.5 min）
+   → 报事件，并把 py-spy dump（若可用）存到 FG_DUMP_DIR，供立案取栈；重启由监督者判断后手动做（X-6 类假死）。
 健康的 dd 驻停（blocked + waiting_on=dd）不是事件。环境变量同 readings.sh。
 """
 import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -27,6 +30,9 @@ STALL = f"{FG_ROOT}/runs/.scheduler/{LINE}.json"
 GATE_LAG_S = int(os.environ.get("FG_GATE_LAG_S", 20 * 60))
 POLL_S = int(os.environ.get("FG_POLL_S", 60))
 TOKEN = open(TOKEN_FILE).read().strip() if os.path.exists(TOKEN_FILE) else ""
+SCHED_UNIT = os.environ.get("FG_SCHED_UNIT", "fleet-graphd")
+SCHED_SILENT_S = int(os.environ.get("FG_SCHED_SILENT_S", 10 * 60))
+DUMP_DIR = os.environ.get("FG_DUMP_DIR", os.path.expanduser("~/.local/state/line-supervisor"))
 
 
 def get(url, auth=False):
@@ -76,6 +82,34 @@ def line_dev_ids():
         except Exception:  # noqa: BLE001
             pass
     return ids
+
+
+_sched_alerted_at = 0.0
+
+
+def scheduler_watchdog():
+    """fleet-graphd 活着但不 tick = 假死（2026-09-06 04:24–04:51 X-6 实例）。只报不重启。"""
+    global _sched_alerted_at
+    try:
+        active = subprocess.run(["systemctl", "--user", "is-active", SCHED_UNIT], capture_output=True, text=True, timeout=10).stdout.strip()
+        if active != "active":
+            return  # 挂了是另一类事件：readings 会看到 unit 非 active
+        out = subprocess.run(["journalctl", "--user", "-u", SCHED_UNIT, "--since", f"-{SCHED_SILENT_S}s", "--no-pager", "-o", "cat"], capture_output=True, text=True, timeout=20).stdout
+        if '"folder_id"' in out:
+            return
+        if time.time() - _sched_alerted_at < 1800:
+            return
+        _sched_alerted_at = time.time()
+        pid = subprocess.run(["systemctl", "--user", "show", SCHED_UNIT, "-p", "MainPID", "--value"], capture_output=True, text=True, timeout=10).stdout.strip()
+        dump = ""
+        if pid and pid != "0" and shutil.which("py-spy"):
+            os.makedirs(DUMP_DIR, exist_ok=True)
+            dump = os.path.join(DUMP_DIR, f"{SCHED_UNIT}-{pid}-{time.strftime('%Y%m%d-%H%M%S')}.pyspy")
+            r = subprocess.run(["py-spy", "dump", "--pid", pid], capture_output=True, text=True, timeout=30)
+            open(dump, "w").write(r.stdout + ("\n[stderr]\n" + r.stderr if r.stderr else ""))
+        print(f"scheduler-silent: {SCHED_UNIT} active (pid {pid}) but no tick in journal for >{SCHED_SILENT_S}s; stack dump: {dump or 'n/a'}; verify then `systemctl --user restart {SCHED_UNIT}`", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"scheduler-watchdog-error: {type(e).__name__}: {e}", flush=True)
 
 
 _woken = {}
@@ -147,4 +181,5 @@ while True:
     except Exception:  # noqa: BLE001
         pass
     autowake()
+    scheduler_watchdog()
     time.sleep(POLL_S)
