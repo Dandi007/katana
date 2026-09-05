@@ -151,10 +151,15 @@ def autowake():
             # 已被线接手的终态不催：active_unit 非空（re-adopt 后 r2 在跑）说明线已处理
             if state != "awaiting_gate" and st.get("active_unit"):
                 continue
-            lag = now - time.mktime(time.strptime(gate_at, "%Y-%m-%dT%H:%M:%SZ")) + time.timezone
+            gate_epoch = time.mktime(time.strptime(gate_at, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+            s = json.load(open(STALL))
+            # 事件早于线上次启动 = 线已经在那次运行里看过这个事实（如早已合流的 complete 单），不催。
+            # 2026-09-06 05:50 误触发实例：把 268 min 前 complete 的 R5 单当成未接手，归零了 streak。
+            if float(s.get("last_start_at") or 0) > gate_epoch:
+                continue
+            lag = now - gate_epoch
             if lag < GATE_LAG_S or now - _woken.get(dev, 0) < 1800 or line_unit_active():
                 continue
-            s = json.load(open(STALL))
             if int(s.get("streak") or 0) <= 0:
                 continue
             s["streak"] = 0
