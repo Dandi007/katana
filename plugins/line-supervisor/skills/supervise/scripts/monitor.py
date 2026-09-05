@@ -3,7 +3,7 @@
 
 事件：① 线进入非 dd 驻停的 blocked / done / failed / fault / absent / probe-error；
 ② 看板 board:work-notes 出现本线（线 id 或本线派出的 dd 单号）的 question note 或 work.decision.v1；
-③ autowake：本线的单到 awaiting_gate 超 GATE_LAG_S、线 unit 不在跑、调度器仍在
+③ autowake：本线的单到 awaiting_gate 或终态/interrupted（且无 active_unit）超 GATE_LAG_S、线 unit 不在跑、调度器仍在
    no_progress backoff（streak>0）→ 把 streak 归零，让调度器下一 tick 点火（X-2 类探针缺陷的止血）。
 ④ 调度器看门狗：fleet-graphd unit active 但 journal 超 SCHED_SILENT_S 无 folder_id 行（正常 tick ≈2.5 min）
    → 报事件，并把 py-spy dump（若可用）存到 FG_DUMP_DIR，供立案取栈；重启由监督者判断后手动做（X-6 类假死）。
@@ -123,19 +123,33 @@ def autowake():
             if json.load(open(rec)).get("dispatched_by") != LINE:
                 continue
             st = json.load(open(os.path.join(d, "status.json")))
-            if st.get("state") != "awaiting_gate":
+            state = st.get("state")
+            # 需要线醒来接手的两类 dd 事实：到 gate（线自判）、到终态/被截断（线按 §5e 处置）。
+            # 2026-09-06 04:11 R6 单 9000s 栅栏被截成 interrupted，线在 no_progress backoff 里睡了 45 min，
+            # 旧版只认 awaiting_gate 没兜住 —— 所以终态也算。
+            if state == "awaiting_gate":
+                want = ("acceptance", "success")
+            elif state in ("interrupted", "fault", "refused", "failed", "complete"):
+                want = (None, None)
+            else:
                 continue
             dev = os.path.basename(d)
-            # status.json 是查询缓存，mtime 会被读操作刷新；滞后以 events.jsonl 最后一条 acceptance success 为准
+            # status.json 是查询缓存，mtime 会被读操作刷新；滞后以 events.jsonl 的对应事件时间为准
             gate_at = None
             for line in open(os.path.join(d, "events.jsonl")):
                 try:
                     e = json.loads(line)
                 except Exception:  # noqa: BLE001
                     continue
-                if e.get("stage") == "acceptance" and e.get("event") == "success":
+                if want[0] is None:
+                    if e.get("event") in ("failed", "fault", "refused", "success") and e.get("stage"):
+                        gate_at = e.get("at")
+                elif e.get("stage") == want[0] and e.get("event") == want[1]:
                     gate_at = e.get("at")
             if not gate_at:
+                continue
+            # 已被线接手的终态不催：active_unit 非空（re-adopt 后 r2 在跑）说明线已处理
+            if state != "awaiting_gate" and st.get("active_unit"):
                 continue
             lag = now - time.mktime(time.strptime(gate_at, "%Y-%m-%dT%H:%M:%SZ")) + time.timezone
             if lag < GATE_LAG_S or now - _woken.get(dev, 0) < 1800 or line_unit_active():
@@ -148,7 +162,7 @@ def autowake():
             json.dump(s, open(tmp, "w"))
             os.replace(tmp, STALL)
             _woken[dev] = now
-            print(f"autowake: {dev} awaiting_gate {int(lag/60)}min, line idle, streak reset 0 (gen {s.get('generation')})", flush=True)
+            print(f"autowake: {dev} {state} {int(lag/60)}min, line idle, streak reset 0 (gen {s.get('generation')})", flush=True)
         except Exception as e:  # noqa: BLE001
             print(f"autowake-error: {type(e).__name__}: {e}", flush=True)
 
