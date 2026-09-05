@@ -39,7 +39,7 @@ journalctl --user -u fleet-graphd --since "-15min" --no-pager 2>/dev/null | grep
 
 echo "== ③ 单子（dispatched_by=$LINE）"
 for d in "$FG_ROOT"/dd/*/; do python3 - "$d" "$LINE" <<'EOF'
-import json,sys,os,time
+import json,sys,os,glob
 d,line=sys.argv[1],sys.argv[2]; p=d+"/record.json"
 if not os.path.exists(p): sys.exit()
 r=json.load(open(p))
@@ -47,13 +47,21 @@ if r.get("dispatched_by")!=line: sys.exit()
 st=json.load(open(d+"/status.json")) if os.path.exists(d+"/status.json") else {}
 dev=os.path.basename(d.rstrip("/"))
 if st.get("state")=="complete": print(dev,"complete"); sys.exit()
+# 单被重新 dispatch 后，generation>=2 的事件写在 dd/<dev>/g<N>/events.jsonl；
+# 主 events.jsonl 停在换代那一刻。只读主文件会把「几十分钟前」当成最新状态。
+logs=[d+"/events.jsonl"]+sorted(glob.glob(d+"/g[0-9]*/events.jsonl"))
 last=""
-try:
-    ev=[json.loads(l) for l in open(d+"/events.jsonl") if l.strip()]
+for f in logs:
+    try:
+        ev=[json.loads(l) for l in open(f) if l.strip()]
+    except Exception: continue
     ev=[e for e in ev if e.get("stage")]
-    if ev: e=ev[-1]; last=f'{e.get("at","")[11:16]}Z {e.get("stage")} {e.get("event")}'
-except Exception: pass
-print(dev,"| created",r.get("created_at","")[5:16],"| state",st.get("state"),"| stage",st.get("stage"),"| awaiting",bool(st.get("awaiting")),"| fail",(st.get("failure") or {}).get("code"),"| unit",st.get("active_unit") or "-","| last_event",last)
+    if not ev: continue
+    e=ev[-1]
+    g=os.path.basename(os.path.dirname(f))
+    g=g if g.startswith("g") and g[1:].isdigit() else "g1"
+    last=f'{e.get("at","")[11:16]}Z {g} {e.get("stage")} {e.get("event")} {e.get("failure_code") or ""}'.rstrip()
+print(dev,"| created",r.get("created_at","")[5:16],"| state",st.get("state"),"| gen",st.get("generation"),"| stage",st.get("stage"),"| awaiting",bool(st.get("awaiting")),"| fail",(st.get("failure") or {}).get("code"),"| unit",st.get("active_unit") or "-","| last_event",last)
 EOF
 done
 
