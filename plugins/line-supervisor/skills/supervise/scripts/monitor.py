@@ -177,8 +177,12 @@ last = head_seq()
 while True:
     st = line_state()
     if st != prev:
-        healthy_park = st.startswith("blocked|") and "waiting_on=dd|" in st
-        if not healthy_park and any(k in st for k in ("blocked", "done", "failed", "fault", "absent", "probe-error")):
+        # 只对 terminal 字段判关键词；reason 是自由文本，里面出现「done」「blocked」不算
+        # （2026-09-06 08:25 误报实例：reason 写「非 done 判决」命中了 "done"）。
+        term = st.split("|", 1)[0]
+        healthy_park = term == "blocked" and "waiting_on=dd|" in st
+        is_event = term in ("blocked", "done", "failed", "fault", "absent") or term.startswith("probe-error")
+        if is_event and not healthy_park:
             print(f"{LINE} state: {st}", flush=True)
         prev = st
     try:
