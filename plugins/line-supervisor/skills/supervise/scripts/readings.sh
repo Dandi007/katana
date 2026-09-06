@@ -61,7 +61,19 @@ for f in logs:
     g=os.path.basename(os.path.dirname(f))
     g=g if g.startswith("g") and g[1:].isdigit() else "g1"
     last=f'{e.get("at","")[11:16]}Z {g} {e.get("stage")} {e.get("event")} {e.get("failure_code") or ""}'.rstrip()
-print(dev,"| created",r.get("created_at","")[5:16],"| state",st.get("state"),"| gen",st.get("generation"),"| stage",st.get("stage"),"| awaiting",bool(st.get("awaiting")),"| fail",(st.get("failure") or {}).get("code"),"| unit",st.get("active_unit") or "-","| last_event",last)
+# status.json 的 active_unit 只是一个**字符串标签**，不代表那个 unit 真的存在或在跑：
+# dd runner 常以普通子进程形态运行，systemctl 里根本查不到同名 unit。
+# 拿它当死活读数会把健康的单判成死单，所以这里改报两个实测值：
+#   live=<pid>  —— 真有 `dd run --development <dev>` 进程在跑
+#   fresh=<秒>  —— 该单最新 opencode.db 的 mtime 年龄，说明「在飞的那一段」是否还在写
+import subprocess,time
+try:
+    pid=subprocess.run(["pgrep","-f","dd run --development "+dev],capture_output=True,text=True).stdout.split()
+except Exception: pid=[]
+live=pid[0] if pid else "-"
+dbs=glob.glob(d+"/agent-runs/*/*/**/opencode.db",recursive=True)+glob.glob(d+"/g[0-9]*/agent-runs/*/*/**/opencode.db",recursive=True)
+fresh=int(time.time()-max(os.path.getmtime(f) for f in dbs)) if dbs else -1
+print(dev,"| created",r.get("created_at","")[5:16],"| state",st.get("state"),"| gen",st.get("generation"),"| stage",st.get("stage"),"| awaiting",bool(st.get("awaiting")),"| fail",(st.get("failure") or {}).get("code"),"| live",live,"| db_age_s",fresh,"| last_event",last)
 EOF
 done
 
