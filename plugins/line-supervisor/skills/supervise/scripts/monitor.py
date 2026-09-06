@@ -136,7 +136,12 @@ def autowake():
             dev = os.path.basename(d)
             # status.json 是查询缓存，mtime 会被读操作刷新；滞后以 events.jsonl 的对应事件时间为准
             gate_at = None
-            for line in open(os.path.join(d, "events.jsonl")):
+            # gen>=2 的事件在 g<N>/events.jsonl（2026-09-06 R6 gen2 实例），根目录只有 gen1
+            gen = int(st.get("generation") or 1)
+            ev_path = os.path.join(d, f"g{gen}", "events.jsonl") if gen > 1 else os.path.join(d, "events.jsonl")
+            if not os.path.exists(ev_path):
+                ev_path = os.path.join(d, "events.jsonl")
+            for line in open(ev_path):
                 try:
                     e = json.loads(line)
                 except Exception:  # noqa: BLE001
