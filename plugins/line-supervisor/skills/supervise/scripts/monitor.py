@@ -106,6 +106,9 @@ def scheduler_watchdog():
             os.makedirs(DUMP_DIR, exist_ok=True)
             dump = os.path.join(DUMP_DIR, f"{SCHED_UNIT}-{pid}-{time.strftime('%Y%m%d-%H%M%S')}.pyspy")
             r = subprocess.run(["py-spy", "dump", "--pid", pid], capture_output=True, text=True, timeout=30)
+            if r.returncode != 0 and "Permission" in (r.stderr or ""):
+                # yama ptrace_scope 挡住同用户 attach；有免密 sudo 就提权再抓（2026-09-06 20:39 实例：第一次抓空）
+                r = subprocess.run(["sudo", "-n", "env", f"PATH={os.environ.get('PATH','')}", shutil.which("py-spy"), "dump", "--pid", pid], capture_output=True, text=True, timeout=30)
             open(dump, "w").write(r.stdout + ("\n[stderr]\n" + r.stderr if r.stderr else ""))
         print(f"scheduler-silent: {SCHED_UNIT} active (pid {pid}) but no tick in journal for >{SCHED_SILENT_S}s; stack dump: {dump or 'n/a'}; verify then `systemctl --user restart {SCHED_UNIT}`", flush=True)
     except Exception as e:  # noqa: BLE001
