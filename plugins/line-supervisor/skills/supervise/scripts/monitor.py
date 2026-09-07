@@ -76,7 +76,10 @@ def autowake():
         try:
             if json.load(open(rec)).get("dispatched_by") != LINE:
                 continue
-            st = json.load(open(os.path.join(d, "status.json")))
+            try:
+                st = json.load(open(os.path.join(d, "status.json")))
+            except FileNotFoundError:
+                continue  # 刚派出的单还没有 status.json 缓存（dd MCP 首次查询才建），跳过本轮
             if st.get("state") != "awaiting_gate":
                 continue
             dev = os.path.basename(d)
