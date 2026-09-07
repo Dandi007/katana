@@ -67,9 +67,14 @@ def _strip_markdown(path_cell: str) -> str:
     """
     s = path_cell.strip()
     # 行内链接 [text](path) → 取 path
-    m = re.match(r"^\[[^\]]*\]\(([^)]*)\)$", s)
+    m = re.match(r"^\[[^\]]*\]\(([^)]*)\)(?=$|\s|[（(])", s)
     if m:
         s = m.group(1).strip()
+    # 明确的 code span 已界定路径，后面的说明不参与存在性校验。
+    # 裸路径保持原样，不能误截含空格或括号的合法文件名。
+    code = re.match(r"^`([^`]+)`(?=$|\s|[（(])", s)
+    if code:
+        s = code.group(1)
     # 成对反引号或加粗包裹（可嵌套，反复剥外层）
     changed = True
     while changed:

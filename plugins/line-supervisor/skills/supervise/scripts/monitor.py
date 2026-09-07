@@ -125,7 +125,10 @@ def autowake():
         try:
             if json.load(open(rec)).get("dispatched_by") != LINE:
                 continue
-            st = json.load(open(os.path.join(d, "status.json")))
+            try:
+                st = json.load(open(os.path.join(d, "status.json")))
+            except FileNotFoundError:
+                continue  # PR #160：新单尚未产生查询缓存，跳过，继续核其他单。
             state = st.get("state")
             # 需要线醒来接手的两类 dd 事实：到 gate（线自判）、到终态/被截断（线按 §5e 处置）。
             # 2026-09-06 04:11 R6 单 9000s 栅栏被截成 interrupted，线在 no_progress backoff 里睡了 45 min，

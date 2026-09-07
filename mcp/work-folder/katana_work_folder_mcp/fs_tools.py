@@ -928,7 +928,9 @@ class FSTools:
         if _basename(filename) in _CRITICAL_FILES or filename == BRIEF_NAME:
             return _make_error(
                 "POLICY_VIOLATION",
-                "critical and identity files are created by lifecycle tools",
+                ("golden-order.md 请用 wf_save(folder_id=..., golden_order_additions=...) 创建或追加"
+                 if _basename(filename) == "golden-order.md" else
+                 "critical and identity files are created by lifecycle tools"),
                 folder_id=folder_id,
                 filename=filename,
                 current_commit=self._commit(),
