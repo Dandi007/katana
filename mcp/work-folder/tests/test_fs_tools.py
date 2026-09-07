@@ -598,6 +598,15 @@ def test_edit_preserves_brief_and_append_only_documents(env):
     assert golden_append["ok"] is True
 
 
+def test_golden_create_refusal_explains_working_lifecycle_route(env):
+    result = env.tools.fs_create(env.folder_id, "golden-order.md", "- 用户指令\n")
+    assert result["code"] == "POLICY_VIOLATION"
+    assert "wf_save" in result["message"]
+    assert "golden_order_additions" in result["message"]
+    env.store.save(env.folder_id, _now, golden_order_additions="- 用户指令\n")
+    assert "用户指令" in (env.repo / env.folder_id / "golden-order.md").read_text()
+
+
 def test_golden_order_is_append_only(env):
     env.store.save(
         env.folder_id,

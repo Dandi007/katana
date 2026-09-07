@@ -49,7 +49,10 @@ dev=os.path.basename(d.rstrip("/"))
 if st.get("state")=="complete": print(dev,"complete"); sys.exit()
 # 单被重新 dispatch 后，generation>=2 的事件写在 dd/<dev>/g<N>/events.jsonl；
 # 主 events.jsonl 停在换代那一刻。只读主文件会把「几十分钟前」当成最新状态。
-logs=[d+"/events.jsonl"]+sorted(glob.glob(d+"/g[0-9]*/events.jsonl"))
+logs=[d+"/events.jsonl"]+sorted(
+    (f for f in glob.glob(d+"/g[0-9]*/events.jsonl")
+     if os.path.basename(os.path.dirname(f))[1:].isdigit()),
+    key=lambda f: int(os.path.basename(os.path.dirname(f))[1:]))
 last=""
 for f in logs:
     try:

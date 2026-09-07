@@ -21,6 +21,30 @@ from katana_work_folder_mcp.verify import (
 # 测试数据：带关键路径表的 context.md 示例
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("cell, expected", [
+    ("`/tmp/目录 (有效)`（只读）", "/tmp/目录 (有效)"),
+    ("`/tmp/目录 有空格` 本轮工作树", "/tmp/目录 有空格"),
+    ("[代码](/tmp/repo)（只读）", "/tmp/repo"),
+    ("[代码](/tmp/repo) 已提交", "/tmp/repo"),
+    ("/tmp/目录 (有效)", "/tmp/目录 (有效)"),
+    ("`/tmp/a`unexpected", "`/tmp/a`unexpected"),
+])
+def test_explicit_path_markup_separates_trailing_note(cell, expected):
+    from katana_work_folder_mcp.verify import _strip_markdown
+
+    assert _strip_markdown(cell) == expected
+
+
+def test_annotated_code_path_is_verified_against_real_directory(tmp_path):
+    directory = tmp_path / "工作目录 (保留括号)"
+    directory.mkdir()
+    md = f"| 资源 | 路径 / 地址 | 分支 |\n|---|---|---|\n| repo | `{directory}`（只读） | - |"
+    resources = parse_context_paths(md)
+    assert len(resources) == 1
+    verdicts = verify_env(resources, probe_fn=fs_git_probe)
+    assert verdicts[0].level == MATCH
+
+
 CONTEXT_WITH_TABLE = """\
 # Context
 
