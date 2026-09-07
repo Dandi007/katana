@@ -45,5 +45,5 @@ jobs:
       - name: install mcp packages + run unit/integration tests
         run: |
           uv venv
-          uv pip install -e mcp/shared -e mcp/kernel -e mcp/memory -e mcp/wiki -e mcp/work-folder pytest
+          uv pip install -e mcp/shared -e mcp/kernel -e mcp/memory -e mcp/wiki -e mcp/work-folder -e mcp/migration -e mcp/remote pytest
           PYTHON=.venv/bin/python bash mcp/run-tests.sh
