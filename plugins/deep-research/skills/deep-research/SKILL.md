@@ -101,7 +101,7 @@ Workflow({
 Workflow 返回 `{ folderId, synthesis }` 后：展示 Executive Summary + Key Takeaways；用
 `wf_save` 给研究 folder 存档 checkpoint；提议
 ①扩充某条线索（对同一 `folderId` 重新发起一次 Workflow）②把 report/topics 的结论交
-wiki `ingest_submit` 入库（librarian 判重、归类、落库为成果快照页——不要自行判重手工建页）。
+Wiki 成稿入库：先 `wiki_search` / `wiki_page_get` 核对已有内容，再取 `wiki_template_list/get`，由研究 Agent 按选定模板完成标题、摘要和正文；使用 `wiki_page_validate` 预检、`wiki_page_create` 提交完整成稿并以稳定 request_id 重试，异步任务用 `wiki_job_get` 查回执。管理员不在入库时重写成稿。修改已有页须有本次用户授权，通过携带 revision 的 `wiki_page_update` 局部变更；未获授权时只提交新页或提出建议。
 
 ## 产物（研究 work folder 内，经 work-folder MCP 读写）
 
