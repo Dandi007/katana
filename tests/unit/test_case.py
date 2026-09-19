@@ -32,7 +32,7 @@ def make_contract(tmp_path, **overrides):
 skill: demo:hello
 trigger:
   prompt: "hi"
-  model: lingzhi/claude-opus-4-8
+  model: glm-5.3
 expect:
   process:
     - skill_loaded: fake-skill
@@ -109,7 +109,7 @@ def test_run_case_fail_no_retry_keeps_dir(tmp_path, monkeypatch):
 skill: demo:hello
 trigger:
   prompt: "hi"
-  model: lingzhi/claude-opus-4-8
+  model: glm-5.3
 expect:
   process:
     - skill_loaded: absent-skill
@@ -158,7 +158,7 @@ trigger:
   turns:
     - "x"
     - "y"
-  model: lingzhi/claude-opus-4-8
+  model: glm-5.3
 expect:
   process:
     - skill_loaded: fake-skill

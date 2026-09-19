@@ -39,10 +39,10 @@ expect: {process: [{stdout_grep: "foo"}]}
 def test_model_explicit_default(tmp_path):
     c = load_contract(_w(tmp_path, """
 skill: x:y
-trigger: {prompt: p, model: lingzhi/claude-opus-4-8}
+trigger: {prompt: p, model: glm-5.3}
 expect: {filesystem: [{created: a}]}
 """))
-    assert c.model == "lingzhi/claude-opus-4-8"
+    assert c.model == "glm-5.3"
 
 
 def test_invariant_only_allowed_unchanged_fails(tmp_path):

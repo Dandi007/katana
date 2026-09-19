@@ -1,25 +1,40 @@
 """隔离层：clonefile golden 副本 + 态卫生 base env + 隔离 HOME/CLAUDE_CONFIG_DIR。
 
-搬自旧 tests/runner.py（ccs_online/build_base_env/sweep_setup）
+搬自旧 tests/runner.py（在线检测/build_base_env/sweep_setup）
 与 tests/harness/case.py（_snapshot/HOME 注入）。保留机制，不照抄结构（G3）。
 """
 import os, shutil, socket, subprocess, sys
 from pathlib import Path
 
-CCS_HOST, CCS_PORT = "127.0.0.1", 15721
+# cc-switch(:15721) 已于 2026-08-21 退役；模型流量统一经 New API 网关。
+GATEWAY_URL = os.environ.get("NEW_API_GATEWAY_URL", "http://127.0.0.1:15722")
+SECRETS_ENV = os.path.expanduser("~/.config/agent-shell/secrets.env")
 
 
 # ---------------------------------------------------------------------------
-# CCS 在线检测
+# 网关在线检测
 # ---------------------------------------------------------------------------
 
-def ccs_online() -> bool:
-    """检查 CC Switch（127.0.0.1:15721）是否可达。"""
+def gateway_online() -> bool:
+    """检查 New API 网关是否可达（只测 TCP，不发模型请求）。"""
+    from urllib.parse import urlparse
+    u = urlparse(GATEWAY_URL)
     try:
-        with socket.create_connection((CCS_HOST, CCS_PORT), timeout=2):
+        with socket.create_connection((u.hostname, u.port or 80), timeout=2):
             return True
     except OSError:
         return False
+
+
+def gateway_token() -> str:
+    """网关 token：环境变量优先，否则读 secrets.env；绝不写入日志或报告。"""
+    tok = os.environ.get("NEW_API_GATEWAY_TOKEN", "")
+    if not tok and os.path.exists(SECRETS_ENV):
+        for line in Path(SECRETS_ENV).read_text(encoding="utf-8").splitlines():
+            if line.startswith("NEW_API_GATEWAY_TOKEN="):
+                tok = line.split("=", 1)[1].strip()
+                break
+    return tok
 
 
 # ---------------------------------------------------------------------------
@@ -38,20 +53,22 @@ def build_base_env(no_ccs_check: bool = False) -> dict:
                                空字符串使 katana kb-root 解析视为未设，回落 fixture 的 .katana。
       KATANA_CONFIG_FILE=""   防真实 ~/.katana 经 env 被采纳。
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="1"
-                               harness 流量过 ccs/lingzhi，后端拒 fine-grained-tool-streaming
-                               beta header（400 invalid beta flag）。与 set_claude_ccswitch_*
-                               setter 一致关掉。2026-06-21 live 契约验证。
+                               网关后端为非 Claude 模型，拒 fine-grained-tool-streaming 等
+                               beta header（400 invalid beta flag），统一关掉。
 
     HOME 隔离在 case_env() 层（per-attempt mkdir），此处不注入。
     """
     env: dict = {}
     if not no_ccs_check:
-        if not ccs_online():
-            sys.exit("ABORT: ccs (127.0.0.1:15721) offline — 绝不 fallback 直连")
-        env["ANTHROPIC_BASE_URL"] = f"http://{CCS_HOST}:{CCS_PORT}"
-        # claude CLI requires ANTHROPIC_API_KEY for API-key mode（非 OAuth）。
-        # ccs 不校验 token 合法性；任意非空字符串均可；可被 ANTHROPIC_AUTH_TOKEN 覆盖。
-        env["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_AUTH_TOKEN", "ccs-local")
+        if not gateway_online():
+            sys.exit(f"ABORT: New API gateway ({GATEWAY_URL}) offline — 绝不 fallback 直连")
+        tok = gateway_token()
+        if not tok:
+            sys.exit("ABORT: NEW_API_GATEWAY_TOKEN 缺失（env 或 ~/.config/agent-shell/secrets.env）")
+        env["ANTHROPIC_BASE_URL"] = GATEWAY_URL
+        # 网关按 Bearer 鉴权；API_KEY 置空以盖掉宿主值，避免 claude CLI 走 x-api-key。
+        env["ANTHROPIC_AUTH_TOKEN"] = tok
+        env["ANTHROPIC_API_KEY"] = ""
     # 态卫生：显式覆盖为空，使宿主真实值在 {**os.environ, **env} 合并后失效。
     env["KATANA_KB_ROOT"] = ""
     env["KATANA_CONFIG_FILE"] = ""
