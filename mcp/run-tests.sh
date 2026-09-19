@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mcp server 测试 gate：shared + kernel + memory + migration + wiki + work-folder + remote 七包的 L0 单元 + 集成回归测试。
+# mcp server 测试 gate：shared + kernel + memory + migration + work-folder + remote 六包的 L0 单元 + 集成回归测试。
 # 每个包独立进程，避免源码路径注入后同名 tests.conftest 被错误复用。
 # 用法：PYTHON=/path/to/venv/bin/python bash mcp/run-tests.sh [pytest 额外参数]
 set -euo pipefail
@@ -11,7 +11,7 @@ export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-mcp-tests}"
 export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-mcp-tests@localhost}"
 PY="${PYTHON:-python3}"
 failed=0
-for package in shared wiki work-folder memory migration kernel remote; do
+for package in shared work-folder memory migration kernel remote; do
   echo "=== MCP package: $package ==="
   if ! "$PY" -m pytest "$HERE/$package/tests" \
       --import-mode=importlib -p no:cacheprovider "$@"; then
