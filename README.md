@@ -69,7 +69,7 @@ still supports the event, but that path has no live consumer or test.
 ```
 
 This runs the same scenario on both Claude Code and OpenCode, comparing
-injection parity (via ccs payload forensics), FPA validation triggers, and
+injection parity (via local session-store forensics), FPA validation triggers, and
 skill exposure.
 
 ## Install (Codex)

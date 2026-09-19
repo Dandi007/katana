@@ -1,19 +1,21 @@
 #!/usr/bin/env node
-// Generate sandbox OpenCode config: ccs provider only, no auth, allow-all
+// Generate sandbox OpenCode config: New API gateway provider only, allow-all.
+// The gateway token is NOT written into the file — OpenCode resolves
+// `{env:NEW_API_GATEWAY_TOKEN}` from the sandbox process env at runtime.
 'use strict';
-const [model, ccsUrl] = process.argv.slice(2);
-const modelId = model.replace(/^ccs\//, '');
+const [model, gatewayUrl] = process.argv.slice(2);
+const modelId = model.replace(/^gateway\//, '');
 
 const cfg = {
   $schema: 'https://opencode.ai/config.json',
   permission: { '*': 'allow' },
-  enabled_providers: ['ccs'],
+  enabled_providers: ['gateway'],
   model,
   provider: {
-    ccs: {
-      name: 'CC Switch Proxy',
-      npm: '@ai-sdk/anthropic',
-      options: { apiKey: 'katana-parity', baseURL: `${ccsUrl}/v1` },
+    gateway: {
+      name: 'New API Gateway',
+      npm: '@ai-sdk/openai-compatible',
+      options: { apiKey: '{env:NEW_API_GATEWAY_TOKEN}', baseURL: `${gatewayUrl}/v1` },
       models: { [modelId]: { name: modelId, limit: { context: 200000, output: 64000 } } }
     }
   },
