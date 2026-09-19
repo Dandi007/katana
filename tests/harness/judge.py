@@ -110,9 +110,53 @@ def _judge_prompt(rubric: Path, inputs: list) -> str:
         rubric.read_text(encoding="utf-8"),
     ]
     for p in inputs:
-        body = Path(p).read_text(encoding="utf-8")[:20000]
+        raw = Path(p).read_text(encoding="utf-8")
+        body = distill_trace(raw) if str(p).endswith(".trace.jsonl") else raw
+        # 回答通常在末尾；超限时保留尾部而不是头部。
+        if len(body) > INPUT_CHAR_LIMIT:
+            body = "…（前文省略）\n" + body[-INPUT_CHAR_LIMIT:]
         parts.append(f"\n## Input: {Path(p).name}\n````\n{body}\n````")
     return "\n".join(parts)
+
+
+INPUT_CHAR_LIMIT = 20000
+
+
+def distill_trace(raw: str) -> str:
+    """把 stream-json trace 蒸馏成 judge 能读的对话记录。
+
+    glm 等模型的 trace 里 thinking_tokens 系统事件可达上千条（数百 KB），
+    hook 注入也排在最前面；按前 20000 字符截断时 judge 根本看不到 assistant 回答，
+    只能判 no。这里只保留 assistant 文本、工具调用（名称与入参摘要）、
+    工具结果摘要与最终 result；系统事件与 hook 注入一律丢弃。
+    """
+    lines = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        t = ev.get("type")
+        if t == "assistant":
+            for block in (ev.get("message") or {}).get("content", []) or []:
+                if block.get("type") == "text" and block.get("text"):
+                    lines.append("[assistant]\n" + block["text"])
+                elif block.get("type") == "tool_use":
+                    inp = json.dumps(block.get("input", {}), ensure_ascii=False)
+                    lines.append(f"[tool_use {block.get('name')}] {inp[:400]}")
+        elif t == "user":
+            for block in (ev.get("message") or {}).get("content", []) or []:
+                if block.get("type") == "tool_result":
+                    content = block.get("content")
+                    if isinstance(content, list):
+                        content = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+                    lines.append("[tool_result] " + str(content or "")[:400])
+        elif t == "result":
+            lines.append("[result]\n" + str(ev.get("result") or ""))
+    return "\n\n".join(lines)
 
 
 # ──────────────────────────────────────────────────
