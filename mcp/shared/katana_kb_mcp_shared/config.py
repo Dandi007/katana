@@ -5,13 +5,13 @@ from pathlib import Path
 
 
 def _config_sh() -> str:
-    """katana-config.sh 路径：env 覆盖 > repo 内 wiki 插件副本。"""
+    """katana-config.sh 路径：env 覆盖 > repo 内 work-folder 插件副本（各 plugin 副本 byte-identical）。"""
     env = os.environ.get("KATANA_CONFIG_SH")
     if env:
         return env
     # editable 安装下：config.py 在 mcp/shared/katana_kb_mcp_shared/ → repo 根上溯 4 层
     repo = Path(__file__).resolve().parents[3]
-    path = repo / "plugins" / "wiki" / "hooks" / "katana-config.sh"
+    path = repo / "plugins" / "work-folder" / "hooks" / "katana-config.sh"
     if not path.exists():
         raise FileNotFoundError(
             f"katana-config.sh not found at inferred path {path}; "
