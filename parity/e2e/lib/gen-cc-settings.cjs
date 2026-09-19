@@ -12,8 +12,7 @@ const settings = {
           { type: 'command', command: `"${root}/plugins/guide/hooks/session-start"` },
           { type: 'command', command: `"${root}/plugins/memory/hooks/session-start"` },
           { type: 'command', command: `"${root}/plugins/work-folder/hooks/session-start"` },
-          { type: 'command', command: `"${root}/plugins/retrieval/hooks/session-start"` },
-          { type: 'command', command: `"${root}/plugins/wiki/hooks/session-start"` }
+          { type: 'command', command: `"${root}/plugins/retrieval/hooks/session-start"` }
         ]
       }
     ]

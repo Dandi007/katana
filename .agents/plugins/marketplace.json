@@ -35,12 +35,6 @@
       "category": "Productivity"
     },
     {
-      "name": "wiki",
-      "source": { "source": "local", "path": "./plugins/wiki" },
-      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
-      "category": "Productivity"
-    },
-    {
       "name": "retrieval",
       "source": { "source": "local", "path": "./plugins/retrieval" },
       "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },

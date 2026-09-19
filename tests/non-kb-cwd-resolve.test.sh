@@ -5,12 +5,12 @@
 # Scenario (mirrors real deployment: .katana lives at ~/.katana, the agent runs
 # from some unrelated directory, KATANA_KB_ROOT points at the KB):
 #   - a temp KB holding the activation conditions for every path-bearing hook
-#     (WIKI.md, .katana-writing/, docs/feishu/)
+#     (.katana-writing/, docs/feishu/)
 #   - a temp HOME with ~/.katana carrying RELATIVE config values
 #   - KATANA_KB_ROOT exported to the temp KB
 #   - cwd set to a temp dir that has nothing to do with the KB
 #
-# For each of the 4 path-bearing session-start hooks we assert (positive) the
+# For each of the 3 path-bearing session-start hooks we assert (positive) the
 # injected additionalContext carries the "<KB>/..." ABSOLUTE path, and (negative)
 # it never leaks a bare relative config value, the unrelated cwd, or a stray
 # CLAUDE_PROJECT_DIR. (The guide hook carries no path and is out of scope.)
@@ -35,20 +35,17 @@ mkdir -p "$KB" "$HOME_DIR" "$CWD"
 # --- KB activation conditions (ASCII-only relative paths) ---------------------
 # Use distinctive, unlikely-to-collide segment names so the "no bare relative"
 # negative assertion is not tripped by the word appearing in injected skill
-# prose (e.g. the wiki SKILL.md naturally contains the word "wiki"). These are
+# prose (e.g. a SKILL.md naturally containing the word "writing"). These are
 # arbitrary directory names — what matters is that they resolve under kb-root.
-WIKI_REL="kbtest-wiki-root"
 WRITING_REL="kbtest-writing-dir"
 FEISHU_REL="kbtest/feishu-mirror"
 WF_REL="kbtest-work-records"
 
-mkdir -p "$KB/$WIKI_REL" "$KB/$WRITING_REL" "$KB/$FEISHU_REL"
-touch "$KB/$WIKI_REL/WIKI.md"
+mkdir -p "$KB/$WRITING_REL" "$KB/$FEISHU_REL"
 
 # --- user-level ~/.katana with RELATIVE values --------------------------------
 cat > "$HOME_DIR/.katana" <<EOF
 work_folder_path=$WF_REL
-wiki_root=$WIKI_REL
 writing_dir=$WRITING_REL
 feishu_docs_root=$FEISHU_REL
 EOF
@@ -63,7 +60,7 @@ run_hook() {
         export KATANA_MEMORY_MCP_URL="http://127.0.0.1:1"
         # Defensive: ensure no project-mode / env override bleeds through.
         unset KATANA_CONFIG_FILE CLAUDE_PROJECT_DIR 2>/dev/null || true
-        unset KATANA_WORK_FOLDER KATANA_WIKI_ROOT KATANA_WRITING_DIR 2>/dev/null || true
+        unset KATANA_WORK_FOLDER KATANA_WRITING_DIR 2>/dev/null || true
         unset KATANA_FEISHU_DOCS_ROOT CLAUDE_MEMORY_PROJECT_DIR 2>/dev/null || true
         cd "$CWD" || exit 1
         bash "$REPO/plugins/$plugin/hooks/session-start"
@@ -107,11 +104,6 @@ assert_abs_no_bare() {
 out="$(run_hook work-folder)"
 assert_abs_no_bare "work-folder" "$out" "$WF_REL"
 neg_common "work-folder" "$out"
-
-# wiki
-out="$(run_hook wiki)"
-assert_abs_no_bare "wiki" "$out" "$WIKI_REL"
-neg_common "wiki" "$out"
 
 # writing
 out="$(run_hook writing)"

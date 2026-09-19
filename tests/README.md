@@ -7,7 +7,7 @@ runner 在隔离 fixture（`tests/fixtures/`）中真实运行 `claude -p` 并�
 
     ./tests/run-contracts.sh --touched          # PR 前：跑改动的 plugin
     ./tests/run-contracts.sh --all              # release 前：全量 + judge 兜底
-    ./tests/run-contracts.sh --case wiki:query  # 调单个 skill（或 case_id 精确单 case）
+    ./tests/run-contracts.sh --case retrieval:route  # 调单个 skill（或 case_id 精确单 case）
     ./tests/lint-structure.sh                   # G0 静态检查（CI 同款）
     uv run --with pytest --with pyyaml -m pytest tests/unit   # harness 自身单测
 

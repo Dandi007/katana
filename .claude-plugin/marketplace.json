@@ -41,13 +41,6 @@
       "homepage": "https://github.com/Dandi007/katana"
     },
     {
-      "name": "wiki",
-      "description": "LLM-maintained wiki engine — schema-driven zones, provenance-enforced ingest, deterministic query ladder, adversarial lint",
-      "category": "productivity",
-      "source": "./plugins/wiki",
-      "homepage": "https://github.com/Dandi007/katana"
-    },
-    {
       "name": "retrieval",
       "description": "Multi-source information retrieval — intent→source routing, credibility ladder, fallback chains; web/reddit/twitter/code/github/gitlab/linear/feishu/search-note adapters with externalized auth",
       "category": "productivity",
