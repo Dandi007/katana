@@ -47,11 +47,10 @@ make_side() { # $1 = cc|oc — identical fixture both sides (byte-identical inpu
   local side="$1" home tmp proj
   home="$SANDBOX/$side/home"; tmp="$SANDBOX/$side/tmp"; proj="$SANDBOX/$side/proj"
   mkdir -p "$home/.claude" "$tmp" "$proj" "$SANDBOX/$side/bin"
-  # Activate all 5 deterministic session-start segments: guide+work-folder are
-  # unconditional; retrieval needs retrieval_sources; wiki needs wiki_root+WIKI.md;
+  # Activate all 4 deterministic session-start segments: guide+work-folder are
+  # unconditional; retrieval needs retrieval_sources;
   # memory needs at least one card (else the hook emits nothing).
-  printf 'wiki_root=.\nretrieval_sources=web:web\n' > "$proj/.katana"
-  printf '# WIKI\n\nschema stub for e2e parity\n' > "$proj/WIKI.md"
+  printf 'retrieval_sources=web:web\n' > "$proj/.katana"
   # Seed one project memory card. Both sides scan $CLAUDE_PROJECT_DIR/memory
   # (= $proj/memory); system memory ($HOME/.claude/memory) is empty in-sandbox,
   # so the injected <memory-index> is byte-identical across CC and OC.

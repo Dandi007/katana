@@ -1,4 +1,4 @@
-# session-start-inject — 5 hook 注入契约
+# session-start-inject — 4 hook 注入契约
 # trigger: session.created event
 # input: {session_id, source:'startup', cwd, hook_event_name:'SessionStart'}
 # effect: stdout 解析 hookSpecificOutput.additionalContext，按表序拼接为 <katana-context> 块
@@ -25,7 +25,6 @@ plugins:
   - memory
   - work-folder
   - retrieval
-  - wiki
 env:
   CLAUDE_PLUGIN_ROOT: "<pkgRoot>/plugins/<plugin>"
   CLAUDE_PROJECT_DIR: "<ctx.directory>"

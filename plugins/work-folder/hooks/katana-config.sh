@@ -17,7 +17,6 @@
 # NOTE: Keep copies in sync across plugins (byte-identical):
 #   plugins/work-folder/hooks/katana-config.sh
 #   plugins/memory/hooks/katana-config.sh
-#   plugins/wiki/hooks/katana-config.sh
 #   plugins/feishu-docs/hooks/katana-config.sh
 #   plugins/retrieval/hooks/katana-config.sh
 #   plugins/writing/hooks/katana-config.sh

@@ -23,7 +23,6 @@ const FINGERPRINTS = {
   guide: 'Using Katana',
   'work-folder': 'Work Folder',
   retrieval: 'Using Retrieval',
-  wiki: 'Using Wiki',
   memory: '<memory-index>',
 };
 
