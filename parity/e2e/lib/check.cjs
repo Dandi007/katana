@@ -2,7 +2,7 @@
 // Verdict: end-to-end parity between Claude Code and OpenCode on the same harness.
 // Two deterministic layers, each PASS only when CC and OC agree:
 //   1. INJECTION-PARITY   — the katana session-start segments reached the LLM
-//      (forensic, from ccs payload recording, per-side time window; whole-body).
+//      (forensic, from each side's local session store; whole-record).
 //   2. TOOL-EFFECT-PARITY — both sides produced the shared write side effect.
 // NOTE: PostToolUse parity had a third layer until the fpa validator hook was
 // retired (fpa became prompt-only). The adapter still supports postToolUse but
@@ -24,7 +24,7 @@ const read = (side, file) => {
   return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
 };
 
-// ---- Layer 1: injection parity (ccs payload forensics) ----
+// ---- Layer 1: injection parity (local session-store forensics) ----
 const injDiff = injectionDiff.diff(sandbox);
 console.log('[injection-diff] ' + JSON.stringify(injDiff));
 if (injDiff.error) {
