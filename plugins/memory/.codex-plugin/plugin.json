@@ -1,6 +1,6 @@
 {
   "name": "memory",
-  "version": "0.2.3",
+  "version": "0.4.1",
   "description": "Operational memory skills for verified facts and lifecycle management.",
   "author": { "name": "Dandi007", "url": "https://github.com/Dandi007" },
   "repository": "https://github.com/Dandi007/katana",
