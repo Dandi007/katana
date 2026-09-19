@@ -5,7 +5,7 @@ description: 未迁本地知识子树的只读检索源（含 DeepThought/、转
 
 # /retrieval:search-note
 
-本地 Markdown 知识库的只读检索源。**任何情况下不写入 KB。**
+本地 Markdown 知识库的只读检索源。**不修改、不新增知识库里的任何笔记。** 用户明确指定了输出文件路径（如「写到 ./search-result.md」）时按指定路径写，那是用户的产物文件，不是知识库内容。
 
 ## 配置（.katana）
 
