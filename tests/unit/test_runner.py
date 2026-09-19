@@ -54,7 +54,7 @@ def test_run_case_three_axis_pass(tmp_path, monkeypatch):
 skill: demo:hello
 trigger:
   prompt: "write out.md"
-  model: lingzhi/claude-opus-4-8
+  model: glm-5.3
 expect:
   process:
     - skill_loaded: fake-skill
@@ -75,7 +75,7 @@ expect:
 
     assert r.status == "PASS", f"expected PASS, got {r.status}: {r.detail}"
     assert r.attempts == 1
-    assert r.model == "lingzhi/claude-opus-4-8"
+    assert r.model == "glm-5.3"
 
     # axis_detail 记录了 delta.created
     delta = r.axis_detail.get("delta", {})
@@ -97,7 +97,7 @@ def test_run_case_fails_when_file_not_created(tmp_path):
 skill: demo:hello
 trigger:
   prompt: "write something"
-  model: lingzhi/claude-opus-4-8
+  model: glm-5.3
 expect:
   process:
     - skill_loaded: fake-skill
@@ -127,7 +127,7 @@ def test_run_case_fails_when_skill_not_loaded(tmp_path):
 skill: demo:hello
 trigger:
   prompt: "hello"
-  model: lingzhi/claude-opus-4-8
+  model: glm-5.3
 expect:
   process:
     - skill_loaded: absent-skill
@@ -157,7 +157,7 @@ setup:
     - dir:/nonexistent/zzz
 trigger:
   prompt: "hi"
-  model: lingzhi/claude-opus-4-8
+  model: glm-5.3
 expect:
   process:
     - skill_loaded: fake-skill
@@ -186,7 +186,7 @@ def test_run_case_isolation(tmp_path, monkeypatch):
 skill: demo:hello
 trigger:
   prompt: "write dirty"
-  model: lingzhi/claude-opus-4-8
+  model: glm-5.3
 expect:
   process:
     - skill_loaded: fake-skill
@@ -210,7 +210,7 @@ expect:
 skill: demo:hello
 trigger:
   prompt: "just trace"
-  model: lingzhi/claude-opus-4-8
+  model: glm-5.3
 expect:
   process:
     - skill_loaded: fake-skill

@@ -34,7 +34,7 @@ def make_mini_repo(tmp_path):
         skill: demo:hello
         trigger:
           prompt: "打个招呼"
-          model: lingzhi/claude-opus-4-8
+          model: glm-5.3
         expect:
           process:
             - skill_loaded: fake-skill

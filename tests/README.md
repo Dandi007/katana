@@ -13,7 +13,7 @@ runner 在隔离 fixture（`tests/fixtures/`）中真实运行 `claude -p` 并�
 
 ## 约束
 
-- 流量必须走 ccs（127.0.0.1:15721）→ 灵智，ccs 不在线直接 abort，绝不 fallback 直连
+- 流量必须走 New API 网关（127.0.0.1:15722，模型名不带 provider 前缀；cc-switch 已于 2026-08-21 退役），网关不在线或缺 token 直接 abort，绝不 fallback 直连
 - 每 case 独立 APFS 快照（kb + CLAUDE_CONFIG_DIR），skill 级并行（--jobs，默认 4）；
   `exclusive:<name>` requires 声明独占资源（如 chrome profile），同组自动串行
 - FAIL 自动重试一次并保留现场目录；报告落 tests/reports/ 随 PR 入库

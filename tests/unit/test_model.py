@@ -20,5 +20,5 @@ def test_build_env_collects_setter_env(tmp_path):
 def test_roster_models_explicit(tmp_path):
     repo = pathlib.Path(__file__).resolve().parents[1].parent
     m = model.load_models(repo)
-    gpt = next(x for x in m["jury-roster"] if x["name"] == "gpt")
-    assert gpt["model"] == "gpt/gpt-5.5"   # 显式，非裸继承 setter 槽（5.4）
+    kimi = next(x for x in m["jury-roster"] if x["name"] == "kimi")
+    assert kimi["model"] == "k3"   # 显式、网关裸模型名，非继承 setter 槽（5.4）
