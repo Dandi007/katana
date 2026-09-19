@@ -304,7 +304,7 @@ def _judge_role(models: dict):
     roles = models.get("roles", {})
     role_cfg = roles.get("default-judge", {})
     setter = role_cfg.get("setter", "")
-    model = role_cfg.get("model", "lingzhi/claude-opus-4-8")
+    model = role_cfg.get("model", "glm-5.3")
     return setter, model
 
 

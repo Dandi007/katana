@@ -8,11 +8,11 @@ from harness.report import render_report
 def test_render_contains_all_sections():
     results = [
         CaseResult("query-hot", "wiki:query", "PASS", attempts=1,
-                   duration_s=94.2, model="lingzhi/claude-opus-4-8"),
+                   duration_s=94.2, model="glm-5.3"),
         CaseResult("xhs", "retrieval:xiaohongshu", "SKIP", detail="dir missing: profile"),
         CaseResult("ingest", "wiki:ingest", "FAIL", attempts=2, attribution="prompt",
                    detail="file_absent: unexpected", kept_dir="/tmp/x", duration_s=120,
-                   model="lingzhi/claude-opus-4-8"),
+                   model="glm-5.3"),
         CaseResult("dr", "deep-research:deep-research", "NEEDS-REVIEW",
                    verdict_result={"items": [{"q": "报告每条 claim 有引用?", "answer": "no",
                                               "evidence": "第三节两条裸断言"}]}),

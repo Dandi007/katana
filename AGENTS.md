@@ -24,6 +24,7 @@ A sharp little toolkit of agent plugins（Claude Code + OpenCode 双端）：每
 - [002 Work Folder fs 路径契约虚拟化](docs/specs/002-wf-fs-path-contract-virtualization.md)
 - [003 Work Folder flat cutover runbook](docs/specs/003-work-folder-flat-cutover-runbook.md) —— 离线迁移、fail-closed 判据、verify 与 startup gate
 - [004 Fleet 基建工具修复](docs/specs/004-fleet-foundation-tool-repair.md) —— 路径说明解析、黄金指令写入指引与监督读数回归
+- [005 Agentic 产品分层原则](docs/specs/005-agentic-product-layering.md) —— 通用领域能力、MCP、Skill / Plugin 与呈现契约
 
 **其他（产品内容与测试资产，不是仓库文档，勿挪动）**
 
