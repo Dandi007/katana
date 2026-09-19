@@ -110,3 +110,24 @@ def test_get_judge_unknown_raises():
     """未知 judge 名报 KeyError。"""
     with pytest.raises(KeyError, match="unknown judge"):
         get_judge("nonexistent")
+
+
+def test_distill_trace_keeps_answer_and_drops_thinking_noise():
+    from harness.judge import distill_trace, _judge_prompt, INPUT_CHAR_LIMIT
+    import json, pathlib, tempfile
+    noise = "\n".join(json.dumps({"type": "system", "subtype": "thinking_tokens", "n": i}) for i in range(3000))
+    hook = json.dumps({"type": "system", "subtype": "hook_response", "content": "SessionStart 注入：distill 会产出 template"})
+    answer = json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "name": "Read", "input": {"file_path": "/x/SKILL.md"}},
+        {"type": "text", "text": "distill 模式会产出 template 骨架与 pattern 判据，落盘前需人工确认。"}]}})
+    result = json.dumps({"type": "result", "subtype": "success", "result": "最终回答：distill 已说明。"})
+    raw = "\n".join([hook, noise, answer, result])
+    assert len(raw) > INPUT_CHAR_LIMIT
+    text = distill_trace(raw)
+    assert "落盘前需人工确认" in text and "[tool_use Read]" in text and "最终回答" in text
+    assert "thinking_tokens" not in text and "SessionStart 注入" not in text
+    with tempfile.TemporaryDirectory() as d:
+        tp = pathlib.Path(d) / "case.trace.jsonl"; tp.write_text(raw, encoding="utf-8")
+        rb = pathlib.Path(d) / "rubric.md"; rb.write_text("是否提及 distill？", encoding="utf-8")
+        prompt = _judge_prompt(rb, [str(tp)])
+    assert "落盘前需人工确认" in prompt and "thinking_tokens" not in prompt
