@@ -10,9 +10,14 @@ installable — take only what you need.
 | `deep-research` | Workflow-orchestrated research over your knowledge base + web + named platform sources (declared in config); judgment-driven stop; cited report |
 | `memory` | Verified facts as memory cards, auto-injected as an L1 index each session |
 | `obsidian-md` | Obsidian Markdown writing rules grounded in official docs (`obsidian-writing`) — wikilinks, headings, frontmatter, embeds, callouts; every rule cites obsidian.md/help |
-| `wiki` | LLM-maintained wiki engine — schema-driven zones, provenance-enforced ingest, deterministic query ladder, adversarial lint (Karpathy pattern: compile not re-derive; governance: immutable raw, provenance, adversarial lint, human gate) |
 | `retrieval` | Multi-source information retrieval — intent→source routing, credibility ladder, fallback chains; web/reddit/twitter/code/github/gitlab/linear/feishu/search-note adapters |
 | `fpa` | First Principles Analysis (`first-principles`) — decompose the goal into effect-level needs before touching the incumbent; every claimed hard constraint must name the event that would break it; rebuild only from the constraints that survive |
+
+The wiki plugin is not part of katana: it ships from the wiki's own repo
+([Dandi007/wiki-v3](https://github.com/Dandi007/wiki-v3), `plugin/`), alongside the
+wiki MCP service (registered as `katana-wiki-mcp`). The former file-based
+`wiki` plugin here (`/wiki:query` / `/wiki:ingest` / `/wiki:lint`) was retired
+with the old `:5601` server and has been removed.
 
 ## Install (Claude Code)
 
@@ -23,7 +28,6 @@ installable — take only what you need.
 /plugin install deep-research@katana
 /plugin install memory@katana
 /plugin install obsidian-md@katana
-/plugin install wiki@katana
 /plugin install retrieval@katana
 /plugin install fpa@katana
 ```
@@ -49,14 +53,14 @@ Or for development, add the local path to your `opencode.json`:
 
 The adapter maps OpenCode events to Claude Code hook semantics, spawning the
 same `plugins/*/hooks/*` scripts. SessionStart hooks inject context (guide,
-work-folder, retrieval, wiki), and all skills are exposed to OpenCode's skill
+work-folder, retrieval, memory), and all skills are exposed to OpenCode's skill
 discovery. No katana plugin currently registers a PostToolUse hook; the adapter
 still supports the event, but that path has no live consumer or test.
 
 **Configuration:**
 
 - `KATANA_PARITY_ROOT` — override katana root path (default: auto-detect from adapter location)
-- `KATANA_DISABLED_PLUGINS` — comma-separated list of plugins to disable (e.g., `wiki,retrieval`)
+- `KATANA_DISABLED_PLUGINS` — comma-separated list of plugins to disable (e.g., `feishu-docs,retrieval`)
 
 **Parity verification:**
 
@@ -79,7 +83,7 @@ codex plugin marketplace add Dandi007/katana
 ```
 
 Then open Codex Plugins, choose the `Katana` marketplace, and install the
-individual plugins you want (`guide`, `retrieval`, `wiki`, `work-folder`,
+individual plugins you want (`guide`, `retrieval`, `work-folder`,
 `writing`, etc.).
 
 For local development, point Codex at a clone:
@@ -87,7 +91,7 @@ For local development, point Codex at a clone:
 ```bash
 codex plugin marketplace add /data/code/self/katana
 codex plugin add retrieval@katana
-codex plugin add wiki@katana
+codex plugin add work-folder@katana
 ```
 
 Codex installs the bundled `skills/` from each selected plugin. Claude Code
@@ -115,9 +119,6 @@ Claude Code-specific features degrade gracefully elsewhere:
 - `guide` / `work-folder` context injection and `memory` index injection use
   Claude Code SessionStart hooks. On Codex, paste the work-folder convention
   (`plugins/work-folder/rules/work-folder.md`) into your project's AGENTS.md.
-- `wiki` zone-index injection uses a Claude Code SessionStart hook. On other
-  tools, pass the index path via `WIKI_INDEX` env var or set `wiki.index_path`
-  in your `.katana` file.
 - `deep-research` orchestration uses Claude Code's Workflow tool; other tools
   can follow the SKILL.md flow manually.
 - `fpa` is prompt-only — no hooks, no scripts, no Workflow orchestration. It
@@ -165,7 +166,8 @@ The file uses simple `key=value` format. Lines starting with `#` are comments.
 | deep-research | `deep_research_kb_dir` | `DEEP_RESEARCH_KB_DIR` | current directory | Knowledge base root |
 | deep-research | `deep_research_sources` | `DEEP_RESEARCH_SOURCES` | (none) | Named sources, comma-separated `name:entry` |
 | deep-research | `deep_research_max_width` | `DEEP_RESEARCH_MAX_WIDTH` | 10 | Max clues explored per round (fan-out width) |
-| wiki | `wiki_root` | `KATANA_WIKI_ROOT` | `wiki` | Wiki knowledge base root directory |
+
+**Removed keys:** `wiki_root` (`KATANA_WIKI_ROOT`) and `wiki_interface` were read by the former `wiki` plugin's SessionStart hook. That plugin has been removed from katana, so no katana plugin reads them anymore and they can be dropped from `.katana`. (The legacy `mcp/wiki` server package in this repo still resolves `wiki_root` for its own startup.)
 
 **Note:** System-level memory directory only supports environment variables (machine dimension, not project-specific).
 

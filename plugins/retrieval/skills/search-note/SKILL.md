@@ -55,4 +55,4 @@ KB_DIR="$(katana_resolve_path "$(katana_config_get kb_dir "." "")")"
 
 # References
 
-- `WIKI.md` | source_type: internal | credibility: high — katana wiki plugin schema（`/wiki:query` 为优先检索路径）
+- `WIKI.md` | source_type: internal | credibility: high — 旧文件式 wiki schema（katana 的 `wiki` plugin 与 `/wiki:query` 已退役；wiki 检索走 wiki-v3 的 MCP（注册名 `katana-wiki-mcp`）及其 repo 发布的 wiki plugin）
