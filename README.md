@@ -167,7 +167,7 @@ The file uses simple `key=value` format. Lines starting with `#` are comments.
 | deep-research | `deep_research_sources` | `DEEP_RESEARCH_SOURCES` | (none) | Named sources, comma-separated `name:entry` |
 | deep-research | `deep_research_max_width` | `DEEP_RESEARCH_MAX_WIDTH` | 10 | Max clues explored per round (fan-out width) |
 
-**Removed keys:** `wiki_root` (`KATANA_WIKI_ROOT`) and `wiki_interface` were read by the former `wiki` plugin's SessionStart hook. That plugin has been removed from katana, so no katana plugin reads them anymore and they can be dropped from `.katana`. (The legacy `mcp/wiki` server package in this repo still resolves `wiki_root` for its own startup.)
+**Removed keys:** `wiki_root` (`KATANA_WIKI_ROOT`) and `wiki_interface` were read by the former `wiki` plugin's SessionStart hook. That plugin has been removed from katana, so no katana plugin reads them anymore and they can be dropped from `.katana`.
 
 **Note:** System-level memory directory only supports environment variables (machine dimension, not project-specific).
 

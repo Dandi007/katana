@@ -35,7 +35,7 @@ jobs:
         run: bun test parity/adapter/opencode/
 
   mcp-unit:
-    # Gates the MCP servers (katana-wiki-mcp + katana-work-folder-mcp): L0 单元 +
+    # Gates the MCP servers (katana-memory-mcp + katana-work-folder-mcp): L0 单元 +
     # 全状态图集成回归（create/save/resume MATCH/DRIFT/BROKEN/list/search）。
     # 无 svc / 无 LLM / 无网络；把原先只能手跑的 live e2e 固化成确定性 merge gate。
     runs-on: ubuntu-latest
@@ -45,5 +45,5 @@ jobs:
       - name: install mcp packages + run unit/integration tests
         run: |
           uv venv
-          uv pip install -e mcp/shared -e mcp/kernel -e mcp/memory -e mcp/wiki -e mcp/work-folder -e mcp/migration -e mcp/remote pytest
+          uv pip install -e mcp/shared -e mcp/kernel -e mcp/memory -e mcp/work-folder -e mcp/migration -e mcp/remote pytest
           PYTHON=.venv/bin/python bash mcp/run-tests.sh
