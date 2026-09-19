@@ -1,21 +1,10 @@
-# Rubric: retrieval:using-retrieval — using-retrieval-loader
+<!-- 规约：所有问题必须正极性——yes=符合预期。judge 对任何非 yes 记 NEEDS-REVIEW；只回答下列各项，不新增判据。 -->
+# retrieval:using-retrieval — using-retrieval-loader 语义验收
 
-## Task
-The skill was asked to list the retrieval conventions injected by the `using-retrieval` loader:
-- What to do before answering factual questions (route to a source)
-- What annotation to attach to retrieval conclusions (credibility/可信度)
+skill 被要求列出 `using-retrieval` 加载器注入的检索约定。逐项 yes/no + evidence（引用回答原文行）：
 
-## Pass criteria (answer = YES only if ALL hold)
-1. Response mentions routing / consulting a source before answering
-2. Response mentions credibility annotation (`high`/`medium`/`low` or `可信度`)
-3. Response correctly reflects the skill's own conventions (not generic advice)
+1. 回答是否提及回答事实性问题前先路由 / 查询信息源？
+2. 回答是否提及检索结论要附可信度标注（`high` / `medium` / `low` 或「可信度」）？
+3. 回答是否反映该 skill 自身的约定，而非泛泛的通用建议？
 
-## Output
-Respond with exactly one JSON object:
-```json
-{"verdict": "yes", "reason": "<one sentence>"}
-```
-or
-```json
-{"verdict": "no", "reason": "<which criterion failed>"}
-```
+输出 fenced json：{"items": [{"q": "...", "answer": "yes|no", "evidence": "..."}]}
