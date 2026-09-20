@@ -1,6 +1,6 @@
 ---
 name: search-note
-description: 未迁本地知识子树的只读检索源（含 DeepThought/、转换文档/ —— 它们没进 wiki-v3）；已迁 wiki/work-folder 域分别路由 katana-wiki-mcp 的 search / work-folder MCP 的 wf_search。query_lancedb.py --mode auto（vector→keyword 自降级）。
+description: 未迁本地知识子树的只读检索源（含 DeepThought/、转换文档/ —— 它们没进 wiki-v3）；已迁 wiki/work-folder 域分别路由 docstore MCP 的 wiki_search / wf_search。query_lancedb.py --mode auto（vector→keyword 自降级）。
 ---
 
 # /retrieval:search-note
@@ -24,8 +24,8 @@ description: 未迁本地知识子树的只读检索源（含 DeepThought/、转
 
 | 范围 | 检索方式 |
 |------|----------|
-| wiki 域（Zettelkasten 那 824 篇）| katana-wiki-mcp `search`（深读用 `page_get`） |
-| `DeepThought/`、`转换文档/` | **本 skill** —— 2026-08-27 cutover 时没迁进 wiki-v3，留在旧库 `/data/wiki` 只读归档，katana-wiki-mcp 的 `search` 搜不到它们 |
+| wiki 域（Zettelkasten 那 824 篇）| docstore `wiki_search`（深读用 `wiki_get`） |
+| `DeepThought/`、`转换文档/` | **本 skill** —— 2026-08-27 cutover 时没迁进 wiki-v3，留在旧库 `/data/wiki` 只读归档，docstore 的 `wiki_search` 搜不到它们 |
 | `智元工作/工作记录/` | `wf_search`（深读用 work-folder MCP `fs_read`） |
 | `智元工作/op/`、`智元工作/具身中心工程OKR/` | 本 source 的本地只读检索 |
 | `Ideas/`、`Templates/`、`Incubator/`、`docs/`、`.runtime/` 及其它未迁子树 | 本 source 的本地只读检索 |
@@ -55,4 +55,4 @@ KB_DIR="$(katana_resolve_path "$(katana_config_get kb_dir "." "")")"
 
 # References
 
-- `WIKI.md` | source_type: internal | credibility: high — 旧文件式 wiki schema（katana 的 `wiki` plugin 与 `/wiki:query` 已退役；wiki 检索走 wiki-v3 的 MCP（注册名 `katana-wiki-mcp`）及其 repo 发布的 wiki plugin）
+- `WIKI.md` | source_type: internal | credibility: high — 旧文件式 wiki schema（katana 的 `wiki` plugin 与 `/wiki:query` 已退役；wiki 检索走 docstore MCP 的 `wiki_*` 工具，写作方法是 docstore plugin 的 `wiki:author` skill；2026-09-20 起 wiki-v3 只剩阅读 Web 与内置 agent）

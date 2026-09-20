@@ -13,7 +13,7 @@ description: 大规模多源探索并生成研究综述。产物落研究专属 
 `wf_create` 建，topic 形如 `deep-research: <主题名>`），所有文件经 work-folder
 MCP `fs_*` 以 folder 相对路径读写；`folder_id` 是 opaque token，只从
 `wf_create`/`wf_search`/`wf_list` 返回值取得，不解析、不拼接、不暴露物理路径。
-wiki 域只作**检索源**（katana-wiki-mcp `search` / `page_get`），本 skill 不写 wiki。
+wiki 域只作**检索源**（docstore `wiki_search` / `wiki_get`），本 skill 不写 wiki。
 
 > 历史：0.6.x 及以前产物写 wiki MCP `fs_*` 的 `DeepThought/<主题>/`；2026-08-27
 > wiki-v3 cutover 后该接口不存在（新 wiki MCP 无 `fs_*`，DeepThought 只读归档），
@@ -74,7 +74,7 @@ deep_research_models=worker:sonnet,triage:opus,synth:opus,harvest:haiku
    `sonnet`。triage/synth 一般保持 `opus`，除非用户另有指定。
 4. 把输入拆成 3-6 条初始线索，每条形如
    `{ id:"c0", text:"...", local:<bool>, suggested_sources:[...], depth:0 }`。
-    suggested_sources 可选：①`wiki`（katana-wiki-mcp `search`）②`work-folder`（`wf_search`）
+    suggested_sources 可选：①`wiki`（docstore `wiki_search`）②`work-folder`（`wf_search`）
     ③`web` ④已声明命名源名。命名源 entry 是 `/retrieval:<name>` 入口，绝不是
     文件路径；fallback 与可信度由 retrieval plugin 承载。
    **不强制澄清提问**（Workflow 中途问不了，低摩擦直接跑；仅当输入完全无法解析时才追问）。
@@ -101,7 +101,7 @@ Workflow({
 Workflow 返回 `{ folderId, synthesis }` 后：展示 Executive Summary + Key Takeaways；用
 `wf_save` 给研究 folder 存档 checkpoint；提议
 ①扩充某条线索（对同一 `folderId` 重新发起一次 Workflow）②把 report/topics 的结论交
-Wiki 成稿入库（经 katana-wiki-mcp，工具名前缀以客户端 schema 为准）：先 `search` / `page_get` 核对已有内容，再取 `template_list` / `template_get`，由研究 Agent 按选定模板完成标题、摘要和正文；使用 `page_validate` 预检、`page_create` 提交完整成稿并以稳定 request_id 重试，异步任务用 `job_get` 查回执。管理员不在入库时重写成稿。修改已有页须有本次用户授权，通过携带 revision 的 `page_update` 局部变更；未获授权时只提交新页或提出建议。
+Wiki 成稿入库（经 docstore MCP 的 `wiki_*` 工具，写法见 docstore plugin 的 `wiki:author` skill）：先 `wiki_search` / `wiki_get` 核对已有内容，由研究 Agent 完成标题、摘要（summary）和正文；`wiki_create` 提交完整成稿并以稳定 request_id 重试，不确定是否已提交用 `wiki_operation` 查回执。管理员不在入库时重写成稿。修改已有页须有本次用户授权，通过携带 expected_revision 的 `wiki_update` 局部变更（edits）；未获授权时只提交新页或提出建议。
 
 ## 产物（研究 work folder 内，经 work-folder MCP 读写）
 
@@ -125,7 +125,7 @@ Wiki 成稿入库（经 katana-wiki-mcp，工具名前缀以客户端 schema 为
 0.6.x 时代写在旧 wiki 库 `DeepThought/` 的历史研究是只读归档，不在本流程内续跑。
 
 ## 通用规则
-- 探索源只读；wiki 域只用 katana-wiki-mcp `search`/`page_get`，工作记录只用 `wf_search`/work-folder `fs_read`，未迁子树（含 `DeepThought/`、`转换文档/`）才可用 `/retrieval:search-note|code`。
+- 探索源只读；wiki 域只用 docstore `wiki_search`/`wiki_get`，工作记录只用 `wf_search`/work-folder `fs_read`，未迁子树（含 `DeepThought/`、`转换文档/`）才可用 `/retrieval:search-note|code`。
 - 本研究的 work folder 是唯一 mutation 面；不写 wiki、不发消息、不评论 issue/MR、不 push。
 - 外部源优先经 `/retrieval:<source>`，无则 fallback WebSearch/WebFetch / 平台只读 CLI。
 - 来源标注 `[本地]/[互联网]/[平台:<源名>]/[AI]`；可信度 high/medium/low/conflicted。

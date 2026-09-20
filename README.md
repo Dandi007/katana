@@ -13,11 +13,12 @@ installable — take only what you need.
 | `retrieval` | Multi-source information retrieval — intent→source routing, credibility ladder, fallback chains; web/reddit/twitter/code/github/gitlab/linear/feishu/search-note adapters |
 | `fpa` | First Principles Analysis (`first-principles`) — decompose the goal into effect-level needs before touching the incumbent; every claimed hard constraint must name the event that would break it; rebuild only from the constraints that survive |
 
-The wiki plugin is not part of katana: it ships from the wiki's own repo
-([Dandi007/wiki-v3](https://github.com/Dandi007/wiki-v3), `plugin/`), alongside the
-wiki MCP service (registered as `katana-wiki-mcp`). The former file-based
-`wiki` plugin here (`/wiki:query` / `/wiki:ingest` / `/wiki:lint`) was retired
-with the old `:5601` server and has been removed.
+The wiki plugin is not part of katana: since 2026-09-20 it ships with
+[Dandi007/docstore](https://github.com/Dandi007/docstore) (`plugins/docstore`,
+skills `wiki:author` / `paper-mode` / `wiki-article-share`), and the wiki MCP tools are
+docstore's `wiki_*`. The former file-based `wiki` plugin here
+(`/wiki:query` / `/wiki:ingest` / `/wiki:lint`) was retired with the old `:5601` server
+and has been removed.
 
 ## Install (Claude Code)
 
