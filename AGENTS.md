@@ -4,7 +4,7 @@ A sharp little toolkit of agent plugins（Claude Code + OpenCode 双端）：每
 
 ## 关键入口
 
-- **plugins/**：13 个独立 plugin（`guide` / `work-folder` / `deep-research` / `memory` / `obsidian-md` / `retrieval` / `fpa` / `writing` / `jury` / `incubate` / `feishu-docs` / `agent-skills` / `line-supervisor`）。Wiki 的 plugin（`wiki:author` + MCP 调用提示 hook）不在本仓：由 wiki 自己的 repo（Dandi007/wiki-v3 的 `plugin/`）发布，MCP 注册名 `katana-wiki-mcp`。安装方式见 [README.md](README.md)。
+- **plugins/**：13 个独立 plugin（`guide` / `work-folder` / `deep-research` / `memory` / `obsidian-md` / `retrieval` / `fpa` / `writing` / `jury` / `incubate` / `feishu-docs` / `agent-skills` / `line-supervisor`）。Wiki 的 plugin（`wiki:author` 等 skill + MCP 调用提示 hook）不在本仓：2026-09-20 起随 docstore（Dandi007/docstore 的 `plugins/docstore`）发布，MCP 是 docstore 的 `wiki_*` 工具。安装方式见 [README.md](README.md)。
 - **parity/**：OpenCode parity 适配层，npm 包 `opencode-katana`（`package.json` 的 `files` allowlist 决定分发内容）。
 - **mcp/work-folder/**：Work Folder MCP（Python，`katana_work_folder_mcp`），生产服务；CLI `wf-report`，迁移工具 `scripts/migrate_flat.py`。
 - **验收命令**：`npm test`（`bun test parity/adapter/opencode/`）、`npm run test:shell`、`npm run test:pack`、`npm run lint`、`npm run e2e`。
