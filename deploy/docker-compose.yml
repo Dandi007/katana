@@ -1,0 +1,142 @@
+# katana MCP 三域服务 —— 零 bind mount 部署。
+#
+# 核心不变量（docs/constitution/002-data-plane-privacy.md 第一条）：
+# **三域 data root 是 MCP 进程的私有成员**。这里用 named volume 兑现——宿主命名
+# 空间里根本不存在那三个路径，`--outdir` 手滑、顺手 `git commit` 这两类事故
+# 结构性不可能发生，而不是「写的时候报错」。
+#
+# 代码同样不 bind：全部烘进镜像（mcp/Dockerfile）。整份 compose 里没有一个
+# `- /host/path:` 形式的挂载，这是本文件最该守住的性质。
+#
+# client 零感知：端口与全部 KATANA_* env 与封仓前逐字一致，MCP 本来就是 HTTP 接口。
+#
+# 用法见 deploy/README.md。
+
+# identity 在镜像的 /etc/gitconfig 里也有一份；这里显式覆盖，免得将来换基础镜像
+# 时静默丢失。**必须用 map 级 anchor 在各服务的 environment 内部合并**——放在
+# x-katana-common 里会被服务自己的 environment: 整块替换掉（YAML merge key 不做
+# 深合并），实测三个服务的 GIT_* 全丢，而 git 会静默回落到镜像默认值，不报错。
+# 共享 embedding 端点。**服务名而不是 IP/宿主回环**：三个 MCP 与 embedding 在同一
+# compose 网络里，容器间直连——容器化之初卡住的 host.docker.internal 问题在这个
+# 形态下结构性不存在，也不需要动任何宿主服务的监听面。
+x-embedding: &embedding
+  KATANA_EMBEDDING_ENDPOINT: http://embedding:80/v1/embeddings
+  KATANA_EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+
+x-git-identity: &git-identity
+  GIT_AUTHOR_NAME: katana-mcp
+  GIT_AUTHOR_EMAIL: katana-mcp@localhost
+  GIT_COMMITTER_NAME: katana-mcp
+  GIT_COMMITTER_EMAIL: katana-mcp@localhost
+
+x-katana-common: &katana-common
+  image: katana-mcp:${KATANA_MCP_TAG:?需指定镜像 tag，勿用 latest 部署}
+  restart: unless-stopped
+  # 只读 rootfs：容器内除 volume 与 /tmp 外一律不可写。
+  # kernel 的 git 事务只写 data volume，不需要别处可写。
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  # 共享的**无状态**计算面：进文本、出向量，不持有任何域的数据。
+  # 有状态的索引归各域自持，在各自的卷里（mcp/search）。
+  embedding:
+    image: katana-embedding:${KATANA_MCP_TAG:?需指定镜像 tag，勿用 latest 部署}
+    container_name: katana-embedding
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=64m"   # flow 写法会把逗号当列表分隔符，必须加引号
+    cap_drop: [ALL]
+    security_opt:
+      - "no-new-privileges:true"
+    environment:
+      # 6 = 物理核数。实测 12 线程（超线程）反降到 46.8 chunk/s，别拉满。
+      KATANA_EMBEDDING_THREADS: "6"
+    # 不发布到宿主：只有同网络的 MCP 需要它，少一个对外面。
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:80/health',timeout=5).json().get('ok') else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  wiki:
+    <<: *katana-common
+    container_name: katana-wiki-mcp
+    depends_on:
+      embedding:
+        condition: service_healthy
+    command: ["python", "-m", "katana_wiki_mcp.server"]
+    environment:
+      <<: [*git-identity, *embedding]
+      KATANA_KB_ROOT: /data/wiki
+      KATANA_WIKI_ROOT: /data/wiki
+      KATANA_WIKI_MCP_HOST: 0.0.0.0        # 容器内监听全网卡；对外仅由下面的 ports 绑到 127.0.0.1
+      KATANA_WIKI_MCP_PORT: "5601"
+      PORT_SELF: "5601"          # healthcheck 用；与上面同源，改端口时两处一起改
+    ports: ["127.0.0.1:5601:5601"]
+    volumes:
+      - katana-wiki:/data/wiki
+    healthcheck: &tcp-health
+      # slim 镜像没有 curl，且 MCP 无 /health 路由——用 python 做 TCP 连通性探测。
+      # 探的是「端口在服务」，不是「业务正常」；业务健康由机检与调用方判断。
+      test: ["CMD-SHELL", "python -c \"import socket,os,sys; p=int(os.environ['PORT_SELF']); s=socket.create_connection(('127.0.0.1',p),3); s.close()\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  work-folder:
+    <<: *katana-common
+    container_name: katana-work-folder-mcp
+    depends_on:
+      embedding:
+        condition: service_healthy
+    command: ["python", "-m", "katana_work_folder_mcp.server"]
+    environment:
+      <<: [*git-identity, *embedding]
+      KATANA_KB_ROOT: /data/work-records
+      KATANA_WORK_FOLDER: 智元工作/工作记录
+      KATANA_WORK_FOLDER_MCP_HOST: 0.0.0.0
+      KATANA_WORK_FOLDER_MCP_PORT: "5602"
+      PORT_SELF: "5602"
+    ports: ["127.0.0.1:5602:5602"]
+    volumes:
+      - katana-work-records:/data/work-records
+    healthcheck: *tcp-health
+
+  memory:
+    <<: *katana-common
+    container_name: katana-memory-mcp
+    command: ["python", "-m", "katana_memory_mcp.server"]
+    environment:
+      <<: *git-identity
+      KATANA_MEMORY_DIR: /data/memory
+      KATANA_MEMORY_MCP_HOST: 0.0.0.0
+      KATANA_MEMORY_MCP_PORT: "5605"
+      PORT_SELF: "5605"
+    ports: ["127.0.0.1:5605:5605"]
+    volumes:
+      - katana-memory:/data/memory
+    healthcheck: *tcp-health
+
+volumes:
+  katana-wiki:
+    name: katana-wiki
+  katana-work-records:
+    name: katana-work-records
+  katana-memory:
+    name: katana-memory
