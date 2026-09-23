@@ -17,6 +17,7 @@ A sharp little toolkit of agent plugins（Claude Code + OpenCode 双端）：每
 **[`docs/constitution/`](docs/constitution/)** —— 硬线、纪律、不变量，违反即 REJECT。
 
 - [001 开发纪律](docs/constitution/001-development-discipline.md) —— 分支与合入、CI 三关验收面、生产与 cutover 边界、文档纪律
+- [002 数据面私有](docs/constitution/002-data-plane-privacy.md) —— 三域 data root 只经 MCP：唯一合法写者、只存结论不存运行时产物、爆炸半径匹配作用域、备份与只读运维通道、机检
 
 **[`docs/specs/`](docs/specs/)** —— 设计、规格、spike 结论、runbook。
 
