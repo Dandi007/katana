@@ -1,5 +1,19 @@
 # Errors
 
+## 2026-08-24 14:49 — wf_evidence_put 返回的 commit 不能直接作为后续 wf_save CAS
+
+- 场景：先用 `wf_evidence_put` 写入 E2E evidence，工具返回 `commit=f0e30d5b...`；随后立即把该值作为 `wf_save(expected_base_sha=...)`。
+- 结果：`wf_save` 返回 retryable `BASE_COMMIT_CONFLICT`，提示实际 base 已前进到 `f225f1c0...`；未发生 checkpoint 部分写入。去掉过期 CAS 后以新 idempotency key 重试，保存成功。
+- 根因：`wf_evidence_put` 除 evidence commit 外还会写 folder 内 reference pointer；返回的 `commit` 是中间提交，不是 mutation 完成后的最终 data-repo base。
+- 处置：`wf_evidence_put` 后不得直接复用其 `commit` 作为下一次 mutation 的 CAS；先刷新 lifecycle base，或在单一 owner、紧邻调用时省略该可选 CAS。服务端应返回所有 governed writes 完成后的 final commit。
+
+## 2026-08-24 00:57 — progress 整篇 fs_write 因 append-only changelog 被拒
+
+- 场景：新建 runtime parity audit work folder 后，已先通过 `wf_save` 追加 checkpoint changelog；随后试图用 `fs_write` 整篇更新 `progress.md` 的 Status / Phase / Completed / Current / Next，并在同一 payload 追加一条 progress changelog。
+- 结果：MCP 返回 `POLICY_VIOLATION: progress changelog is append-only`，`ok=false`、`retryable=false`；没有覆盖或损坏既有 progress。
+- 根因：即使正文更新合理，也不能通过整篇 `fs_write` 新增或重放 `## Changelog` 内容；changelog 只允许生命周期工具或专用 append 接口维护。
+- 处置：先 `fs_read` 获取精确正文，仅以 `fs_edit` 替换 `## Changelog` 之前的 Status / Phase / Completed / Current / Next；进展流水改用 `wf_append_progress` 或 `wf_save` 追加，禁止再把自造 changelog 行放进 `fs_write`。
+
 ## 2026-07-10 14:24 — Resume 多文件 patch 因空壳 context 模板漂移失败
 
 - 场景：修复 7/9 KB MCP brainstorm work folder 的空壳 `progress/context/Resume Guide`。
