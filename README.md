@@ -61,7 +61,7 @@ still supports the event, but that path has no live consumer or test.
 **Configuration:**
 
 - `KATANA_PARITY_ROOT` — override katana root path (default: auto-detect from adapter location)
-- `KATANA_DISABLED_PLUGINS` — comma-separated list of plugins to disable (e.g., `feishu-docs,retrieval`)
+- `KATANA_DISABLED_PLUGINS` — comma-separated list of plugins to disable (e.g., `writing,retrieval`)
 
 **Parity verification:**
 
