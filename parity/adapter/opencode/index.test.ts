@@ -56,7 +56,7 @@ describe('KatanaParity adapter', () => {
       }
     });
 
-    // Should spawn session-start hooks for all 6 plugins
+    // Should spawn session-start hooks for all 5 plugins
     expect(mockSpawn).toHaveBeenCalledTimes(5);
 
     // Verify first call is for guide plugin
