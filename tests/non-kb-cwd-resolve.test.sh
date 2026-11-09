@@ -38,16 +38,14 @@ mkdir -p "$KB" "$HOME_DIR" "$CWD"
 # prose (e.g. a SKILL.md naturally containing the word "writing"). These are
 # arbitrary directory names — what matters is that they resolve under kb-root.
 WRITING_REL="kbtest-writing-dir"
-FEISHU_REL="kbtest/feishu-mirror"
 WF_REL="kbtest-work-records"
 
-mkdir -p "$KB/$WRITING_REL" "$KB/$FEISHU_REL"
+mkdir -p "$KB/$WRITING_REL"
 
 # --- user-level ~/.katana with RELATIVE values --------------------------------
 cat > "$HOME_DIR/.katana" <<EOF
 work_folder_path=$WF_REL
 writing_dir=$WRITING_REL
-feishu_docs_root=$FEISHU_REL
 EOF
 
 # Run a single hook in the isolated environment, echo its stdout.
@@ -61,7 +59,7 @@ run_hook() {
         # Defensive: ensure no project-mode / env override bleeds through.
         unset KATANA_CONFIG_FILE CLAUDE_PROJECT_DIR 2>/dev/null || true
         unset KATANA_WORK_FOLDER KATANA_WRITING_DIR 2>/dev/null || true
-        unset KATANA_FEISHU_DOCS_ROOT CLAUDE_MEMORY_PROJECT_DIR 2>/dev/null || true
+        unset CLAUDE_MEMORY_PROJECT_DIR 2>/dev/null || true
         cd "$CWD" || exit 1
         bash "$REPO/plugins/$plugin/hooks/session-start"
     )
@@ -109,11 +107,6 @@ neg_common "work-folder" "$out"
 out="$(run_hook writing)"
 assert_abs_no_bare "writing" "$out" "$WRITING_REL"
 neg_common "writing" "$out"
-
-# feishu-docs
-out="$(run_hook feishu-docs)"
-assert_abs_no_bare "feishu-docs" "$out" "$FEISHU_REL"
-neg_common "feishu-docs" "$out"
 
 # memory is server-owned and deliberately has no KB-root path contract. Verify
 # only deterministic MCP-unavailable injection and the shared leak guards.

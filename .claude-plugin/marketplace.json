@@ -55,13 +55,6 @@
       "homepage": "https://github.com/Dandi007/katana"
     },
     {
-      "name": "feishu-docs",
-      "description": "Mirror Feishu DocX as local block-tree AST (SSoT) + read-only Markdown; one-way pull (P0)",
-      "category": "productivity",
-      "source": "./plugins/feishu-docs",
-      "homepage": "https://github.com/Dandi007/katana"
-    },
-    {
       "name": "incubate",
       "description": "Idea incubator — accrete ideas/commentary/inspiration around one concrete topic into output-ready material for a later propose/design doc; reuses work-folder control files, five modes",
       "category": "productivity",
